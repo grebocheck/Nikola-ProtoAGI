@@ -1,0 +1,46 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Local runtime configuration
+config/protoagi.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Local model/runtime artifacts
+*.gguf
+*.safetensors
+*.bin
+*.pt
+*.pth
+tools/*
+!tools/.gitkeep
+
+# Generated local state
+data/*
+!data/.gitkeep
+runs/*
+!runs/.gitkeep
+
+# Logs and OS/editor files
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
