@@ -54,6 +54,7 @@ SQLite is used for durable memory:
 - `facts` for long-term facts
 - `messages` for thread history
 - `tool_events` for auditability
+- `telegram_chats` and `telegram_messages` for Telegram state and message IDs
 - optional FTS5 table for fast recall
 
 Embeddings are intentionally deferred. SQLite FTS gives us a transparent and
@@ -77,17 +78,35 @@ Future evals should add task suites for:
 
 ## 7. Telegram Layer
 
-`protoagi.telegram_bot` runs a Telegram personality named Микола.
+`protoagi.telegram_bot` runs a Telegram conversation profile selected through
+`.env`:
+
+- `mykola` - calm, grounded, practical
+- `solomiya` - warmer, self-possessed, more relational
 
 It deliberately uses a narrower surface than the workspace agent:
 
 - official Bot API long polling with `getUpdates`
 - text sending with `sendMessage`
 - typing indicator with `sendChatAction`
+- sticker set discovery with `getStickerSet`
+- sticker sending with `sendSticker`
 - chat-scoped memory in SQLite
+- persona-scoped long-term facts and recent thread history
+- Telegram message ID history for intentional replies
 - reply policy: `smart`, `always`, `mention`, or `silent`
 - bounded proactive messages for chats that already know the bot
 
 Telegram does not allow a bot to open a brand-new private chat by itself. The
 initiative loop therefore only works for chats that previously contacted the bot
 or added it.
+
+Replies are not automatic. The model must ask for `reply_to` with `current` or a
+recent Telegram `message_id`; otherwise responses are sent as regular messages.
+
+Profiles are intentionally deeper than a display name. The active profile
+changes the system prompt, aliases, self-model, user model, relationship stance,
+memory policy, fact tags, thread IDs, and Telegram message history exposed back
+to the model. Switching from `mykola` to `solomiya` therefore starts from a
+separate conversational memory instead of wearing a new name over the same
+context.

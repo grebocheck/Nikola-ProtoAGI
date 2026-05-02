@@ -9,7 +9,7 @@ for iterating toward stronger autonomy on limited local hardware:
 - tool-using agent loop
 - SQLite long-term memory with FTS search
 - workspace, shell, web, and GPU inspection tools
-- Telegram conversation mode as Микола
+- Telegram conversation mode with deep profiles for Микола or Соломія
 - benchmark scripts and repeatable launch profiles
 
 ## Hardware target
@@ -63,8 +63,15 @@ inside this workspace. Destructive command patterns are still blocked unless
 
 ## Telegram mode
 
-Микола is the Telegram-facing personality for the system. Start the model server,
-create a bot with `@BotFather`, then run:
+Telegram mode uses a profile selected in `.env`. Start with `mykola` or switch
+to `solomiya` for a separate identity, memory namespace, user model, and
+conversation style:
+
+```env
+PROTOAGI_TELEGRAM_PERSONA=solomiya
+```
+
+Start the model server, create a bot with `@BotFather`, then run:
 
 ```powershell
 $env:TELEGRAM_BOT_TOKEN="123456:ABC..."
@@ -84,14 +91,19 @@ There is also a root convenience launcher:
 .\run-nikola.bat
 ```
 
-Useful commands inside Telegram:
+Stop the Telegram process for this workspace:
 
-- `/remember text`
-- `/recall query`
-- `/quiet`
-- `/wake`
-- `/mode smart|always|mention|silent`
-- `/status`
+```powershell
+.\stop-nikola.bat
+```
+
+The bot is intentionally conversation-first: profile switching and behavior are
+configured through `.env`, not Telegram commands. `/start` only registers the
+chat and greets with the active profile.
+
+The active profile can also use stickers from `Bocchi_the_Rock_sticker_pack2`,
+`SenkoSan`, and `M1ku_Hatsune`. It sends normal messages by default and uses
+Telegram reply only when referring to a specific current or recent message.
 
 More details: [docs/TELEGRAM.md](docs/TELEGRAM.md).
 

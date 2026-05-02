@@ -32,6 +32,62 @@ class MemoryStoreTests(unittest.TestCase):
             hits = memory.search_tagged("likes", "telegram_chat_12", limit=5)
             self.assertEqual([hit.text for hit in hits], ["chat twelve likes tea"])
 
+    def test_search_tagged_all_requires_persona_namespace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            memory.remember("likes calm morning notes", ["telegram_chat_123", "nikola"])
+            memory.remember("likes playful morning notes", ["telegram_chat_123", "solomiya"])
+            hits = memory.search_tagged_all("morning", ["telegram_chat_123", "solomiya"], limit=5)
+            self.assertEqual([hit.text for hit in hits], ["likes playful morning notes"])
+
+    def test_recent_telegram_messages_include_message_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            memory.log_telegram_message(
+                chat_id=123,
+                message_id=10,
+                role="user",
+                sender_id=1,
+                sender_name="Vadim",
+                text="hello",
+            )
+            memory.log_telegram_message(
+                chat_id=123,
+                message_id=11,
+                role="assistant",
+                sender_id=None,
+                sender_name="Nikola",
+                text="hi",
+            )
+            self.assertEqual(
+                [(item["message_id"], item["text"]) for item in memory.recent_telegram_messages(123)],
+                [(10, "hello"), (11, "hi")],
+            )
+
+    def test_recent_telegram_messages_can_filter_persona(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            memory.log_telegram_message(
+                chat_id=123,
+                message_id=10,
+                persona_key="mykola",
+                role="assistant",
+                sender_id=None,
+                sender_name="Микола",
+                text="calm",
+            )
+            memory.log_telegram_message(
+                chat_id=123,
+                message_id=11,
+                persona_key="solomiya",
+                role="assistant",
+                sender_id=None,
+                sender_name="Соломія",
+                text="warm",
+            )
+            hits = memory.recent_telegram_messages(123, persona_key="solomiya")
+            self.assertEqual([(item["persona_key"], item["text"]) for item in hits], [("solomiya", "warm")])
+
 
 if __name__ == "__main__":
     unittest.main()

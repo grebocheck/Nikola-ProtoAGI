@@ -9,6 +9,7 @@ from protoagi.telegram_bot import (
     TelegramConfig,
     decision_from_payload,
     extract_json_object,
+    normalize_sticker_pack,
     parse_command,
     split_telegram_message,
 )
@@ -17,6 +18,7 @@ from protoagi.telegram_bot import (
 class FakeTelegram:
     def __init__(self) -> None:
         self.sent: list[dict] = []
+        self.stickers: list[dict] = []
         self.actions: list[dict] = []
         self.updates: list[dict] = []
 
@@ -44,12 +46,34 @@ class FakeTelegram:
         )
         return {"message_id": len(self.sent)}
 
+    def get_sticker_set(self, name):
+        return {
+            "name": name,
+            "stickers": [
+                {"file_id": f"{name}:smile", "emoji": "🙂"},
+                {"file_id": f"{name}:spark", "emoji": "✨"},
+            ],
+        }
+
+    def send_sticker(self, chat_id, sticker, *, reply_to_message_id=None, disable_notification=False):
+        self.stickers.append(
+            {
+                "chat_id": str(chat_id),
+                "sticker": sticker,
+                "reply_to_message_id": reply_to_message_id,
+                "disable_notification": disable_notification,
+            }
+        )
+        return {"message_id": 100 + len(self.stickers)}
+
 
 class FakeLLM:
     def __init__(self, content: str) -> None:
         self.content = content
+        self.messages = []
 
     def chat_completion(self, messages, **kwargs):
+        self.messages.append(messages)
         return {"choices": [{"message": {"content": self.content}}]}
 
 
@@ -62,9 +86,22 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(extract_json_object('```json\n{"should_reply": true}\n```'), {"should_reply": True})
 
     def test_decision_from_payload(self) -> None:
-        decision = decision_from_payload({"should_reply": True, "reply": "Так", "memories": ["любить чай"]})
+        decision = decision_from_payload(
+            {
+                "should_reply": True,
+                "reply": "Так",
+                "reply_to": "current",
+                "stickers": [{"pack": "miku", "emoji": "✨", "reason": "playful"}],
+                "memories": ["любить чай"],
+            }
+        )
         self.assertTrue(decision.should_reply)
+        self.assertEqual(decision.reply_to, "current")
+        self.assertEqual(decision.stickers[0]["pack"], "M1ku_Hatsune")
         self.assertEqual(decision.memories, ["любить чай"])
+
+    def test_normalize_sticker_pack_alias(self) -> None:
+        self.assertEqual(normalize_sticker_pack("senko"), "SenkoSan")
 
     def test_split_telegram_message(self) -> None:
         chunks = split_telegram_message("a" * 20, max_chars=8)
@@ -99,11 +136,123 @@ class TelegramBotTests(unittest.TestCase):
             )
             self.assertTrue(processed)
             self.assertEqual(telegram.sent[0]["text"], "Привіт, я тут.")
-            hits = memory.search_tagged("спокійні", "telegram_chat_123")
+            self.assertIsNone(telegram.sent[0]["reply_to_message_id"])
+            hits = memory.search_tagged_all("спокійні", ["telegram_chat_123", "nikola"])
             self.assertEqual(len(hits), 1)
             chat = memory.get_telegram_chat("123")
             self.assertIsNotNone(chat)
             self.assertIsNotNone(chat.next_initiative_at)
+
+    def test_process_update_can_reply_to_current_and_send_sticker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": true, "reply": "Оце повідомлення прямо в точку.", '
+                '"reply_to": "current", '
+                '"stickers": [{"pack": "SenkoSan", "emoji": "🙂", "reason": "warm"}], '
+                '"memories": [], "next_check_minutes": 60}'
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(token="token"),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.bootstrap()
+            processed = bot.process_update(
+                {
+                    "update_id": 2,
+                    "message": {
+                        "message_id": 77,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "text": "Миколо, глянь сюди",
+                    },
+                }
+            )
+            self.assertTrue(processed)
+            self.assertEqual(telegram.sent[0]["reply_to_message_id"], 77)
+            self.assertEqual(telegram.stickers[0]["sticker"], "SenkoSan:smile")
+
+    def test_solomiya_profile_changes_identity_and_memory_namespace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            memory.remember("Микола знає про ранкову каву", ["telegram_chat_123", "nikola"])
+            memory.remember("Соломія знає про вечірній чай", ["telegram_chat_123", "solomiya"])
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": true, "reply": "Я тут, і звучить цікаво.", '
+                '"memories": ["Користувач любить живі розмови"], "next_check_minutes": 60}'
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(token="token", persona_key="solomiya"),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.bootstrap()
+            processed = bot.process_update(
+                {
+                    "update_id": 3,
+                    "message": {
+                        "message_id": 88,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "text": "Соломіє, памʼятаєш чай?",
+                    },
+                }
+            )
+            self.assertTrue(processed)
+            self.assertEqual(bot.telegram_config.bot_name, "Соломія")
+            self.assertEqual(bot.thread_id("123"), "telegram:solomiya:123")
+            payload = llm.messages[0][1]["content"]
+            self.assertIn('"display_name": "Соломія"', payload)
+            self.assertIn("вечірній чай", payload)
+            self.assertNotIn("ранкову каву", payload)
+            hits = memory.search_tagged_all("живі", ["telegram_chat_123", "solomiya"])
+            self.assertEqual(len(hits), 1)
+
+    def test_solomiya_addressing_uses_her_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = NikolaBot(
+                telegram=FakeTelegram(),
+                llm=FakeLLM("{}"),
+                memory=MemoryStore(Path(tmp) / "memory.sqlite3"),
+                telegram_config=TelegramConfig(token="token", persona_key="solomiya"),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            self.assertTrue(bot._is_addressed("Соломіє, привіт", {}))
+            self.assertFalse(bot._is_addressed("Миколо, привіт", {}))
+
+    def test_start_uses_active_persona_without_command_menu(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=FakeLLM("{}"),
+                memory=memory,
+                telegram_config=TelegramConfig(token="token", persona_key="solomiya"),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.bootstrap()
+            processed = bot.process_update(
+                {
+                    "update_id": 4,
+                    "message": {
+                        "message_id": 89,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "text": "/start",
+                    },
+                }
+            )
+            self.assertTrue(processed)
+            self.assertIn("Соломія", telegram.sent[0]["text"])
+            self.assertNotIn("/remember", telegram.sent[0]["text"])
 
 
 if __name__ == "__main__":

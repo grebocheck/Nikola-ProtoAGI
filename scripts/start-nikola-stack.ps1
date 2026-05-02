@@ -8,6 +8,7 @@ param(
     [int]$CpuMoE = 4,
     [switch]$FullGpu,
     [switch]$NoProactive,
+    [switch]$Once,
     [switch]$DeleteWebhook,
     [switch]$DropPendingUpdates
 )
@@ -69,21 +70,27 @@ if (-not (Test-ProtoAgiServer)) {
     }
 }
 
-$TelegramArgs = @("-ReplyMode", $ReplyMode)
-if ($Token -ne "") {
-    $TelegramArgs += @("-Token", $Token)
+$TelegramParams = @{}
+if ($PSBoundParameters.ContainsKey("ReplyMode")) {
+    $TelegramParams.ReplyMode = $ReplyMode
 }
-if ($AllowedChatId -ne "") {
-    $TelegramArgs += @("-AllowedChatId", $AllowedChatId)
+if (-not [string]::IsNullOrWhiteSpace($Token)) {
+    $TelegramParams.Token = $Token
+}
+if (-not [string]::IsNullOrWhiteSpace($AllowedChatId)) {
+    $TelegramParams.AllowedChatId = $AllowedChatId
 }
 if ($NoProactive) {
-    $TelegramArgs += "-NoProactive"
+    $TelegramParams.NoProactive = $true
+}
+if ($Once) {
+    $TelegramParams.Once = $true
 }
 if ($DeleteWebhook) {
-    $TelegramArgs += "-DeleteWebhook"
+    $TelegramParams.DeleteWebhook = $true
 }
 if ($DropPendingUpdates) {
-    $TelegramArgs += "-DropPendingUpdates"
+    $TelegramParams.DropPendingUpdates = $true
 }
 
-& (Join-Path $PSScriptRoot "start-telegram.ps1") @TelegramArgs
+& (Join-Path $PSScriptRoot "start-telegram.ps1") @TelegramParams

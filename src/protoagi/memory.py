@@ -41,6 +41,18 @@ class TelegramChat:
     metadata: dict[str, Any]
 
 
+@dataclass(slots=True)
+class TelegramMessage:
+    chat_id: str
+    message_id: int
+    role: str
+    sender_id: str | None
+    sender_name: str
+    text: str
+    created_at: str
+    metadata: dict[str, Any]
+
+
 class MemoryStore:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -126,6 +138,23 @@ class MemoryStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_messages (
+                    chat_id TEXT NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    persona_key TEXT NOT NULL DEFAULT 'mykola',
+                    role TEXT NOT NULL,
+                    sender_id TEXT,
+                    sender_name TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    metadata TEXT NOT NULL DEFAULT '{}',
+                    PRIMARY KEY (chat_id, message_id)
+                )
+                """
+            )
+            self._ensure_column(conn, "telegram_messages", "persona_key", "TEXT NOT NULL DEFAULT 'mykola'")
             try:
                 conn.execute(
                     """
@@ -197,27 +226,36 @@ class MemoryStore:
         ]
 
     def search_tagged(self, query: str, tag: str, *, limit: int = 5) -> list[MemoryFact]:
+        return self.search_tagged_all(query, [tag], limit=limit)
+
+    def search_tagged_all(self, query: str, tags: list[str], *, limit: int = 5) -> list[MemoryFact]:
+        required_tags = [tag for tag in tags if tag]
+        if not required_tags:
+            return self.search(query, limit=limit)
         hits = self.search(query, limit=max(limit * 4, 20))
-        scoped = [fact for fact in hits if tag in fact.tags]
+        scoped = [fact for fact in hits if all(tag in fact.tags for tag in required_tags)]
         if len(scoped) >= limit:
             return scoped[:limit]
+        tag_clauses = " AND ".join("tags LIKE ?" for _ in required_tags)
+        params: list[Any] = [f"%{tag}%" for tag in required_tags]
+        params.extend([f"%{query}%", f"%{query}%", max(limit * 4, 20)])
         with self.connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT id, text, tags, created_at
                 FROM facts
-                WHERE tags LIKE ? AND (text LIKE ? OR tags LIKE ?)
+                WHERE {tag_clauses} AND (text LIKE ? OR tags LIKE ?)
                 ORDER BY id DESC
                 LIMIT ?
                 """,
-                (f"%{tag}%", f"%{query}%", f"%{query}%", limit),
+                tuple(params),
             ).fetchall()
         seen = {fact.id for fact in scoped}
         for row in rows:
             if int(row["id"]) in seen:
                 continue
             tags = json.loads(row["tags"])
-            if tag not in tags:
+            if not all(tag in tags for tag in required_tags):
                 continue
             scoped.append(
                 MemoryFact(
@@ -428,6 +466,91 @@ class MemoryStore:
                 """,
                 (next_at, utc_now(), str(chat_id)),
             )
+
+    def log_telegram_message(
+        self,
+        *,
+        chat_id: str | int,
+        message_id: int,
+        role: str,
+        sender_id: str | int | None,
+        sender_name: str,
+        text: str,
+        persona_key: str = "mykola",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO telegram_messages(
+                    chat_id, message_id, persona_key, role, sender_id, sender_name, text, created_at, metadata
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id, message_id) DO UPDATE SET
+                    persona_key = excluded.persona_key,
+                    role = excluded.role,
+                    sender_id = excluded.sender_id,
+                    sender_name = excluded.sender_name,
+                    text = excluded.text,
+                    metadata = excluded.metadata
+                """,
+                (
+                    str(chat_id),
+                    int(message_id),
+                    persona_key,
+                    role,
+                    None if sender_id is None else str(sender_id),
+                    sender_name,
+                    text,
+                    utc_now(),
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                ),
+            )
+
+    def recent_telegram_messages(
+        self,
+        chat_id: str | int,
+        *,
+        limit: int = 12,
+        persona_key: str | None = None,
+    ) -> list[dict[str, Any]]:
+        where = "chat_id = ?"
+        params: list[Any] = [str(chat_id)]
+        if persona_key:
+            where += " AND persona_key = ?"
+            params.append(persona_key)
+        params.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT chat_id, message_id, persona_key, role, sender_id, sender_name, text, created_at, metadata
+                FROM telegram_messages
+                WHERE {where}
+                ORDER BY message_id DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return [
+            {
+                "chat_id": str(row["chat_id"]),
+                "message_id": int(row["message_id"]),
+                "persona_key": str(row["persona_key"]),
+                "role": str(row["role"]),
+                "sender_id": row["sender_id"],
+                "sender_name": str(row["sender_name"]),
+                "text": str(row["text"]),
+                "created_at": str(row["created_at"]),
+                "metadata": json.loads(row["metadata"] or "{}"),
+            }
+            for row in reversed(rows)
+        ]
+
+    @staticmethod
+    def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     @staticmethod
     def _make_fts_query(query: str) -> str:

@@ -11,7 +11,7 @@ from .config import AgentConfig, DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PATH, LlamaS
 from .memory import MemoryStore
 from .openai_compat import OpenAICompatibleClient, OpenAICompatError
 from .runtime import run_server_foreground, status_report
-from .telegram_bot import TelegramConfig, build_nikola_bot
+from .telegram_bot import TelegramApiError, TelegramConfig, build_nikola_bot
 from .tools import default_registry
 
 
@@ -57,7 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
     init = sub.add_parser("init-config", help="Create config/protoagi.json from defaults")
     init.add_argument("--force", action="store_true")
 
-    telegram = sub.add_parser("telegram", help="Run Nikola, the Telegram conversation bot")
+    telegram = sub.add_parser("telegram", help="Run the Telegram conversation bot")
     telegram.add_argument("--token", default=None, help="Telegram bot token, defaults to TELEGRAM_BOT_TOKEN")
     telegram.add_argument("--allowed-chat-id", action="append", default=[])
     telegram.add_argument("--reply-mode", choices=["smart", "always", "mention", "silent"], default=None)
@@ -243,8 +243,9 @@ def cmd_telegram(args: argparse.Namespace) -> int:
     bot = build_nikola_bot(agent_config=agent_config, telegram_config=telegram_config)
     me = bot.bootstrap(delete_webhook=args.delete_webhook, drop_pending_updates=args.drop_pending_updates)
     print(
-        f"Микола online as @{me.get('username', 'unknown')} | "
-        f"reply_mode={telegram_config.reply_mode} | proactive={telegram_config.proactive_enabled}"
+        f"{telegram_config.bot_name} online as @{me.get('username', 'unknown')} | "
+        f"persona={telegram_config.persona_key} | reply_mode={telegram_config.reply_mode} | "
+        f"proactive={telegram_config.proactive_enabled}"
     )
     if args.once:
         processed = bot.poll_once()
@@ -276,6 +277,17 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_telegram(args)
     except OpenAICompatError as exc:
         print(f"OpenAI-compatible endpoint error: {exc}", file=sys.stderr)
+        return 2
+    except TelegramApiError as exc:
+        message = str(exc)
+        if "409" in message and "getUpdates" in message:
+            print(
+                "Telegram polling conflict: another Telegram bot instance is already running for this token.",
+                file=sys.stderr,
+            )
+            print("Stop the other instance before starting a new one.", file=sys.stderr)
+        else:
+            print(f"Telegram API error: {exc}", file=sys.stderr)
         return 2
     except FileNotFoundError as exc:
         print(f"Missing file: {exc}", file=sys.stderr)
