@@ -36,7 +36,8 @@ $Args = @(
     "--temp", "1.0",
     "--top-p", "1.0",
     "--reasoning", "auto",
-    "--reasoning-format", "deepseek"
+    "--reasoning-format", "deepseek",
+    "--skip-chat-parsing"
 )
 
 if (-not $FullGpu) {

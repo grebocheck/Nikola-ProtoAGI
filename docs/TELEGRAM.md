@@ -2,7 +2,7 @@
 
 Telegram mode runs ProtoAGI as a conversation bot with a profile selected from
 `.env`. The default profile is `mykola`; `solomiya` is available as a more
-self-possessed, warmer profile with separate memory.
+self-possessed, warmer profile over the same shared Telegram memory.
 
 ## Telegram limits
 
@@ -99,8 +99,8 @@ The active profile affects:
 - aliases used to detect direct address in groups
 - system prompts and decision style
 - how the bot models the user and the relationship
-- long-term memory namespace
-- recent conversation thread history
+- how it writes into the shared Telegram memory
+- shared recent conversation thread history
 - Telegram message history exposed to the model for intentional replies
 
 `/start` is still accepted because Telegram uses it to register a chat, but the

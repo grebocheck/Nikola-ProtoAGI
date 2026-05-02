@@ -123,6 +123,7 @@ class LlamaServerProfile:
     n_cpu_moe: int | None = 4
     flash_attn: str = "on"
     jinja: bool = True
+    skip_chat_parsing: bool = True
     reasoning: str = "auto"
     reasoning_format: str = "deepseek"
     temperature: float = 1.0
@@ -170,6 +171,10 @@ class LlamaServerProfile:
             cmd.append("--jinja")
         else:
             cmd.append("--no-jinja")
+        if self.skip_chat_parsing:
+            cmd.append("--skip-chat-parsing")
+        else:
+            cmd.append("--no-skip-chat-parsing")
         if self.n_cpu_moe is not None:
             cmd.extend(["--n-cpu-moe", str(self.n_cpu_moe)])
         return cmd

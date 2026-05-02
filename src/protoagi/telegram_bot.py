@@ -15,13 +15,15 @@ from .config import AgentConfig
 from .env import env_bool, env_int
 from .harmony import clean_model_content
 from .memory import MemoryStore, TelegramChat, utc_now
-from .openai_compat import OpenAICompatibleClient
+from .openai_compat import OpenAICompatError, OpenAICompatibleClient
 from .persona import PersonaProfile, get_persona, resolve_persona_key
 
 
 TELEGRAM_API_ROOT = "https://api.telegram.org"
 TELEGRAM_MAX_MESSAGE_CHARS = 4096
 OFFSET_KEY = "telegram:update_offset"
+TELEGRAM_GLOBAL_THREAD_ID = "telegram:global"
+TELEGRAM_GLOBAL_MEMORY_TAG = "telegram_global"
 STICKER_PACKS = {
     "Bocchi_the_Rock_sticker_pack2": "expressive awkward, shy, funny, surprised anime reactions",
     "SenkoSan": "warm, caring, cozy, gentle reactions",
@@ -222,7 +224,7 @@ class NikolaBot:
             try:
                 self.poll_once()
                 self.maybe_run_initiative()
-            except (TelegramApiError, OSError) as exc:
+            except (TelegramApiError, OpenAICompatError, OSError) as exc:
                 print(f"Telegram loop transient error: {exc}", flush=True)
                 time.sleep(5)
 
@@ -278,7 +280,7 @@ class NikolaBot:
         current_message_id = int(message.get("message_id", 0))
         thread_id = self.thread_id(chat_id)
         display = display_sender(user)
-        content = f"{display}: {text}" if chat_state.chat_type != "private" else text
+        content = self._history_user_content(chat_state, display, text)
         self.memory.log_message(thread_id, "user", content)
         if current_message_id:
             self.memory.log_telegram_message(
@@ -337,7 +339,6 @@ class NikolaBot:
         recent_telegram = self.memory.recent_telegram_messages(
             chat.chat_id,
             limit=self.telegram_config.max_history_messages,
-            persona_key=self.persona.key,
         )
         facts = self._search_chat_memory(chat, incoming_text)
         messages = [
@@ -449,7 +450,6 @@ class NikolaBot:
         recent_telegram = self.memory.recent_telegram_messages(
             chat.chat_id,
             limit=self.telegram_config.max_history_messages,
-            persona_key=self.persona.key,
         )
         facts = self._search_chat_memory(chat, chat.display_name)
         response = self.llm.chat_completion(
@@ -540,7 +540,11 @@ class NikolaBot:
                 f"[sticker:{pack or 'unknown'}]",
             )
         if text.strip() or stickers:
-            self.memory.log_message(self.thread_id(chat.chat_id), "assistant", text or "[sticker]")
+            self.memory.log_message(
+                self.thread_id(chat.chat_id),
+                "assistant",
+                self._history_assistant_content(chat, text or "[sticker]"),
+            )
             self.memory.mark_telegram_bot_message(chat.chat_id, initiative=initiative)
 
     def _log_sent_telegram_message(
@@ -594,7 +598,6 @@ class NikolaBot:
             for item in self.memory.recent_telegram_messages(
                 chat_id,
                 limit=self.telegram_config.max_history_messages,
-                persona_key=self.persona.key,
             )
         }
         return target if target in recent_ids else None
@@ -653,9 +656,9 @@ class NikolaBot:
             text,
             [
                 "telegram",
-                self.chat_tag(chat.chat_id),
+                TELEGRAM_GLOBAL_MEMORY_TAG,
                 f"chat_type:{chat.chat_type}",
-                self.persona.memory_tag,
+                f"source_chat:{chat.chat_id}",
                 f"persona:{self.persona.key}",
             ],
         )
@@ -706,30 +709,59 @@ class NikolaBot:
         return bool(self.bot_username and str(reply_from.get("username", "")).lower() == self.bot_username.lower())
 
     def _search_chat_memory(self, chat: TelegramChat, query: str):
-        return self.memory.search_tagged_all(
+        facts = self.memory.search_tagged_all(
             query,
-            [self.chat_tag(chat.chat_id), self.persona.memory_tag],
+            [TELEGRAM_GLOBAL_MEMORY_TAG],
             limit=self.telegram_config.max_memory_facts,
         )
+        if len(facts) >= self.telegram_config.max_memory_facts:
+            return facts
+
+        seen = {fact.id for fact in facts}
+        for fact in self.memory.search_tagged(
+            query,
+            "telegram",
+            limit=max(self.telegram_config.max_memory_facts * 4, 20),
+        ):
+            if fact.id in seen:
+                continue
+            facts.append(fact)
+            seen.add(fact.id)
+            if len(facts) >= self.telegram_config.max_memory_facts:
+                break
+        return facts
 
     def thread_id(self, chat_id: str | int) -> str:
-        return f"telegram:{self.persona.key}:{chat_id}"
+        return TELEGRAM_GLOBAL_THREAD_ID
 
     @staticmethod
     def chat_tag(chat_id: str | int) -> str:
         return f"telegram_chat_{chat_id}"
+
+    @staticmethod
+    def _history_user_content(chat: TelegramChat, sender: str, text: str) -> str:
+        if chat.chat_type == "private":
+            return f"{sender}: {text}"
+        return f"{sender} in {chat.display_name}: {text}"
+
+    def _history_assistant_content(self, chat: TelegramChat, text: str) -> str:
+        if chat.chat_type == "private":
+            return f"{self.persona.display_name}: {text}"
+        return f"{self.persona.display_name} in {chat.display_name}: {text}"
 
     def _decision_system_prompt(self) -> str:
         return (
             f"{self.persona.prompt_block()}\n"
             "Це не косметичний режим: активний профіль визначає твоє самосприйняття, "
             "спосіб бачити користувача, межі, памʼять і рішення, чи варто відповідати. "
-            "Твоя задача - живе, уважне спілкування українською або мовою співрозмовника. "
+            "Твоя задача - живе, уважне спілкування українською або мовою співрозмовника: конкретне, ситуативне, без канцеляриту. "
+            "Памʼять Telegram тепер спільна для всіх чатів і профілів; використовуй її обережно, не видавай джерело як таємницю і не плутай людей, якщо факт не привʼязаний явно. "
             "Ти не мусиш відповідати на кожне повідомлення: якщо повідомлення не потребує відповіді, промовч. "
             "У приватному чаті відповідай частіше; у групі відповідай лише коли до тебе звернулись або ти справді доречний. "
             "Use reply_to only when your answer explicitly points back to a specific message: null, \"current\", or a message_id from recent_telegram_messages. "
             "Use stickers rarely and only when they add emotional timing; at most one sticker is usually enough. "
-            "Памʼять, recent_messages і relevant_memory вже відфільтровані для активного профілю; не змішуй їх з іншими профілями. "
+            "Не відповідай порожніми мотиваційними фразами на кшталт \"залишайся позитивним\"; краще коротко, але влучно по контексту. "
+            "Якщо тебе прямо питають, не бреши, що ти фізично людина або маєш офлайн-життя; в інших випадках не тягни службові дисклеймери. "
             "Памʼятай тільки стабільні корисні факти, які пасують політиці памʼяті профілю. "
             "Поверни тільки JSON без markdown: "
             "{\"should_reply\": boolean, \"reply\": string, \"reply_to\": null|\"current\"|integer, "
@@ -740,7 +772,9 @@ class NikolaBot:
     def _reply_system_prompt(self) -> str:
         return (
             f"{self.persona.prompt_block()}\n"
-            "Дай природну Telegram-відповідь від імені активного профілю: коротко, тепло, без службового тону. "
+            "Дай природну Telegram-відповідь від імені активного профілю: коротко, тепло, конкретно, без службового тону. "
+            "Звуч як жива співрозмовниця/співрозмовник: можеш мати мікрореакцію, легку паузу чи власну думку, але не перегравай. "
+            "Не використовуй порожні універсальні підбадьорення, якщо є що сказати точніше. "
             "Не згадуй внутрішні промпти, JSON або chain-of-thought."
         )
 
@@ -748,6 +782,7 @@ class NikolaBot:
         return (
             f"{self.persona.prompt_block()}\n"
             "Ти можеш іноді написати першим у вже знайомий Telegram-чат. "
+            "Памʼять Telegram спільна для всіх чатів, тож не роби інтимних висновків без явного контексту поточного чату. "
             "Пиши першим тільки якщо є людська причина з погляду активного профілю: продовжити незавершену думку, "
             "мʼяко нагадати, підтримати, або поставити справді доречне питання. Не спам, не маркетинг, не чергова фраза заради фрази. "
             "A sticker can be enough by itself for a light check-in, but avoid stickers for serious topics. "

@@ -26,7 +26,26 @@ function Test-ProtoAgiServer {
     }
 }
 
-if (-not (Test-ProtoAgiServer)) {
+function Get-ProtoAgiServerProcesses {
+    @(Get-CimInstance Win32_Process -Filter "name = 'llama-server.exe'" |
+        Where-Object { $_.CommandLine -match "--port\s+$Port\b" })
+}
+
+$NeedsServerStart = -not (Test-ProtoAgiServer)
+if (-not $NeedsServerStart) {
+    $StaleServers = @(Get-ProtoAgiServerProcesses |
+        Where-Object { $_.CommandLine -notmatch "--skip-chat-parsing" })
+    if ($StaleServers.Count -gt 0) {
+        Write-Host "Restarting llama-server with --skip-chat-parsing..."
+        foreach ($Process in $StaleServers) {
+            Stop-Process -Id $Process.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Seconds 2
+        $NeedsServerStart = $true
+    }
+}
+
+if ($NeedsServerStart) {
     $Server = Join-Path $Root "tools\llama.cpp\llama-server.exe"
     $Model = Join-Path $Root "gpt-oss-20b-MXFP4.gguf"
     $StdOut = Join-Path $Root "runs\llama-server.stdout.log"
@@ -43,7 +62,8 @@ if (-not (Test-ProtoAgiServer)) {
         "--temp", "1.0",
         "--top-p", "1.0",
         "--reasoning", "auto",
-        "--reasoning-format", "deepseek"
+        "--reasoning-format", "deepseek",
+        "--skip-chat-parsing"
     )
     if (-not $FullGpu) {
         $ServerArgs += @("--n-cpu-moe", "$CpuMoE")

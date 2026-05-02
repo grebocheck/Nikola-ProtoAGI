@@ -9,8 +9,10 @@
 This profile keeps several early MoE layers on CPU. It is slower than full GPU
 but safer on 16 GB VRAM under Windows.
 
-The launch script uses `--reasoning-format deepseek` so internal reasoning is
-returned separately by llama.cpp instead of leaking into `message.content`.
+The launch script uses `--skip-chat-parsing` because recent `llama-server`
+builds can fail with HTTP 500 when the gpt-oss Harmony parser sees constrained
+final-channel JSON. The client sanitizes Harmony tokens from `message.content`
+and extracts the final JSON/text itself.
 
 ## If VRAM is comfortable
 

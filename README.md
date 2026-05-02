@@ -64,8 +64,8 @@ inside this workspace. Destructive command patterns are still blocked unless
 ## Telegram mode
 
 Telegram mode uses a profile selected in `.env`. Start with `mykola` or switch
-to `solomiya` for a separate identity, memory namespace, user model, and
-conversation style:
+to `solomiya` for a separate identity, user model, and conversation style.
+Telegram memory is shared globally across chats and profiles:
 
 ```env
 PROTOAGI_TELEGRAM_PERSONA=solomiya

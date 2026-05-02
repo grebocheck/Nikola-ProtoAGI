@@ -22,15 +22,15 @@ or secrets.
 - Added `.env.example` for shareable settings and `.env` for local-only values.
 - Added a dependency-free `.env` loader.
 - Added Windows and POSIX convenience launch scripts.
-- Fixed chat-scoped memory search to require exact tags and avoid accidental
+- Fixed legacy chat-scoped memory search to require exact tags and avoid accidental
   cross-chat matches such as `telegram_chat_12` vs `telegram_chat_123`.
 - Hardened Telegram env parsing so invalid integers or reply modes fall back to
   safe defaults.
 - Made the Telegram polling loop resilient to transient Telegram/network errors.
 - Changed Telegram replies from always-on to explicit `reply_to` decisions.
 - Added sticker support through sticker set discovery and cached file IDs.
-- Added deep Telegram profiles for `mykola` and `solomiya`, with profile-scoped
-  prompts, aliases, thread history, Telegram message history, and memory tags.
+- Added deep Telegram profiles for `mykola` and `solomiya`, with profile-specific
+  prompts and aliases over shared Telegram memory and thread history.
 - Removed Telegram command-based control from the conversational surface; runtime
   behavior and persona are configured through `.env`.
 
@@ -43,9 +43,9 @@ or secrets.
   build the runtime again.
 - The local SQLite database is ignored. This is correct for git, but production
   deployments need backup/export if memory matters.
-- Switching profiles intentionally changes the visible memory namespace. Shared
-  operational chat state remains in SQLite, but remembered facts and model
-  dialogue history are profile-scoped.
+- Telegram remembered facts and compact model dialogue history are shared
+  globally. This is intentional for a single-owner bot, but multi-user
+  deployments need an explicit privacy policy before enabling broad access.
 - The model file is ignored. Document or script model acquisition before sharing
   the repo with another machine.
 - The agent has a safe shell policy, but enabling `--allow-unsafe-shell` remains

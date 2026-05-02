@@ -6,6 +6,8 @@ from protoagi.config import AgentConfig
 from protoagi.memory import MemoryStore
 from protoagi.telegram_bot import (
     NikolaBot,
+    TELEGRAM_GLOBAL_MEMORY_TAG,
+    TELEGRAM_GLOBAL_THREAD_ID,
     TelegramConfig,
     decision_from_payload,
     extract_json_object,
@@ -137,7 +139,7 @@ class TelegramBotTests(unittest.TestCase):
             self.assertTrue(processed)
             self.assertEqual(telegram.sent[0]["text"], "Привіт, я тут.")
             self.assertIsNone(telegram.sent[0]["reply_to_message_id"])
-            hits = memory.search_tagged_all("спокійні", ["telegram_chat_123", "nikola"])
+            hits = memory.search_tagged_all("спокійні", [TELEGRAM_GLOBAL_MEMORY_TAG])
             self.assertEqual(len(hits), 1)
             chat = memory.get_telegram_chat("123")
             self.assertIsNotNone(chat)
@@ -176,11 +178,20 @@ class TelegramBotTests(unittest.TestCase):
             self.assertEqual(telegram.sent[0]["reply_to_message_id"], 77)
             self.assertEqual(telegram.stickers[0]["sticker"], "SenkoSan:smile")
 
-    def test_solomiya_profile_changes_identity_and_memory_namespace(self) -> None:
+    def test_solomiya_profile_changes_identity_and_uses_global_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             memory = MemoryStore(Path(tmp) / "memory.sqlite3")
-            memory.remember("Микола знає про ранкову каву", ["telegram_chat_123", "nikola"])
-            memory.remember("Соломія знає про вечірній чай", ["telegram_chat_123", "solomiya"])
+            memory.remember("Микола знає про ранкову каву", ["telegram", "telegram_chat_123", "nikola"])
+            memory.remember("Соломія знає про вечірній чай", ["telegram", "telegram_chat_456", "solomiya"])
+            memory.log_telegram_message(
+                chat_id=123,
+                message_id=70,
+                persona_key="mykola",
+                role="user",
+                sender_id=123,
+                sender_name="Vadim",
+                text="Старе повідомлення з іншого профілю",
+            )
             telegram = FakeTelegram()
             llm = FakeLLM(
                 '{"should_reply": true, "reply": "Я тут, і звучить цікаво.", '
@@ -201,18 +212,19 @@ class TelegramBotTests(unittest.TestCase):
                         "message_id": 88,
                         "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
                         "from": {"id": 123, "first_name": "Vadim"},
-                        "text": "Соломіє, памʼятаєш чай?",
+                        "text": "Соломіє, памʼятаєш каву і чай?",
                     },
                 }
             )
             self.assertTrue(processed)
             self.assertEqual(bot.telegram_config.bot_name, "Соломія")
-            self.assertEqual(bot.thread_id("123"), "telegram:solomiya:123")
+            self.assertEqual(bot.thread_id("123"), TELEGRAM_GLOBAL_THREAD_ID)
             payload = llm.messages[0][1]["content"]
             self.assertIn('"display_name": "Соломія"', payload)
             self.assertIn("вечірній чай", payload)
-            self.assertNotIn("ранкову каву", payload)
-            hits = memory.search_tagged_all("живі", ["telegram_chat_123", "solomiya"])
+            self.assertIn("ранкову каву", payload)
+            self.assertIn("Старе повідомлення з іншого профілю", payload)
+            hits = memory.search_tagged_all("живі", [TELEGRAM_GLOBAL_MEMORY_TAG])
             self.assertEqual(len(hits), 1)
 
     def test_solomiya_addressing_uses_her_aliases(self) -> None:

@@ -5,6 +5,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from .harmony import sanitize_model_input
+
 
 class OpenAICompatError(RuntimeError):
     pass
@@ -53,7 +55,7 @@ class OpenAICompatibleClient:
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model,
-            "messages": messages,
+            "messages": _sanitize_messages(messages),
             "temperature": temperature,
             "top_p": top_p,
             "max_tokens": max_tokens,
@@ -63,3 +65,22 @@ class OpenAICompatibleClient:
             payload["tool_choice"] = "auto"
         return self._request("POST", "/chat/completions", payload)
 
+
+def _sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    sanitized: list[dict[str, Any]] = []
+    for message in messages:
+        item = dict(message)
+        if "content" in item:
+            item["content"] = _sanitize_content(item["content"])
+        sanitized.append(item)
+    return sanitized
+
+
+def _sanitize_content(value: Any) -> Any:
+    if isinstance(value, str):
+        return sanitize_model_input(value)
+    if isinstance(value, list):
+        return [_sanitize_content(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _sanitize_content(item) for key, item in value.items()}
+    return value

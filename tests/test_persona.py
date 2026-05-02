@@ -15,7 +15,7 @@ class PersonaTests(unittest.TestCase):
         solomiya = get_persona("solomiya")
         prompt = solomiya.prompt_block()
         self.assertIn("самодостатня", prompt)
-        self.assertIn("Памʼять Соломії окрема", prompt)
+        self.assertIn("Telegram-памʼять спільна", prompt)
 
     def test_telegram_config_reads_persona_from_env(self) -> None:
         old = os.environ.get("PROTOAGI_TELEGRAM_PERSONA")

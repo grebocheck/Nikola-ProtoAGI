@@ -10,6 +10,7 @@ class RuntimeTests(unittest.TestCase):
         joined = " ".join(cmd)
         self.assertIn("--ctx-size 8192", joined)
         self.assertIn("--jinja", cmd)
+        self.assertIn("--skip-chat-parsing", cmd)
         self.assertIn("-fa on", joined)
         self.assertIn("--n-cpu-moe 4", joined)
 

@@ -91,8 +91,8 @@ It deliberately uses a narrower surface than the workspace agent:
 - typing indicator with `sendChatAction`
 - sticker set discovery with `getStickerSet`
 - sticker sending with `sendSticker`
-- chat-scoped memory in SQLite
-- persona-scoped long-term facts and recent thread history
+- shared Telegram memory in SQLite
+- global Telegram long-term facts and recent thread history
 - Telegram message ID history for intentional replies
 - reply policy: `smart`, `always`, `mention`, or `silent`
 - bounded proactive messages for chats that already know the bot
@@ -106,7 +106,6 @@ recent Telegram `message_id`; otherwise responses are sent as regular messages.
 
 Profiles are intentionally deeper than a display name. The active profile
 changes the system prompt, aliases, self-model, user model, relationship stance,
-memory policy, fact tags, thread IDs, and Telegram message history exposed back
-to the model. Switching from `mykola` to `solomiya` therefore starts from a
-separate conversational memory instead of wearing a new name over the same
-context.
+and memory policy. Telegram facts and compact thread history are shared through
+the global Telegram memory, while per-chat Telegram message IDs are still kept
+so replies can target the correct recent message.

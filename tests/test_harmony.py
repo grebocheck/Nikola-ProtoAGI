@@ -1,6 +1,6 @@
 import unittest
 
-from protoagi.harmony import clean_model_content
+from protoagi.harmony import clean_model_content, sanitize_model_input
 
 
 class HarmonyTests(unittest.TestCase):
@@ -17,6 +17,14 @@ class HarmonyTests(unittest.TestCase):
 
     def test_normalizes_unicode_hyphen_spaces(self) -> None:
         self.assertEqual(clean_model_content("gpt\u2011oss uses 3.8\u202fGB"), "gpt-oss uses 3.8 GB")
+
+    def test_prefers_constrained_final_channel(self) -> None:
+        raw = '<|channel|>final <|constrain|>JSON<|message|>{"ok": true}<|end|>'
+        self.assertEqual(clean_model_content(raw), '{"ok": true}')
+
+    def test_sanitizes_harmony_tokens_before_prompt_reuse(self) -> None:
+        raw = 'old=<|channel|>final <|constrain|>json<|message|>{"ok": true}<|end|>'
+        self.assertEqual(sanitize_model_input(raw), 'old={"ok": true}')
 
 
 if __name__ == "__main__":
