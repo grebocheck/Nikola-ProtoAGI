@@ -51,12 +51,20 @@ Or start the model server and Telegram bot together:
 .\scripts\start-nikola-stack.ps1
 ```
 
+When the stack is running, `Ctrl+C` stops the Telegram bot and local
+`llama-server` processes. Use `-KeepServers` to leave the model servers loaded
+after the bot exits.
+
 Only one `getUpdates` polling process can run for a Telegram bot token. If
 Telegram returns a 409 conflict, stop the existing local instance:
 
 ```powershell
 .\stop-nikola.bat
 ```
+
+Unexpected Telegram loop exceptions are appended to
+`runs\telegram-errors.log`; normal llama.cpp server logs stay in
+`runs\llama-server.stderr.log` and `runs\llama-vision.stderr.log`.
 
 If the bot previously used webhooks:
 
@@ -135,6 +143,31 @@ The model chooses a pack and optional emoji; the bot picks a matching sticker
 from that pack.
 Short generic sticker captions such as "hope this lifted your mood" are
 suppressed when a sticker is already being sent.
+
+## Images
+
+Photo messages and image documents are accepted. If `PROTOAGI_VISION_MODEL` is
+configured, the bot downloads the Telegram file, sends it to an
+OpenAI-compatible vision endpoint, and includes a short image description in
+the conversation context. If vision is not configured, the bot still receives
+the image with a neutral `опис недоступний` marker instead of prompting itself
+to say "I can't see it."
+
+```env
+PROTOAGI_VISION_BASE_URL=http://127.0.0.1:8081/v1
+PROTOAGI_VISION_MODEL=smolvlm2-2.2b-instruct
+PROTOAGI_VISION_HF_REPO=ggml-org/SmolVLM2-2.2B-Instruct-GGUF:Q4_K_M
+```
+
+`run-nikola.bat` starts this local vision server automatically when
+`PROTOAGI_VISION_MODEL` points to a localhost URL. The first start downloads the
+model into the llama.cpp/Hugging Face cache. Use `scripts\start-vision-server.ps1`
+directly if you want to warm the cache before starting Telegram.
+Vision requests include the llama.cpp multimodal marker internally so uploaded
+Telegram images are paired with the image bytes instead of failing tokenization.
+
+Incoming stickers are also treated as conversational messages with emoji and
+pack metadata, so the model can react to them instead of ignoring them.
 
 ## Initiative
 

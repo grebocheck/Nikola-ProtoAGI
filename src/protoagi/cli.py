@@ -11,7 +11,7 @@ from .config import AgentConfig, DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PATH, LlamaS
 from .memory import MemoryStore
 from .openai_compat import OpenAICompatibleClient, OpenAICompatError
 from .runtime import run_server_foreground, status_report
-from .telegram_bot import TelegramApiError, TelegramConfig, build_nikola_bot
+from .telegram_bot import TelegramApiError, TelegramConfig, build_nikola_bot, is_telegram_polling_conflict
 from .tools import default_registry
 
 
@@ -279,8 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"OpenAI-compatible endpoint error: {exc}", file=sys.stderr)
         return 2
     except TelegramApiError as exc:
-        message = str(exc)
-        if "409" in message and "getUpdates" in message:
+        if is_telegram_polling_conflict(exc):
             print(
                 "Telegram polling conflict: another Telegram bot instance is already running for this token.",
                 file=sys.stderr,

@@ -91,11 +91,17 @@ There is also a root convenience launcher:
 .\run-nikola.bat
 ```
 
-Stop the Telegram process for this workspace:
+`Ctrl+C` stops the Telegram bot and the local model servers that the stack uses.
+Pass `-KeepServers` if you intentionally want to leave them warm after the bot
+exits.
+
+Stop the whole local stack for this workspace:
 
 ```powershell
 .\stop-nikola.bat
 ```
+
+Unexpected Telegram loop crashes are logged to `runs\telegram-errors.log`.
 
 The bot is intentionally conversation-first: profile switching and behavior are
 configured through `.env`, not Telegram commands. `/start` only registers the
@@ -104,6 +110,10 @@ chat and greets with the active profile.
 The active profile can also use stickers from `Bocchi_the_Rock_sticker_pack2`,
 `SenkoSan`, and `M1ku_Hatsune`. It sends normal messages by default and uses
 Telegram reply only for group/current replies or explicit recent message IDs.
+Optional Telegram image recognition is available through
+`PROTOAGI_VISION_BASE_URL` and `PROTOAGI_VISION_MODEL`. When the vision model is
+configured for localhost, `run-nikola.bat` starts a separate lightweight
+`llama-server` on port `8081` and downloads the GGUF on first launch.
 
 More details: [docs/TELEGRAM.md](docs/TELEGRAM.md).
 

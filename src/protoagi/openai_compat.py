@@ -22,6 +22,9 @@ class OpenAICompatibleClient:
 
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
         url = f"{self.base_url}{path}"
+        return self._request_url(method, url, payload)
+
+    def _request_url(self, method: str, url: str, payload: dict[str, Any] | None = None) -> Any:
         body = None
         headers = {"Content-Type": "application/json"}
         if payload is not None:
@@ -43,6 +46,10 @@ class OpenAICompatibleClient:
 
     def models(self) -> Any:
         return self._request("GET", "/models")
+
+    def server_props(self) -> Any:
+        base_url = self.base_url[:-3] if self.base_url.endswith("/v1") else self.base_url
+        return self._request_url("GET", f"{base_url}/props")
 
     def chat_completion(
         self,
