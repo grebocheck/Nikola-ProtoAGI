@@ -40,6 +40,15 @@ class MemoryStoreTests(unittest.TestCase):
             hits = memory.search_tagged_all("morning", ["telegram_chat_123", "solomiya"], limit=5)
             self.assertEqual([hit.text for hit in hits], ["likes playful morning notes"])
 
+    def test_recent_tagged_all_returns_latest_exact_tag_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            memory.remember("old self fact", ["telegram_persona_self", "persona:solomiya"])
+            memory.remember("wrong persona fact", ["telegram_persona_self", "persona:mykola"])
+            memory.remember("new self fact", ["telegram_persona_self", "persona:solomiya"])
+            hits = memory.recent_tagged_all(["telegram_persona_self", "persona:solomiya"], limit=3)
+            self.assertEqual([hit.text for hit in hits], ["new self fact", "old self fact"])
+
     def test_recent_telegram_messages_include_message_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             memory = MemoryStore(Path(tmp) / "memory.sqlite3")

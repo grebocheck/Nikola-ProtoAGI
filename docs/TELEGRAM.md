@@ -108,8 +108,27 @@ The active profile affects:
 - system prompts and decision style
 - how the bot models the user and the relationship
 - how it writes into the shared Telegram memory
+- fictional self-memory used to keep a stable persona voice
 - per-chat recent conversation thread history
 - Telegram message history exposed to the model for intentional replies
+
+## Fictional Self-Memory
+
+For experiments with a more human-feeling chat presence, profiles can keep a
+small fictional self-memory: tastes, running jokes, tiny invented habits, and
+other harmless details that make the persona consistent over time.
+
+```env
+NIKOLA_FICTIONAL_SELF=1
+```
+
+When enabled, the decision JSON can include `self_memories`. Those memories are
+stored separately from user/chat facts under the active persona, then exposed
+back to the model as `known_persona_self_memory`. This lets Соломія invent and
+remember small stable details about herself without mixing them into user
+memory. The prompt still tells the bot not to claim real physical presence or
+offline life; direct questions about being human/a bot get a short honest
+answer rather than a support-style disclaimer.
 
 `/start` is still accepted because Telegram uses it to register a chat, but the
 bot does not expose a command menu. Ongoing behavior is configured through
@@ -129,10 +148,14 @@ Default mode is `smart`.
 - The bot uses Telegram reply for group/current replies or explicit recent
   message IDs.
 
-## Stickers
+## Message Rhythm
 
-The bot can use stickers sparingly when they fit the mood. The current sticker
-sets are:
+The bot can send one to three short Telegram messages for a single turn when
+that feels more natural than one polished paragraph. The decision JSON supports
+both a legacy `reply` string and a `replies` array.
+
+The bot can also pair text with stickers more often in light private chats. The
+current sticker sets are:
 
 - `Bocchi_the_Rock_sticker_pack2`
 - `SenkoSan`
@@ -143,6 +166,16 @@ The model chooses a pack and optional emoji; the bot picks a matching sticker
 from that pack.
 Short generic sticker captions such as "hope this lifted your mood" are
 suppressed when a sticker is already being sent.
+
+```env
+NIKOLA_STICKER_FREQUENCY=normal
+NIKOLA_STICKER_COOLDOWN_MESSAGES=3
+TELEGRAM_MAX_REPLY_MESSAGES=3
+```
+
+`NIKOLA_STICKER_FREQUENCY` accepts `off`, `low`, `normal`, `high`, or `always`.
+The automatic sticker nudge is skipped for serious or heavy topics and only
+fires on clear emotional triggers, with a small per-chat cooldown.
 
 ## Images
 

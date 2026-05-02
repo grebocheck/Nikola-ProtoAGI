@@ -107,9 +107,14 @@ The bot is intentionally conversation-first: profile switching and behavior are
 configured through `.env`, not Telegram commands. `/start` only registers the
 chat and greets with the active profile.
 
+Profiles can keep a fictional self-memory (`NIKOLA_FICTIONAL_SELF=1`) for
+stable tastes, running jokes, and small invented persona details. This memory is
+separate from user facts and remains tied to the active persona.
+
 The active profile can also use stickers from `Bocchi_the_Rock_sticker_pack2`,
-`SenkoSan`, and `M1ku_Hatsune`. It sends normal messages by default and uses
-Telegram reply only for group/current replies or explicit recent message IDs.
+`SenkoSan`, and `M1ku_Hatsune`. It can send a short burst of up to three
+messages plus stickers for natural Telegram pacing, while Telegram reply is
+reserved for group/current replies or explicit recent message IDs.
 Optional Telegram image recognition is available through
 `PROTOAGI_VISION_BASE_URL` and `PROTOAGI_VISION_MODEL`. When the vision model is
 configured for localhost, `run-nikola.bat` starts a separate lightweight

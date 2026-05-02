@@ -269,6 +269,41 @@ class MemoryStore:
                 break
         return scoped[:limit]
 
+    def recent_tagged_all(self, tags: list[str], *, limit: int = 5) -> list[MemoryFact]:
+        required_tags = [tag for tag in tags if tag]
+        if not required_tags:
+            return []
+        tag_clauses = " AND ".join("tags LIKE ?" for _ in required_tags)
+        params: list[Any] = [f"%{tag}%" for tag in required_tags]
+        params.append(max(limit * 4, 20))
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id, text, tags, created_at
+                FROM facts
+                WHERE {tag_clauses}
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        facts: list[MemoryFact] = []
+        for row in rows:
+            tags_value = json.loads(row["tags"])
+            if not all(tag in tags_value for tag in required_tags):
+                continue
+            facts.append(
+                MemoryFact(
+                    id=int(row["id"]),
+                    text=str(row["text"]),
+                    tags=tags_value,
+                    created_at=str(row["created_at"]),
+                )
+            )
+            if len(facts) >= limit:
+                break
+        return facts
+
     def log_message(self, thread_id: str, role: str, content: str) -> None:
         with self.connect() as conn:
             conn.execute(

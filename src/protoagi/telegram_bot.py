@@ -25,6 +25,7 @@ TELEGRAM_API_ROOT = "https://api.telegram.org"
 TELEGRAM_MAX_MESSAGE_CHARS = 4096
 OFFSET_KEY = "telegram:update_offset"
 TELEGRAM_GLOBAL_MEMORY_TAG = "telegram_global"
+TELEGRAM_PERSONA_SELF_MEMORY_TAG = "telegram_persona_self"
 TELEGRAM_CHAT_THREAD_PREFIX = "telegram:chat"
 GENERIC_STICKER_FILLER_RE = re.compile(
     r"(ось\s*(ще)?\s*один|сподіва(юся|юсь)|підня(в|ло|ти).*настр|настрій)",
@@ -44,6 +45,18 @@ IMAGE_BLIND_REPLY_RE = re.compile(
     r"(не\s+бач[уишить]*\s+(це\s+)?зображення|не\s+можу\s+(побачити|роздивитись)|"
     r"can't\s+see\s+(the\s+)?image|cannot\s+see\s+(the\s+)?image|don't\s+see\s+(the\s+)?image)",
     re.IGNORECASE,
+)
+IDENTITY_QUESTION_RE = re.compile(
+    r"(ти\s+(реально\s+)?(людина|бот|нейронк|штучн|ai|іі|жив[аий])|"
+    r"ти\s+ж\s+(людина|бот)|"
+    r"are\s+you\s+(really\s+)?(a\s+)?(human|bot|ai)|"
+    r"are\s+you\s+real)",
+    re.IGNORECASE,
+)
+DECEPTIVE_IDENTITY_REPLY_RE = re.compile(
+    r"(^\s*(так|ага|звісно|авжеж|yes|yeah|sure)\b.{0,120}\b(людин|human|жив[аий])|"
+    r"^\s*(ні|no)\b.{0,120}\b(не\s+бот|not\s+a\s+bot))",
+    re.IGNORECASE | re.DOTALL,
 )
 VISION_BOILERPLATE_PATTERNS = (
     re.compile(r"^\s*the image (you('|’)ve|you have)?\s*(provided|shared|uploaded)?\s*(is|shows|contains)\s*", re.I),
@@ -91,6 +104,10 @@ class TelegramConfig:
     max_history_messages: int = 14
     max_memory_facts: int = 6
     decision_max_tokens: int = 768
+    max_reply_messages: int = 3
+    sticker_frequency: str = "normal"
+    sticker_cooldown_messages: int = 3
+    fictional_self_enabled: bool = True
     proactive_enabled: bool = True
     proactive_check_seconds: int = 300
     proactive_cooldown_seconds: int = 6 * 60 * 60
@@ -112,12 +129,19 @@ class TelegramConfig:
         reply_mode = os.environ.get("NIKOLA_REPLY_MODE", "smart").strip() or "smart"
         if reply_mode not in {"smart", "always", "mention", "silent"}:
             reply_mode = "smart"
+        sticker_frequency = os.environ.get("NIKOLA_STICKER_FREQUENCY", "normal").strip().lower() or "normal"
+        if sticker_frequency not in {"off", "low", "normal", "high", "always"}:
+            sticker_frequency = "normal"
         return cls(
             token=token,
             persona_key=persona_key,
             allowed_chat_ids=allowed,
             reply_mode=reply_mode,
             poll_timeout_seconds=env_int("TELEGRAM_POLL_TIMEOUT", 25),
+            max_reply_messages=env_int("TELEGRAM_MAX_REPLY_MESSAGES", 3),
+            sticker_frequency=sticker_frequency,
+            sticker_cooldown_messages=env_int("NIKOLA_STICKER_COOLDOWN_MESSAGES", 3),
+            fictional_self_enabled=env_bool("NIKOLA_FICTIONAL_SELF", True),
             proactive_enabled=env_bool("NIKOLA_PROACTIVE", True),
             proactive_check_seconds=env_int("NIKOLA_PROACTIVE_CHECK_SECONDS", 300),
             proactive_cooldown_seconds=env_int("NIKOLA_PROACTIVE_COOLDOWN_SECONDS", 6 * 60 * 60),
@@ -133,6 +157,8 @@ class Decision:
     should_reply: bool
     reply: str
     memories: list[str]
+    self_memories: list[str] = field(default_factory=list)
+    replies: list[str] = field(default_factory=list)
     reply_to: str | int | None = None
     stickers: list[dict[str, str]] = field(default_factory=list)
     next_check_minutes: int | None = None
@@ -144,6 +170,7 @@ class InitiativeDecision:
     message: str
     memories: list[str]
     next_check_minutes: int
+    self_memories: list[str] = field(default_factory=list)
     stickers: list[dict[str, str]] = field(default_factory=list)
 
 
@@ -418,6 +445,9 @@ class NikolaBot:
         decision = self.decide_incoming(chat_state, incoming_text, display, addressed)
         for fact in decision.memories:
             self._remember_chat_fact(chat_state, fact)
+        for fact in decision.self_memories:
+            self._remember_persona_self_fact(fact)
+        self._maybe_add_reaction_sticker(chat_state, incoming_text, decision)
         if not decision.should_reply and not decision.stickers:
             self._schedule_from_minutes(chat_state.chat_id, decision.next_check_minutes)
             return True
@@ -426,10 +456,10 @@ class NikolaBot:
             current_message_id=current_message_id,
             chat=chat_state,
         )
-        reply = self._limit_reply(self._clean_reply_text(decision.reply))
+        replies = [self._limit_reply(self._clean_reply_text(item)) for item in decision_reply_texts(decision)]
         self._send_reply(
             chat_state,
-            reply,
+            replies,
             message_id=reply_to_message_id,
             stickers=decision.stickers,
         )
@@ -446,6 +476,7 @@ class NikolaBot:
         recent = self._recent_compact_messages(chat)
         recent_telegram = self._recent_telegram_messages(chat.chat_id)
         facts = self._search_chat_memory(chat, incoming_text)
+        persona_self_memory = self._persona_self_context(incoming_text)
         messages = [
             {"role": "system", "content": self._decision_system_prompt()},
             {
@@ -453,6 +484,10 @@ class NikolaBot:
                 "content": json.dumps(
                     {
                         "persona": self.persona.payload(),
+                        "fictional_self_enabled": self.telegram_config.fictional_self_enabled,
+                        "persona_self_lore": list(self.persona.self_lore)
+                        if self.telegram_config.fictional_self_enabled
+                        else [],
                         "chat": {
                             "id": chat.chat_id,
                             "type": chat.chat_type,
@@ -467,6 +502,10 @@ class NikolaBot:
                         "relevant_memory": [
                             {"text": fact.text, "tags": fact.tags, "created_at": fact.created_at}
                             for fact in facts
+                        ],
+                        "known_persona_self_memory": [
+                            {"text": fact.text, "created_at": fact.created_at}
+                            for fact in persona_self_memory
                         ],
                         "available_sticker_packs": STICKER_PACKS,
                     },
@@ -489,17 +528,60 @@ class NikolaBot:
             decision.should_reply = False
         if self.telegram_config.reply_mode == "silent":
             decision.should_reply = False
-        if decision.should_reply and not decision.reply:
+        if is_identity_question(incoming_text):
+            decision.should_reply = True
+            replies = decision_reply_texts(decision)
+            if not replies or any(is_deceptive_identity_reply(item) for item in replies):
+                decision.reply = honest_identity_reply(self.persona)
+                decision.replies = []
+                decision.stickers = []
+        if decision.should_reply and not decision.reply and not decision.replies:
             decision.reply = self.compose_reply(chat, incoming_text, sender)
-        if "[зображення:" in incoming_text and is_image_blind_reply(decision.reply):
-            decision.reply = ""
-            if not decision.stickers:
+        if "[зображення:" in incoming_text:
+            decision.reply = "" if is_image_blind_reply(decision.reply) else decision.reply
+            decision.replies = [item for item in decision.replies if not is_image_blind_reply(item)]
+            if not decision_reply_texts(decision) and not decision.stickers:
                 decision.should_reply = False
+        if decision.should_reply and not decision_reply_texts(decision) and not decision.stickers:
+            decision.should_reply = False
         return decision
+
+    def _maybe_add_reaction_sticker(self, chat: TelegramChat, incoming_text: str, decision: Decision) -> None:
+        if decision.stickers or chat.chat_type != "private":
+            return
+        if not decision.should_reply or not decision_reply_texts(decision):
+            return
+        frequency = self.telegram_config.sticker_frequency
+        if frequency == "off" or looks_serious_for_sticker(incoming_text):
+            return
+        choice = auto_sticker_choice(incoming_text, " ".join(decision_reply_texts(decision)))
+        if not choice:
+            return
+        if self._recent_sticker_count(chat.chat_id) >= 1:
+            return
+        thresholds = {"low": 12, "normal": 25, "high": 40, "always": 100}
+        threshold = thresholds.get(frequency, 25)
+        seed = f"{chat.chat_id}|{incoming_text}|{decision.reply}|{'|'.join(decision.replies)}"
+        bucket = int(hashlib.sha1(seed.encode("utf-8")).hexdigest()[:8], 16) % 100
+        if bucket >= threshold:
+            return
+        decision.stickers.append(choice)
+
+    def _recent_sticker_count(self, chat_id: str | int) -> int:
+        limit = max(6, self.telegram_config.sticker_cooldown_messages * 3)
+        messages = self.memory.recent_telegram_messages(chat_id, limit=limit)
+        user_messages_since_sticker = 0
+        for item in reversed(messages):
+            if str(item.get("text", "")).startswith("[sticker:"):
+                return 1 if user_messages_since_sticker < self.telegram_config.sticker_cooldown_messages else 0
+            if item.get("role") == "user":
+                user_messages_since_sticker += 1
+        return 0
 
     def compose_reply(self, chat: TelegramChat, incoming_text: str, sender: str) -> str:
         recent = self._recent_compact_messages(chat)
         facts = self._search_chat_memory(chat, incoming_text)
+        persona_self_memory = self._persona_self_context(incoming_text)
         response = self.llm.chat_completion(
             [
                 {"role": "system", "content": self._reply_system_prompt()},
@@ -508,11 +590,16 @@ class NikolaBot:
                     "content": json.dumps(
                         {
                             "persona": self.persona.payload(),
+                            "fictional_self_enabled": self.telegram_config.fictional_self_enabled,
+                            "persona_self_lore": list(self.persona.self_lore)
+                            if self.telegram_config.fictional_self_enabled
+                            else [],
                             "chat": {"type": chat.chat_type, "display_name": chat.display_name},
                             "sender": sender,
                             "incoming_text": incoming_text,
                             "recent_messages": recent,
                             "relevant_memory": [fact.text for fact in facts],
+                            "known_persona_self_memory": [fact.text for fact in persona_self_memory],
                         },
                         ensure_ascii=False,
                     ),
@@ -537,6 +624,8 @@ class NikolaBot:
             decision = self.decide_initiative(chat)
             for fact in decision.memories:
                 self._remember_chat_fact(chat, fact)
+            for fact in decision.self_memories:
+                self._remember_persona_self_fact(fact)
             self._schedule_from_minutes(chat.chat_id, decision.next_check_minutes)
             if not decision.send:
                 continue
@@ -559,6 +648,7 @@ class NikolaBot:
         recent = self._recent_compact_messages(chat)
         recent_telegram = self._recent_telegram_messages(chat.chat_id)
         facts = self._search_chat_memory(chat, chat.display_name)
+        persona_self_memory = self._persona_self_context(chat.display_name)
         response = self.llm.chat_completion(
             [
                 {"role": "system", "content": self._initiative_system_prompt()},
@@ -567,6 +657,10 @@ class NikolaBot:
                     "content": json.dumps(
                         {
                             "persona": self.persona.payload(),
+                            "fictional_self_enabled": self.telegram_config.fictional_self_enabled,
+                            "persona_self_lore": list(self.persona.self_lore)
+                            if self.telegram_config.fictional_self_enabled
+                            else [],
                             "chat": {
                                 "id": chat.chat_id,
                                 "type": chat.chat_type,
@@ -578,6 +672,7 @@ class NikolaBot:
                             "recent_messages": recent,
                             "recent_telegram_messages": recent_telegram,
                             "memory": [fact.text for fact in facts],
+                            "known_persona_self_memory": [fact.text for fact in persona_self_memory],
                             "available_sticker_packs": STICKER_PACKS,
                         },
                         ensure_ascii=False,
@@ -603,7 +698,7 @@ class NikolaBot:
     def _send_reply(
         self,
         chat: TelegramChat,
-        text: str,
+        text: str | list[str],
         *,
         message_id: int | None = None,
         initiative: bool = False,
@@ -611,29 +706,38 @@ class NikolaBot:
         stickers: list[dict[str, str]] | None = None,
     ) -> None:
         stickers = stickers or []
-        text = self._clean_reply_text(text)
-        if stickers and self._is_generic_sticker_filler(text):
-            text = ""
-        if text.strip():
+        raw_messages = text if isinstance(text, list) else [text]
+        messages: list[str] = []
+        for item in raw_messages[: max(1, self.telegram_config.max_reply_messages)]:
+            cleaned = self._clean_reply_text(item)
+            if cleaned:
+                messages.append(cleaned)
+        if stickers and len(messages) == 1 and self._is_generic_sticker_filler(messages[0]):
+            messages = []
+        if messages:
             try:
                 self.telegram.send_chat_action(chat.chat_id, "typing")
             except TelegramApiError:
                 pass
-        chunks = split_telegram_message(text, max_chars=self.telegram_config.max_reply_chars)
-        for index, chunk in enumerate(chunks):
-            sent = self.telegram.send_message(
-                chat.chat_id,
-                chunk,
-                reply_to_message_id=message_id if index == 0 and not initiative else None,
-                disable_notification=disable_notification,
-            )
-            self._log_sent_telegram_message(
-                chat,
-                sent,
-                "assistant",
-                chunk,
-                reply_to_message_id=message_id if index == 0 and not initiative else None,
-            )
+        sent_text = False
+        for message_index, message_text in enumerate(messages):
+            chunks = split_telegram_message(message_text, max_chars=self.telegram_config.max_reply_chars)
+            for chunk_index, chunk in enumerate(chunks):
+                should_reply_to = message_id if message_index == 0 and chunk_index == 0 and not initiative else None
+                sent = self.telegram.send_message(
+                    chat.chat_id,
+                    chunk,
+                    reply_to_message_id=should_reply_to,
+                    disable_notification=disable_notification,
+                )
+                sent_text = True
+                self._log_sent_telegram_message(
+                    chat,
+                    sent,
+                    "assistant",
+                    chunk,
+                    reply_to_message_id=should_reply_to,
+                )
         for sticker_choice in stickers[:2]:
             file_id = self._select_sticker_file_id(sticker_choice, chat.chat_id)
             if not file_id:
@@ -645,7 +749,7 @@ class NikolaBot:
             sent = self.telegram.send_sticker(
                 chat.chat_id,
                 file_id,
-                reply_to_message_id=message_id if not initiative and not chunks else None,
+                reply_to_message_id=message_id if not initiative and not sent_text else None,
                 disable_notification=disable_notification,
             )
             pack = normalize_sticker_pack(sticker_choice.get("pack", ""))
@@ -654,13 +758,14 @@ class NikolaBot:
                 sent,
                 "assistant",
                 f"[sticker:{pack or 'unknown'}]",
-                reply_to_message_id=message_id if not initiative and not chunks else None,
+                reply_to_message_id=message_id if not initiative and not sent_text else None,
             )
-        if text.strip() or stickers:
+        if messages or stickers:
+            history_text = "\n".join(messages) if messages else "[sticker]"
             self.memory.log_message(
                 self.thread_id(chat.chat_id),
                 "assistant",
-                self._history_assistant_content(chat, text or "[sticker]"),
+                self._history_assistant_content(chat, history_text),
             )
             self.memory.mark_telegram_bot_message(chat.chat_id, initiative=initiative)
 
@@ -926,6 +1031,25 @@ class NikolaBot:
             ],
         )
 
+    def _remember_persona_self_fact(self, text: str) -> None:
+        if not self.telegram_config.fictional_self_enabled:
+            return
+        text = text.strip()
+        if not text:
+            return
+        prefix = f"{self.persona.display_name} про себе:"
+        if not text.lower().startswith(prefix.lower()):
+            text = f"{prefix} {text}"
+        self.memory.remember(
+            text,
+            [
+                "telegram",
+                TELEGRAM_GLOBAL_MEMORY_TAG,
+                TELEGRAM_PERSONA_SELF_MEMORY_TAG,
+                f"persona:{self.persona.key}",
+            ],
+        )
+
     def _schedule_from_minutes(self, chat_id: str, minutes: int | None) -> None:
         minutes = minutes if minutes is not None else self.telegram_config.proactive_cooldown_seconds // 60
         minutes = max(15, min(minutes, 7 * 24 * 60))
@@ -994,6 +1118,25 @@ class NikolaBot:
                 break
         return facts
 
+    def _persona_self_context(self, query: str) -> list[Any]:
+        if not self.telegram_config.fictional_self_enabled:
+            return []
+        tags = [TELEGRAM_PERSONA_SELF_MEMORY_TAG, f"persona:{self.persona.key}"]
+        facts = self.memory.search_tagged_all(
+            query,
+            tags,
+            limit=self.telegram_config.max_memory_facts,
+        )
+        seen = {fact.id for fact in facts}
+        for fact in self.memory.recent_tagged_all(tags, limit=self.telegram_config.max_memory_facts):
+            if fact.id in seen:
+                continue
+            facts.append(fact)
+            seen.add(fact.id)
+            if len(facts) >= self.telegram_config.max_memory_facts:
+                break
+        return facts[: self.telegram_config.max_memory_facts]
+
     def thread_id(self, chat_id: str | int) -> str:
         return f"{TELEGRAM_CHAT_THREAD_PREFIX}:{chat_id}"
 
@@ -1055,9 +1198,23 @@ class NikolaBot:
         value = text.strip()
         return bool(value and len(value) <= 160 and GENERIC_STICKER_FILLER_RE.search(value))
 
+    def _fictional_self_prompt(self) -> str:
+        if not self.telegram_config.fictional_self_enabled:
+            return (
+                "Не вигадуй нові факти про себе; тримайся уже відомої персони й не додавай self_memories. "
+            )
+        return (
+            "Маєш право на стабільну вигадану самопамʼять персони: дрібні смаки, внутрішні жарти, "
+            "умовні спогади-образи, звички мовлення, улюблені речі та маленькі історії, які роблять тебе консистентною. "
+            "Якщо вигадуєш про себе факт, який варто памʼятати далі, запиши його в self_memories коротко й від першої особи або як факт про профіль. "
+            "Не вигадуй реальні контактні дані, місцезнаходження, роботу, документи, медичний/юридичний досвід, фізичну присутність поруч із людьми або події офлайн-світу. "
+            "Якщо прямо питають, чи ти людина/бот/ШІ, відповідай чесно й коротко: ти не фізична людина, але в чаті маєш сталий характер і памʼять; без довгих дисклеймерів. "
+        )
+
     def _decision_system_prompt(self) -> str:
         return (
             f"{self.persona.prompt_block()}\n"
+            f"{self._fictional_self_prompt()}"
             "Це не косметичний режим: активний профіль визначає твоє самосприйняття, "
             "спосіб бачити користувача, межі, памʼять і рішення, чи варто відповідати. "
             "Твоя задача - живе, уважне спілкування українською або мовою співрозмовника: конкретне, ситуативне, без канцеляриту. "
@@ -1072,21 +1229,24 @@ class NikolaBot:
             "У приватному чаті відповідай частіше; у групі відповідай лише коли до тебе звернулись або ти справді доречний. "
             "Use reply_to only when your answer explicitly points back to a specific message: null, \"current\", or a message_id from recent_telegram_messages. "
             "У приватних чатах майже ніколи не використовуй reply_to=\"current\": звичайна відповідь уже стосується останньої репліки. "
-            "Use stickers rarely and only when they add emotional timing; at most one sticker is usually enough. "
+            "Use stickers noticeably more often in private/light/chatty moments: a short text plus one sticker is often more natural than a polished paragraph. "
+            "For serious, sad, anxious, medical, legal, or conflict-heavy topics, skip stickers. "
+            "You may send 1-3 short separate messages via replies when that feels like normal Telegram pacing; do not split every answer. "
             "Якщо користувач просить стікер, часто достатньо самого стікера без тексту на кшталт \"ось ще один\" чи \"сподіваюся, підняв настрій\". "
             "Не починай reply або message з власного імені та двокрапки: пиши текст напряму, без \"Соломія:\" чи \"Микола:\". "
             "Не відповідай порожніми мотиваційними фразами на кшталт \"залишайся позитивним\"; краще коротко, але влучно по контексту. "
             "Якщо тебе прямо питають, не бреши, що ти фізично людина або маєш офлайн-життя; в інших випадках не тягни службові дисклеймери. "
-            "Памʼятай тільки стабільні корисні факти, які пасують політиці памʼяті профілю. "
+            "У memories записуй тільки стабільні корисні факти про користувача/чат; у self_memories - тільки стабільні факти про власну персону. "
             "Поверни тільки JSON без markdown: "
-            "{\"should_reply\": boolean, \"reply\": string, \"reply_to\": null|\"current\"|integer, "
+            "{\"should_reply\": boolean, \"reply\": string, \"replies\": [string], \"reply_to\": null|\"current\"|integer, "
             "\"stickers\": [{\"pack\": string, \"emoji\": string, \"reason\": string}], "
-            "\"memories\": [string], \"next_check_minutes\": integer|null}."
+            "\"memories\": [string], \"self_memories\": [string], \"next_check_minutes\": integer|null}."
         )
 
     def _reply_system_prompt(self) -> str:
         return (
             f"{self.persona.prompt_block()}\n"
+            f"{self._fictional_self_prompt()}"
             "Дай природну Telegram-відповідь від імені активного профілю: коротко, тепло, конкретно, без службового тону. "
             "Звуч як жива співрозмовниця/співрозмовник: можеш мати мікрореакцію, легку паузу чи власну думку, але не перегравай. "
             "Не звуч як помічник: не пропонуй допомогу без прямого прохання, не закінчуй кожне повідомлення питанням. "
@@ -1097,15 +1257,16 @@ class NikolaBot:
     def _initiative_system_prompt(self) -> str:
         return (
             f"{self.persona.prompt_block()}\n"
+            f"{self._fictional_self_prompt()}"
             "Ти можеш іноді написати першим у вже знайомий Telegram-чат. "
             "Памʼять Telegram спільна для всіх чатів, тож не роби інтимних висновків без явного контексту поточного чату. "
             "Пиши першим тільки якщо є людська причина з погляду активного профілю: продовжити незавершену думку, "
             "мʼяко нагадати, підтримати, або поставити справді доречне питання. Не спам, не маркетинг, не чергова фраза заради фрази. "
-            "A sticker can be enough by itself for a light check-in, but avoid stickers for serious topics. "
+            "For light check-ins, a sticker alone or a tiny message plus sticker can feel natural; avoid stickers for serious topics. "
             "Якщо сумніваєшся - не надсилай. Поверни тільки JSON без markdown: "
             "{\"send\": boolean, \"message\": string, "
             "\"stickers\": [{\"pack\": string, \"emoji\": string, \"reason\": string}], "
-            "\"memories\": [string], \"next_check_minutes\": integer}."
+            "\"memories\": [string], \"self_memories\": [string], \"next_check_minutes\": integer}."
         )
 
 
@@ -1165,8 +1326,64 @@ def sticker_to_payload(sticker: StickerAttachment | None) -> dict[str, str] | No
     }
 
 
+def decision_reply_texts(decision: Decision) -> list[str]:
+    source = decision.replies if decision.replies else [decision.reply]
+    return [str(item).strip() for item in source if str(item).strip()]
+
+
+def normalize_reply_messages(value: Any) -> list[str]:
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, list):
+        items = value
+    else:
+        return []
+    messages: list[str] = []
+    for item in items:
+        text = str(item or "").strip()
+        if text:
+            messages.append(text)
+    return messages[:3]
+
+
+SERIOUS_STICKER_RE = re.compile(
+    r"(помер|смерт|війна|тривог|ракета|обстр|болить|лікар|депрес|панік|суїцид|"
+    r"зле|погано|страшно|ненавид|розлуч|плач|сльоз|хвор)",
+    re.IGNORECASE,
+)
+
+
+def looks_serious_for_sticker(text: str) -> bool:
+    return bool(SERIOUS_STICKER_RE.search(str(text or "")))
+
+
+def auto_sticker_choice(incoming_text: str, reply_text: str = "") -> dict[str, str] | None:
+    text = f"{incoming_text}\n{reply_text}".lower()
+    if "🎮" in text or re.search(r"(гейм|контрол|джой|гра|пад|xbox|playstation|steam)", text, re.IGNORECASE):
+        return {"pack": "M1ku_Hatsune", "emoji": "✨", "reason": "playful game-chat reaction"}
+    if re.search(r"(ахах|хаха|лол|оруу|бє+|жиза|сміш)", text, re.IGNORECASE):
+        return {"pack": "Bocchi_the_Rock_sticker_pack2", "emoji": "🙂", "reason": "light funny reaction"}
+    if re.search(r"(дякую|мил|обій|чай|кава|спок|сон|приєм)", text, re.IGNORECASE):
+        return {"pack": "SenkoSan", "emoji": "🙂", "reason": "warm reaction"}
+    return None
+
+
 def is_image_blind_reply(text: str) -> bool:
     return bool(IMAGE_BLIND_REPLY_RE.search(str(text or "")))
+
+
+def is_identity_question(text: str) -> bool:
+    return bool(IDENTITY_QUESTION_RE.search(str(text or "")))
+
+
+def is_deceptive_identity_reply(text: str) -> bool:
+    return bool(DECEPTIVE_IDENTITY_REPLY_RE.search(str(text or "")))
+
+
+def honest_identity_reply(persona: PersonaProfile) -> str:
+    if persona.key == "solomiya":
+        return "Не фізична людина, ні. Але в цьому чаті я Соломія: з характером, памʼяттю і своїми маленькими звичками."
+    return f"Не фізична людина. Я {persona.display_name} у цьому чаті: локальний співрозмовник з памʼяттю і своїм стилем."
 
 
 def clean_vision_description(text: str) -> str:
@@ -1266,6 +1483,8 @@ def decision_from_payload(payload: dict[str, Any]) -> Decision:
         should_reply=bool(payload.get("should_reply", False)),
         reply=str(payload.get("reply", "") or "").strip(),
         memories=[str(item).strip() for item in payload.get("memories", []) if str(item).strip()],
+        self_memories=[str(item).strip() for item in payload.get("self_memories", []) if str(item).strip()],
+        replies=normalize_reply_messages(payload.get("replies", [])),
         reply_to=normalize_reply_to(payload.get("reply_to")),
         stickers=normalize_sticker_choices(payload.get("stickers", [])),
         next_check_minutes=_optional_int(payload.get("next_check_minutes")),
@@ -1277,6 +1496,7 @@ def initiative_from_payload(payload: dict[str, Any]) -> InitiativeDecision:
         send=bool(payload.get("send", False)),
         message=str(payload.get("message", "") or "").strip(),
         memories=[str(item).strip() for item in payload.get("memories", []) if str(item).strip()],
+        self_memories=[str(item).strip() for item in payload.get("self_memories", []) if str(item).strip()],
         next_check_minutes=max(30, _optional_int(payload.get("next_check_minutes")) or 360),
         stickers=normalize_sticker_choices(payload.get("stickers", [])),
     )
