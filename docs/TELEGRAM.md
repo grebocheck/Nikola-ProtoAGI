@@ -100,7 +100,7 @@ The active profile affects:
 - system prompts and decision style
 - how the bot models the user and the relationship
 - how it writes into the shared Telegram memory
-- shared recent conversation thread history
+- per-chat recent conversation thread history
 - Telegram message history exposed to the model for intentional replies
 
 `/start` is still accepted because Telegram uses it to register a chat, but the
@@ -116,8 +116,10 @@ Default mode is `smart`.
   or command-like direct message.
 - The model can decide to stay silent when a message does not need a reply.
 - Normal answers are sent as plain messages, not Telegram replies.
-- The bot uses Telegram reply only when it explicitly refers to the current or
-  a recent message.
+- In private chats, `reply_to="current"` is ignored because plain messages
+  already answer the latest user message.
+- The bot uses Telegram reply for group/current replies or explicit recent
+  message IDs.
 
 ## Stickers
 
@@ -131,6 +133,8 @@ sets are:
 Sticker file IDs are fetched lazily with `getStickerSet` and cached in SQLite.
 The model chooses a pack and optional emoji; the bot picks a matching sticker
 from that pack.
+Short generic sticker captions such as "hope this lifted your mood" are
+suppressed when a sticker is already being sent.
 
 ## Initiative
 

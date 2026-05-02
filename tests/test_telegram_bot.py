@@ -7,7 +7,6 @@ from protoagi.memory import MemoryStore
 from protoagi.telegram_bot import (
     NikolaBot,
     TELEGRAM_GLOBAL_MEMORY_TAG,
-    TELEGRAM_GLOBAL_THREAD_ID,
     TelegramConfig,
     decision_from_payload,
     extract_json_object,
@@ -145,7 +144,41 @@ class TelegramBotTests(unittest.TestCase):
             self.assertIsNotNone(chat)
             self.assertIsNotNone(chat.next_initiative_at)
 
-    def test_process_update_can_reply_to_current_and_send_sticker(self) -> None:
+    def test_private_current_reply_is_ignored_and_self_prefix_is_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": true, "reply": "Соломія: Оце повідомлення прямо в точку.", '
+                '"reply_to": "current", '
+                '"stickers": [], "memories": [], "next_check_minutes": 60}'
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(token="token", persona_key="solomiya"),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.bootstrap()
+            processed = bot.process_update(
+                {
+                    "update_id": 2,
+                    "message": {
+                        "message_id": 77,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "text": "Соломіє, глянь сюди",
+                    },
+                }
+            )
+            self.assertTrue(processed)
+            self.assertEqual(telegram.sent[0]["text"], "Оце повідомлення прямо в точку.")
+            self.assertIsNone(telegram.sent[0]["reply_to_message_id"])
+            history = memory.recent_messages(bot.thread_id("123"), limit=5)
+            self.assertEqual(history[-1]["content"], "Оце повідомлення прямо в точку.")
+
+    def test_group_message_can_reply_to_current_and_send_sticker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             memory = MemoryStore(Path(tmp) / "memory.sqlite3")
             telegram = FakeTelegram()
@@ -168,7 +201,7 @@ class TelegramBotTests(unittest.TestCase):
                     "update_id": 2,
                     "message": {
                         "message_id": 77,
-                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "chat": {"id": -100, "type": "group", "title": "Lab"},
                         "from": {"id": 123, "first_name": "Vadim"},
                         "text": "Миколо, глянь сюди",
                     },
@@ -176,6 +209,39 @@ class TelegramBotTests(unittest.TestCase):
             )
             self.assertTrue(processed)
             self.assertEqual(telegram.sent[0]["reply_to_message_id"], 77)
+            self.assertEqual(telegram.stickers[0]["sticker"], "SenkoSan:smile")
+
+    def test_sticker_filler_text_is_suppressed_when_sticker_is_sent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": true, "reply": "Соломія: Ось ще один – сподіваюся, підняв настрій! 🎉", '
+                '"reply_to": null, '
+                '"stickers": [{"pack": "SenkoSan", "emoji": "🙂", "reason": "requested sticker"}], '
+                '"memories": [], "next_check_minutes": 60}'
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(token="token", persona_key="solomiya"),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.bootstrap()
+            processed = bot.process_update(
+                {
+                    "update_id": 22,
+                    "message": {
+                        "message_id": 90,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "text": "кинь стікер",
+                    },
+                }
+            )
+            self.assertTrue(processed)
+            self.assertEqual(telegram.sent, [])
             self.assertEqual(telegram.stickers[0]["sticker"], "SenkoSan:smile")
 
     def test_solomiya_profile_changes_identity_and_uses_global_memory(self) -> None:
@@ -218,7 +284,7 @@ class TelegramBotTests(unittest.TestCase):
             )
             self.assertTrue(processed)
             self.assertEqual(bot.telegram_config.bot_name, "Соломія")
-            self.assertEqual(bot.thread_id("123"), TELEGRAM_GLOBAL_THREAD_ID)
+            self.assertEqual(bot.thread_id("123"), "telegram:chat:123")
             payload = llm.messages[0][1]["content"]
             self.assertIn('"display_name": "Соломія"', payload)
             self.assertIn("вечірній чай", payload)
@@ -226,6 +292,39 @@ class TelegramBotTests(unittest.TestCase):
             self.assertIn("Старе повідомлення з іншого профілю", payload)
             hits = memory.search_tagged_all("живі", [TELEGRAM_GLOBAL_MEMORY_TAG])
             self.assertEqual(len(hits), 1)
+
+    def test_polluted_compact_history_is_cleaned_before_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": true, "reply": "Добре.", '
+                '"memories": [], "next_check_minutes": 60}'
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(token="token", persona_key="solomiya"),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.bootstrap()
+            memory.log_message(bot.thread_id("123"), "assistant", "Соломія: Соломія: Привіт")
+            processed = bot.process_update(
+                {
+                    "update_id": 33,
+                    "message": {
+                        "message_id": 91,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "text": "ще раз",
+                    },
+                }
+            )
+            self.assertTrue(processed)
+            payload = llm.messages[0][1]["content"]
+            self.assertIn('"content": "Привіт"', payload)
+            self.assertNotIn("Соломія: Соломія", payload)
 
     def test_solomiya_addressing_uses_her_aliases(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

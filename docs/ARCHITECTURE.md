@@ -91,8 +91,8 @@ It deliberately uses a narrower surface than the workspace agent:
 - typing indicator with `sendChatAction`
 - sticker set discovery with `getStickerSet`
 - sticker sending with `sendSticker`
-- shared Telegram memory in SQLite
-- global Telegram long-term facts and recent thread history
+- shared Telegram long-term facts in SQLite
+- per-chat recent thread history for local dialogue context
 - Telegram message ID history for intentional replies
 - reply policy: `smart`, `always`, `mention`, or `silent`
 - bounded proactive messages for chats that already know the bot
@@ -101,11 +101,13 @@ Telegram does not allow a bot to open a brand-new private chat by itself. The
 initiative loop therefore only works for chats that previously contacted the bot
 or added it.
 
-Replies are not automatic. The model must ask for `reply_to` with `current` or a
-recent Telegram `message_id`; otherwise responses are sent as regular messages.
+Replies are not automatic. The model can ask for `reply_to`, but private-chat
+`current` replies are ignored because a normal answer already targets the latest
+message. Group replies and explicit recent Telegram `message_id` targets are
+kept.
 
 Profiles are intentionally deeper than a display name. The active profile
 changes the system prompt, aliases, self-model, user model, relationship stance,
-and memory policy. Telegram facts and compact thread history are shared through
-the global Telegram memory, while per-chat Telegram message IDs are still kept
-so replies can target the correct recent message.
+and memory policy. Telegram facts are shared through the global Telegram memory,
+while compact dialogue history and Telegram message IDs stay per chat so style
+and reply targeting do not bleed between conversations.

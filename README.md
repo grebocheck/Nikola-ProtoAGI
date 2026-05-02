@@ -103,7 +103,7 @@ chat and greets with the active profile.
 
 The active profile can also use stickers from `Bocchi_the_Rock_sticker_pack2`,
 `SenkoSan`, and `M1ku_Hatsune`. It sends normal messages by default and uses
-Telegram reply only when referring to a specific current or recent message.
+Telegram reply only for group/current replies or explicit recent message IDs.
 
 More details: [docs/TELEGRAM.md](docs/TELEGRAM.md).
 

@@ -22,8 +22,12 @@ from .persona import PersonaProfile, get_persona, resolve_persona_key
 TELEGRAM_API_ROOT = "https://api.telegram.org"
 TELEGRAM_MAX_MESSAGE_CHARS = 4096
 OFFSET_KEY = "telegram:update_offset"
-TELEGRAM_GLOBAL_THREAD_ID = "telegram:global"
 TELEGRAM_GLOBAL_MEMORY_TAG = "telegram_global"
+TELEGRAM_CHAT_THREAD_PREFIX = "telegram:chat"
+GENERIC_STICKER_FILLER_RE = re.compile(
+    r"(ось\s*(ще)?\s*один|сподіва(юся|юсь)|підня(в|ло|ти).*настр|настрій)",
+    re.IGNORECASE,
+)
 STICKER_PACKS = {
     "Bocchi_the_Rock_sticker_pack2": "expressive awkward, shy, funny, surprised anime reactions",
     "SenkoSan": "warm, caring, cozy, gentle reactions",
@@ -316,9 +320,9 @@ class NikolaBot:
         reply_to_message_id = self._resolve_reply_target(
             decision.reply_to,
             current_message_id=current_message_id,
-            chat_id=chat_state.chat_id,
+            chat=chat_state,
         )
-        reply = self._limit_reply(decision.reply)
+        reply = self._limit_reply(self._clean_reply_text(decision.reply))
         self._send_reply(
             chat_state,
             reply,
@@ -335,11 +339,8 @@ class NikolaBot:
         sender: str,
         addressed: bool,
     ) -> Decision:
-        recent = self.memory.recent_messages(self.thread_id(chat.chat_id), limit=self.telegram_config.max_history_messages)
-        recent_telegram = self.memory.recent_telegram_messages(
-            chat.chat_id,
-            limit=self.telegram_config.max_history_messages,
-        )
+        recent = self._recent_compact_messages(chat)
+        recent_telegram = self._recent_telegram_messages(chat.chat_id)
         facts = self._search_chat_memory(chat, incoming_text)
         messages = [
             {"role": "system", "content": self._decision_system_prompt()},
@@ -389,7 +390,7 @@ class NikolaBot:
         return decision
 
     def compose_reply(self, chat: TelegramChat, incoming_text: str, sender: str) -> str:
-        recent = self.memory.recent_messages(self.thread_id(chat.chat_id), limit=self.telegram_config.max_history_messages)
+        recent = self._recent_compact_messages(chat)
         facts = self._search_chat_memory(chat, incoming_text)
         response = self.llm.chat_completion(
             [
@@ -413,7 +414,8 @@ class NikolaBot:
             top_p=self.agent_config.top_p,
             max_tokens=self.telegram_config.decision_max_tokens,
         )
-        return clean_model_content(response.get("choices", [{}])[0].get("message", {}).get("content", "")).strip()
+        content = clean_model_content(response.get("choices", [{}])[0].get("message", {}).get("content", ""))
+        return self._clean_reply_text(content)
 
     def run_initiative_once(self) -> int:
         sent = 0
@@ -435,7 +437,7 @@ class NikolaBot:
             try:
                 self._send_reply(
                     chat,
-                    self._limit_reply(decision.message),
+                    self._limit_reply(self._clean_reply_text(decision.message)),
                     initiative=True,
                     disable_notification=self.telegram_config.proactive_disable_notification,
                     stickers=decision.stickers,
@@ -446,11 +448,8 @@ class NikolaBot:
         return sent
 
     def decide_initiative(self, chat: TelegramChat) -> InitiativeDecision:
-        recent = self.memory.recent_messages(self.thread_id(chat.chat_id), limit=self.telegram_config.max_history_messages)
-        recent_telegram = self.memory.recent_telegram_messages(
-            chat.chat_id,
-            limit=self.telegram_config.max_history_messages,
-        )
+        recent = self._recent_compact_messages(chat)
+        recent_telegram = self._recent_telegram_messages(chat.chat_id)
         facts = self._search_chat_memory(chat, chat.display_name)
         response = self.llm.chat_completion(
             [
@@ -504,6 +503,9 @@ class NikolaBot:
         stickers: list[dict[str, str]] | None = None,
     ) -> None:
         stickers = stickers or []
+        text = self._clean_reply_text(text)
+        if stickers and self._is_generic_sticker_filler(text):
+            text = ""
         if text.strip():
             try:
                 self.telegram.send_chat_action(chat.chat_id, "typing")
@@ -517,7 +519,13 @@ class NikolaBot:
                 reply_to_message_id=message_id if index == 0 and not initiative else None,
                 disable_notification=disable_notification,
             )
-            self._log_sent_telegram_message(chat, sent, "assistant", chunk)
+            self._log_sent_telegram_message(
+                chat,
+                sent,
+                "assistant",
+                chunk,
+                reply_to_message_id=message_id if index == 0 and not initiative else None,
+            )
         for sticker_choice in stickers[:2]:
             file_id = self._select_sticker_file_id(sticker_choice, chat.chat_id)
             if not file_id:
@@ -538,6 +546,7 @@ class NikolaBot:
                 sent,
                 "assistant",
                 f"[sticker:{pack or 'unknown'}]",
+                reply_to_message_id=message_id if not initiative and not chunks else None,
             )
         if text.strip() or stickers:
             self.memory.log_message(
@@ -553,10 +562,15 @@ class NikolaBot:
         sent: dict[str, Any],
         role: str,
         text: str,
+        *,
+        reply_to_message_id: int | None = None,
     ) -> None:
         message_id = sent.get("message_id")
         if message_id is None:
             return
+        metadata = dict(sent)
+        if reply_to_message_id is not None:
+            metadata["protoagi_reply_to_message_id"] = int(reply_to_message_id)
         self.memory.log_telegram_message(
             chat_id=chat.chat_id,
             message_id=int(message_id),
@@ -565,7 +579,7 @@ class NikolaBot:
             sender_id=None,
             sender_name=self.telegram_config.bot_name,
             text=text,
-            metadata=sent,
+            metadata=metadata,
         )
 
     def _resolve_reply_target(
@@ -573,7 +587,7 @@ class NikolaBot:
         reply_to: str | int | None,
         *,
         current_message_id: int,
-        chat_id: str,
+        chat: TelegramChat,
     ) -> int | None:
         if reply_to is None:
             return None
@@ -582,6 +596,8 @@ class NikolaBot:
             if value in {"", "none", "null", "false", "no"}:
                 return None
             if value == "current":
+                if chat.chat_type == "private":
+                    return None
                 return current_message_id or None
             if value.isdigit():
                 reply_to = int(value)
@@ -592,11 +608,11 @@ class NikolaBot:
         except (TypeError, ValueError):
             return None
         if target == current_message_id:
-            return target
+            return None if chat.chat_type == "private" else target
         recent_ids = {
             int(item["message_id"])
             for item in self.memory.recent_telegram_messages(
-                chat_id,
+                chat.chat_id,
                 limit=self.telegram_config.max_history_messages,
             )
         }
@@ -732,11 +748,39 @@ class NikolaBot:
         return facts
 
     def thread_id(self, chat_id: str | int) -> str:
-        return TELEGRAM_GLOBAL_THREAD_ID
+        return f"{TELEGRAM_CHAT_THREAD_PREFIX}:{chat_id}"
 
     @staticmethod
     def chat_tag(chat_id: str | int) -> str:
         return f"telegram_chat_{chat_id}"
+
+    def _recent_compact_messages(self, chat: TelegramChat) -> list[dict[str, str]]:
+        messages = self.memory.recent_messages(
+            self.thread_id(chat.chat_id),
+            limit=self.telegram_config.max_history_messages,
+        )
+        cleaned: list[dict[str, str]] = []
+        for item in messages:
+            role = str(item.get("role", ""))
+            content = str(item.get("content", ""))
+            if role == "assistant":
+                content = self._clean_reply_text(content)
+            if content:
+                cleaned.append({"role": role, "content": content})
+        return cleaned
+
+    def _recent_telegram_messages(self, chat_id: str | int) -> list[dict[str, Any]]:
+        messages = self.memory.recent_telegram_messages(
+            chat_id,
+            limit=self.telegram_config.max_history_messages,
+        )
+        cleaned: list[dict[str, Any]] = []
+        for item in messages:
+            copied = dict(item)
+            if copied.get("role") == "assistant":
+                copied["text"] = self._clean_reply_text(str(copied.get("text", "")))
+            cleaned.append(copied)
+        return cleaned
 
     @staticmethod
     def _history_user_content(chat: TelegramChat, sender: str, text: str) -> str:
@@ -745,9 +789,23 @@ class NikolaBot:
         return f"{sender} in {chat.display_name}: {text}"
 
     def _history_assistant_content(self, chat: TelegramChat, text: str) -> str:
-        if chat.chat_type == "private":
-            return f"{self.persona.display_name}: {text}"
-        return f"{self.persona.display_name} in {chat.display_name}: {text}"
+        return self._clean_reply_text(text)
+
+    def _clean_reply_text(self, text: str) -> str:
+        return strip_speaker_prefixes(
+            clean_model_content(str(text or "")).strip(),
+            [
+                self.persona.display_name,
+                self.telegram_config.bot_name,
+                self.bot_username,
+                *self.persona.aliases,
+            ],
+        )
+
+    @staticmethod
+    def _is_generic_sticker_filler(text: str) -> bool:
+        value = text.strip()
+        return bool(value and len(value) <= 160 and GENERIC_STICKER_FILLER_RE.search(value))
 
     def _decision_system_prompt(self) -> str:
         return (
@@ -759,7 +817,10 @@ class NikolaBot:
             "Ти не мусиш відповідати на кожне повідомлення: якщо повідомлення не потребує відповіді, промовч. "
             "У приватному чаті відповідай частіше; у групі відповідай лише коли до тебе звернулись або ти справді доречний. "
             "Use reply_to only when your answer explicitly points back to a specific message: null, \"current\", or a message_id from recent_telegram_messages. "
+            "У приватних чатах майже ніколи не використовуй reply_to=\"current\": звичайна відповідь уже стосується останньої репліки. "
             "Use stickers rarely and only when they add emotional timing; at most one sticker is usually enough. "
+            "Якщо користувач просить стікер, часто достатньо самого стікера без тексту на кшталт \"ось ще один\" чи \"сподіваюся, підняв настрій\". "
+            "Не починай reply або message з власного імені та двокрапки: пиши текст напряму, без \"Соломія:\" чи \"Микола:\". "
             "Не відповідай порожніми мотиваційними фразами на кшталт \"залишайся позитивним\"; краще коротко, але влучно по контексту. "
             "Якщо тебе прямо питають, не бреши, що ти фізично людина або маєш офлайн-життя; в інших випадках не тягни службові дисклеймери. "
             "Памʼятай тільки стабільні корисні факти, які пасують політиці памʼяті профілю. "
@@ -838,6 +899,23 @@ def parse_command(text: str, bot_username: str = "") -> tuple[str | None, str]:
             return None, ""
         command = name
     return command.lower(), rest.strip()
+
+
+def strip_speaker_prefixes(text: str, speaker_names: list[str]) -> str:
+    cleaned = str(text or "").strip()
+    names = [name.strip() for name in speaker_names if name and name.strip()]
+    if not names:
+        return cleaned
+    pattern = re.compile(
+        r"^\s*(?:" + "|".join(re.escape(name) for name in sorted(set(names), key=len, reverse=True)) + r")\s*[:：]\s*",
+        re.IGNORECASE,
+    )
+    for _ in range(4):
+        updated = pattern.sub("", cleaned, count=1).strip()
+        if updated == cleaned:
+            break
+        cleaned = updated
+    return cleaned
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
