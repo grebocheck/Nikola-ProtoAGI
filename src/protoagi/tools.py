@@ -4,6 +4,7 @@ import ipaddress
 import json
 import re
 import socket
+import ssl
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -11,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.error import URLError
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, urlparse
 from urllib.request import Request, urlopen
 
 from .config import PROJECT_ROOT, ToolPolicy
@@ -485,15 +486,11 @@ class ToolRegistry:
     def _web_get(self, args: dict[str, Any]) -> ToolResult:
         url = str(args["url"])
         max_chars = int(args.get("max_chars", 12000))
-        ssrf_error = _validate_public_url(url)
-        if ssrf_error is not None:
-            return ToolResult(False, error=ssrf_error)
-        request = Request(url, headers={"User-Agent": "ProtoAGI/0.2"})
         try:
-            with urlopen(request, timeout=30) as response:
-                content_type = response.headers.get("content-type", "")
-                raw = response.read(max_chars + 1)
+            content_type, raw = _fetch_public_url(url, max_chars=max_chars)
         except URLError as exc:
+            return ToolResult(False, error=str(exc))
+        except OSError as exc:
             return ToolResult(False, error=str(exc))
         text = raw.decode("utf-8", errors="replace")
         return ToolResult(True, {"url": url, "content_type": content_type, "text": text[:max_chars]})
@@ -573,6 +570,18 @@ def result_to_tool_content(result: dict[str, Any]) -> str:
 _BLOCKED_HOSTS = {"localhost", "metadata.google.internal", "metadata"}
 
 
+@dataclass(slots=True)
+class _ValidatedPublicUrl:
+    parsed: ParseResult
+    family: int
+    socktype: int
+    proto: int
+    sockaddr: tuple[Any, ...]
+    ip: str
+    port: int
+    host_header: str
+
+
 def _validate_public_url(url: str) -> str | None:
     """Return an error message if the URL points at private infra.
 
@@ -581,29 +590,40 @@ def _validate_public_url(url: str) -> str | None:
     restricted to http(s); credentials embedded in the URL are also rejected.
     """
 
+    _, error = _prepare_public_url(url)
+    return error
+
+
+def _prepare_public_url(url: str) -> tuple[_ValidatedPublicUrl | None, str | None]:
     try:
         parsed = urlparse(url)
     except ValueError as exc:
-        return f"invalid url: {exc}"
+        return None, f"invalid url: {exc}"
     if parsed.scheme not in ("http", "https"):
-        return "only http(s) URLs are allowed"
+        return None, "only http(s) URLs are allowed"
     if not parsed.hostname:
-        return "url must contain a hostname"
+        return None, "url must contain a hostname"
     if parsed.username or parsed.password:
-        return "credentials in url are not allowed"
+        return None, "credentials in url are not allowed"
     host = parsed.hostname.strip().lower()
     if host in _BLOCKED_HOSTS:
-        return f"blocked hostname: {host}"
+        return None, f"blocked hostname: {host}"
     try:
-        infos = socket.getaddrinfo(host, None)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        return None, f"invalid url port: {exc}"
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
-        return f"hostname resolution failed: {exc}"
+        return None, f"hostname resolution failed: {exc}"
+    first_public: tuple[int, int, int, tuple[Any, ...], str] | None = None
     for info in infos:
+        family, socktype, proto, _canonname, sockaddr = info
         addr = info[4][0]
         try:
             ip = ipaddress.ip_address(addr)
         except ValueError:
-            return f"unable to parse address: {addr}"
+            return None, f"unable to parse address: {addr}"
         if (
             ip.is_loopback
             or ip.is_private
@@ -612,8 +632,92 @@ def _validate_public_url(url: str) -> str | None:
             or ip.is_reserved
             or ip.is_unspecified
         ):
-            return f"blocked private address: {addr}"
-    return None
+            return None, f"blocked private address: {addr}"
+        if first_public is None:
+            first_public = (family, socktype, proto, sockaddr, addr)
+    if first_public is None:
+        return None, "hostname did not resolve to a usable public address"
+    family, socktype, proto, sockaddr, ip = first_public
+    host_header = host
+    default_port = 443 if parsed.scheme == "https" else 80
+    if port != default_port:
+        host_header = f"{host}:{port}"
+    return (
+        _ValidatedPublicUrl(
+            parsed=parsed,
+            family=family,
+            socktype=socktype,
+            proto=proto,
+            sockaddr=sockaddr,
+            ip=ip,
+            port=port,
+            host_header=host_header,
+        ),
+        None,
+    )
+
+
+def _fetch_public_url(url: str, *, max_chars: int) -> tuple[str, bytes]:
+    validated, error = _prepare_public_url(url)
+    if error is not None or validated is None:
+        raise URLError(error or "invalid url")
+    sock: socket.socket | ssl.SSLSocket | None = None
+    try:
+        sock = socket.socket(validated.family, validated.socktype, validated.proto)
+        sock.settimeout(30)
+        sock.connect(validated.sockaddr)
+        if validated.parsed.scheme == "https":
+            context = ssl.create_default_context()
+            sock = context.wrap_socket(sock, server_hostname=validated.parsed.hostname)
+        return _read_http_response(sock, validated, max_chars=max_chars)
+    finally:
+        if sock is not None:
+            sock.close()
+
+
+def _read_http_response(
+    sock: socket.socket | ssl.SSLSocket,
+    validated: _ValidatedPublicUrl,
+    *,
+    max_chars: int,
+) -> tuple[str, bytes]:
+    target = validated.parsed.path or "/"
+    if validated.parsed.query:
+        target = f"{target}?{validated.parsed.query}"
+    request = (
+        f"GET {target} HTTP/1.1\r\n"
+        f"Host: {validated.host_header}\r\n"
+        "User-Agent: ProtoAGI/0.2\r\n"
+        "Accept: text/*,*/*;q=0.1\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode("ascii")
+    sock.sendall(request)
+    raw = b""
+    limit = max(1, int(max_chars)) + 8192
+    while len(raw) < limit:
+        chunk = sock.recv(16384)
+        if not chunk:
+            break
+        raw += chunk
+    header_bytes, separator, body = raw.partition(b"\r\n\r\n")
+    if not separator:
+        raise URLError("invalid HTTP response")
+    header_text = header_bytes.decode("iso-8859-1", errors="replace")
+    lines = header_text.split("\r\n")
+    status_line = lines[0] if lines else ""
+    try:
+        status_code = int(status_line.split()[1])
+    except (IndexError, ValueError):
+        status_code = 0
+    if status_code >= 400:
+        raise URLError(f"HTTP {status_code}")
+    content_type = ""
+    for line in lines[1:]:
+        name, sep, value = line.partition(":")
+        if sep and name.strip().lower() == "content-type":
+            content_type = value.strip()
+            break
+    return content_type, body[: max(1, int(max_chars)) + 1]
 
 
 __all__ = [

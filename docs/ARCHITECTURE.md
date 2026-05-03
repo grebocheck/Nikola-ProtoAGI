@@ -31,7 +31,7 @@ embedding server is configured.
 - OpenAI-style tool definitions
 
 `protoagi.embedding` is a small dependency-free embedding client over
-`/v1/embeddings`, with a tiny LRU cache and a pure-Python cosine index.
+`/v1/embeddings`, with a tiny LRU cache and pure-Python exact/LSH indexes.
 
 ## 3. Agent loop
 
@@ -63,8 +63,8 @@ multicast / reserved IP space.
 
 ## 5. Memory
 
-SQLite is used for durable memory and runs in WAL mode with a single
-long-lived connection. The schema is typed:
+SQLite is used for durable memory. WAL mode is enabled once at init, then
+operations use short-lived per-call connections. The schema is typed:
 
 - `users`: known principals (Telegram user, agent caller).
 - `memory_items`: typed entries with `kind` (semantic, episodic, procedural,
@@ -73,6 +73,8 @@ long-lived connection. The schema is typed:
 - `memory_tags`: normalized tag table indexed for exact matching (no more
   `LIKE '%tag%'` substring confusion).
 - `memory_embeddings`: optional float32 BLOBs for semantic recall.
+- `media_blobs`: Telegram image bytes linked from `memory_items.media_id`.
+- `importance_cache`: bounded cache for optional LLM importance scoring.
 - `memory_items_fts`: FTS5 over text+tags.
 - `messages` / `tool_events` / `kv`: agent loop logs and small KV state.
 - `telegram_chats` / `telegram_messages`: Telegram-specific state.
@@ -89,6 +91,10 @@ A small evaluation harness lives in ``protoagi.memory_eval``: it loads a
 JSON corpus (``config/memory_eval/golden.json`` by default), plays probe
 queries through ``MemoryService.recall``, and reports recall@k and MRR.
 ``protoagi memory-eval [--with-embeddings]`` runs it end-to-end.
+
+`protoagi.memory_federation` exports curated active memories as HMAC-signed
+JSON bundles and imports them idempotently on another machine with
+`protoagi memory-export` / `protoagi memory-import`.
 
 ## 6. Evaluation
 
@@ -118,6 +124,9 @@ old monolith into focused units:
   as `response_format` so decisions arrive as well-formed JSON)
 - `stickers.py` / `vision.py` / `identity.py` — narrow concerns extracted
   for testing and iteration
+- `voice.py` — optional Telegram voice transcription and TTS helpers
+- `style.py` — per-chat reply-style tuning from lightweight engagement
+  signals
 - `prompts.py` — system prompt templates
 - `bot.py` — `NikolaBot` orchestration with `dispatch_due_reminders` and
   `run_reflection_pass` hooks
@@ -143,6 +152,7 @@ The bot deliberately uses a narrower surface than the workspace agent:
 - typing indicator with `sendChatAction`
 - sticker set discovery with `getStickerSet`
 - sticker sending with `sendSticker`
+- optional voice/audio transcription and optional TTS voice replies
 - shared Telegram long-term facts in SQLite, recalled through `MemoryService`
 - per-chat recent thread history for local dialogue context
 - Telegram message ID history for intentional replies

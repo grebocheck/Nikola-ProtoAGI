@@ -29,6 +29,7 @@ class FakeTelegram:
     def __init__(self) -> None:
         self.sent: list[dict] = []
         self.stickers: list[dict] = []
+        self.voices: list[dict] = []
         self.actions: list[dict] = []
         self.updates: list[dict] = []
 
@@ -82,6 +83,18 @@ class FakeTelegram:
         )
         return {"message_id": 100 + len(self.stickers)}
 
+    def send_voice_bytes(self, chat_id, data, *, filename="reply.ogg", reply_to_message_id=None, disable_notification=False):
+        self.voices.append(
+            {
+                "chat_id": str(chat_id),
+                "data": data,
+                "filename": filename,
+                "reply_to_message_id": reply_to_message_id,
+                "disable_notification": disable_notification,
+            }
+        )
+        return {"message_id": 200 + len(self.voices)}
+
 
 class FakeLLM:
     def __init__(self, content: str | list[str]) -> None:
@@ -98,6 +111,22 @@ class FakeLLM:
 class FakeVisionLLM(FakeLLM):
     def server_props(self):
         return {"media_marker": "<dynamic-media-marker>"}
+
+
+class FakeVoiceTranscriber:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def transcribe(self, attachment):
+        return self.text
+
+
+class FakeTTS:
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+
+    def synthesize(self, text: str):
+        return self.data
 
 
 class TelegramBotTests(unittest.TestCase):
@@ -218,6 +247,48 @@ class TelegramBotTests(unittest.TestCase):
             self.assertIsNotNone(chat)
             self.assertIsNotNone(chat.next_initiative_at)
 
+    def test_reply_style_feedback_is_recorded_after_user_replies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": true, "reply": "first", "memories": [], "next_check_minutes": 60}'
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(token="token"),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.bootstrap()
+            bot.process_update(
+                {
+                    "update_id": 1,
+                    "message": {
+                        "message_id": 10,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "text": "hello",
+                    },
+                }
+            )
+            bot.process_update(
+                {
+                    "update_id": 2,
+                    "message": {
+                        "message_id": 11,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "text": "again",
+                    },
+                }
+            )
+            style = json.loads(memory.get_kv("telegram:style:123") or "{}")
+            self.assertEqual(style["signals"]["reply"], 1)
+            first_payload = json.loads(llm.messages[0][1]["content"])
+            self.assertIn("adaptive_reply_style", first_payload)
+
     def test_privacy_mode_recalls_only_current_user_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             memory = MemoryStore(Path(tmp) / "memory.sqlite3")
@@ -292,11 +363,11 @@ class TelegramBotTests(unittest.TestCase):
                 }
             )
             self.assertTrue(processed)
-            self.assertEqual(telegram.sent[0]["text"], "I remember the nut allergy.")
-            self.assertEqual(len(llm.messages), 2)
-            merge_payload = json.loads(llm.messages[1][1]["content"])
-            self.assertEqual(merge_payload["tool_results"][0]["name"], "recall")
-            self.assertIn("nut allergy", json.dumps(merge_payload["tool_results"], ensure_ascii=False))
+            self.assertIn("nut allergy", telegram.sent[0]["text"])
+            self.assertEqual(len(llm.messages), 1)
+            metrics = json.loads(memory.get_kv("telegram:decision_metrics") or "{}")
+            self.assertEqual(metrics["llm_call_histogram"], {"1": 1})
+            self.assertEqual(metrics["tool_decisions"], 1)
 
     def test_process_update_stores_persona_self_memory_separately(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -697,6 +768,74 @@ class TelegramBotTests(unittest.TestCase):
             media_items = [item for item in memory.list_memories(limit=10) if item.media_id == "big"]
             self.assertTrue(media_items)
             self.assertIn("media", media_items[0].tags)
+
+    def test_voice_message_uses_transcription_and_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": true, "reply": "почула", "memories": [], "next_check_minutes": 60}'
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(token="token", voice_model="whisper-stub"),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot._voice = FakeVoiceTranscriber("тестовий голосовий текст")
+            bot.bootstrap()
+            processed = bot.process_update(
+                {
+                    "update_id": 234,
+                    "message": {
+                        "message_id": 914,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "voice": {"file_id": "voice-file", "duration": 3, "mime_type": "audio/ogg"},
+                    },
+                }
+            )
+            self.assertTrue(processed)
+            payload = llm.messages[0][1]["content"]
+            self.assertIn("тестовий голосовий текст", payload)
+            voice_items = [item for item in memory.list_memories(limit=10) if "voice" in item.tags]
+            self.assertTrue(voice_items)
+            self.assertIn("тестовий голосовий текст", voice_items[0].text)
+
+    def test_tts_sends_voice_reply_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": true, "reply": "voice reply", "memories": [], "next_check_minutes": 60}'
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(
+                    token="token",
+                    tts_enabled=True,
+                    tts_base_url="http://tts.local/v1",
+                    tts_model="tts-stub",
+                ),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot._tts = FakeTTS(b"voice-bytes")
+            bot.bootstrap()
+            bot.process_update(
+                {
+                    "update_id": 235,
+                    "message": {
+                        "message_id": 915,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "text": "say it",
+                    },
+                }
+            )
+            self.assertEqual(telegram.voices[0]["data"], b"voice-bytes")
 
     def test_photo_blind_reply_is_suppressed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

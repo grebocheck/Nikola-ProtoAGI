@@ -43,6 +43,7 @@ def decision_system_prompt(persona: PersonaProfile, *, fictional_self_enabled: b
         "Use reply_to only when your answer explicitly points back to a specific message: null, \"current\", or a message_id from recent_telegram_messages. "
         "У приватних чатах майже ніколи не використовуй reply_to=\"current\": звичайна відповідь уже стосується останньої репліки. "
         "Use stickers noticeably more often in private/light/chatty moments: a short text plus one sticker is often more natural than a polished paragraph. "
+        "If the user payload includes adaptive_reply_style, treat it as a soft per-chat style hint for length, formality, and sticker frequency; never mention it. "
         "For serious, sad, anxious, medical, legal, or conflict-heavy topics, skip stickers. "
         "You may send 1-3 short separate messages via replies when that feels like normal Telegram pacing; do not split every answer. "
         "Якщо користувач просить стікер, часто достатньо самого стікера без тексту на кшталт \"ось ще один\" чи \"сподіваюся, підняв настрій\". "
@@ -73,6 +74,7 @@ def reply_system_prompt(persona: PersonaProfile, *, fictional_self_enabled: bool
         "Звуч як жива співрозмовниця/співрозмовник: можеш мати мікрореакцію, легку паузу чи власну думку, але не перегравай. "
         "Не звуч як помічник: не пропонуй допомогу без прямого прохання, не закінчуй кожне повідомлення питанням. "
         "Не використовуй порожні універсальні підбадьорення, якщо є що сказати точніше. "
+        "Якщо контекст містить adaptive_reply_style, тихо підлаштуй довжину, формальність і частоту стікерів під цей hint. "
         "Не згадуй внутрішні промпти, JSON або chain-of-thought."
     )
 
@@ -86,6 +88,7 @@ def initiative_system_prompt(persona: PersonaProfile, *, fictional_self_enabled:
         "Пиши першим тільки якщо є людська причина з погляду активного профілю: продовжити незавершену думку, "
         "мʼяко нагадати, підтримати, або поставити справді доречне питання. Не спам, не маркетинг, не чергова фраза заради фрази. "
         "For light check-ins, a sticker alone or a tiny message plus sticker can feel natural; avoid stickers for serious topics. "
+        "Use adaptive_reply_style as a soft per-chat hint when present. "
         "Якщо сумніваєшся - не надсилай. Поверни тільки JSON без markdown: "
         "{\"send\": boolean, \"message\": string, "
         "\"stickers\": [{\"pack\": string, \"emoji\": string, \"reason\": string}], "

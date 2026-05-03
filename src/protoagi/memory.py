@@ -26,7 +26,7 @@ import math
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
 
@@ -205,6 +205,16 @@ def cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
     return dot / (math.sqrt(norm_left) * math.sqrt(norm_right))
 
 
+def _tag_suffix(tags: Iterable[str], prefix: str) -> str | None:
+    for raw in tags:
+        tag = str(raw)
+        if tag.startswith(prefix):
+            value = tag[len(prefix) :].strip()
+            if value:
+                return value
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Storage class
 
@@ -220,7 +230,7 @@ class MemoryStore:
     handles).
     """
 
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -332,6 +342,17 @@ class MemoryStore:
                     vector BLOB NOT NULL,
                     FOREIGN KEY (memory_id) REFERENCES memory_items(id) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS importance_cache (
+                    key TEXT PRIMARY KEY,
+                    importance REAL NOT NULL,
+                    kind TEXT NOT NULL,
+                    reasoning TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    last_accessed_at TEXT NOT NULL,
+                    access_count INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_importance_cache_accessed
+                    ON importance_cache(last_accessed_at);
                 CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     thread_id TEXT NOT NULL,
@@ -558,6 +579,146 @@ class MemoryStore:
             ).fetchone()
         return None if row is None else self._media_from_row(row)
 
+    def prune_orphan_media(self, *, older_than_days: float = 60.0) -> int:
+        """Delete old media blobs no memory item still references."""
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat(
+            timespec="seconds"
+        )
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                DELETE FROM media_blobs
+                WHERE created_at < ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM memory_items
+                    WHERE memory_items.media_id = media_blobs.file_id
+                  )
+                """,
+                (cutoff,),
+            )
+        return max(0, int(cur.rowcount))
+
+    def get_importance_cache(self, key: str) -> dict[str, Any] | None:
+        key = str(key or "").strip()
+        if not key:
+            return None
+        now = utc_now()
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT key, importance, kind, reasoning, created_at, last_accessed_at, access_count
+                FROM importance_cache
+                WHERE key = ?
+                """,
+                (key,),
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute(
+                """
+                UPDATE importance_cache
+                SET last_accessed_at = ?, access_count = access_count + 1
+                WHERE key = ?
+                """,
+                (now, key),
+            )
+        return {
+            "key": str(row["key"]),
+            "importance": float(row["importance"]),
+            "kind": str(row["kind"]),
+            "reasoning": str(row["reasoning"] or ""),
+            "created_at": str(row["created_at"]),
+            "last_accessed_at": str(row["last_accessed_at"]),
+            "access_count": int(row["access_count"]),
+        }
+
+    def set_importance_cache(
+        self,
+        key: str,
+        *,
+        importance: float,
+        kind: str,
+        reasoning: str = "",
+    ) -> None:
+        key = str(key or "").strip()
+        if not key:
+            return
+        if kind not in ALL_KINDS:
+            kind = KIND_FACT
+        now = utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO importance_cache(
+                    key, importance, kind, reasoning, created_at, last_accessed_at, access_count
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 0)
+                ON CONFLICT(key) DO UPDATE SET
+                    importance = excluded.importance,
+                    kind = excluded.kind,
+                    reasoning = excluded.reasoning,
+                    last_accessed_at = excluded.last_accessed_at
+                """,
+                (
+                    key,
+                    max(0.0, min(1.0, float(importance))),
+                    kind,
+                    str(reasoning or "")[:500],
+                    now,
+                    now,
+                ),
+            )
+
+    def prune_importance_cache(
+        self,
+        *,
+        older_than_days: float = 60.0,
+        max_entries: int = 10000,
+    ) -> dict[str, int]:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat(
+            timespec="seconds"
+        )
+        deleted_old = 0
+        deleted_overflow = 0
+        with self.connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM importance_cache WHERE created_at < ?",
+                (cutoff,),
+            )
+            deleted_old = max(0, int(cur.rowcount))
+            total = int(conn.execute("SELECT COUNT(*) FROM importance_cache").fetchone()[0])
+            overflow = max(0, total - max(0, int(max_entries)))
+            if overflow:
+                rows = conn.execute(
+                    """
+                    SELECT key
+                    FROM importance_cache
+                    ORDER BY last_accessed_at ASC, created_at ASC
+                    LIMIT ?
+                    """,
+                    (overflow,),
+                ).fetchall()
+                keys = [str(row["key"]) for row in rows]
+                if keys:
+                    placeholders = ",".join("?" for _ in keys)
+                    cur = conn.execute(
+                        f"DELETE FROM importance_cache WHERE key IN ({placeholders})",
+                        tuple(keys),
+                    )
+                    deleted_overflow = max(0, int(cur.rowcount))
+            remaining = int(conn.execute("SELECT COUNT(*) FROM importance_cache").fetchone()[0])
+        return {
+            "deleted": deleted_old + deleted_overflow,
+            "deleted_old": deleted_old,
+            "deleted_overflow": deleted_overflow,
+            "remaining": remaining,
+        }
+
+    def importance_cache_count(self) -> int:
+        with self.connect() as conn:
+            return int(conn.execute("SELECT COUNT(*) FROM importance_cache").fetchone()[0])
+
     def attach_embedding(
         self,
         memory_id: int,
@@ -741,6 +902,61 @@ class MemoryStore:
                     self._memory_from_row(row, self._tags_for(conn, int(row["id"])))
                 )
         return results
+
+    def rescope_telegram_memories(
+        self,
+        *,
+        to_scope: str = SCOPE_USER,
+        dry_run: bool = False,
+    ) -> dict[str, int | bool | str]:
+        """Move legacy Telegram global rows into a narrower typed scope.
+
+        The first supported migration targets privacy-mode deployments:
+        rows tagged ``user:<id>`` become ``scope=user`` with ``user_id`` set.
+        ``source_chat:<id>`` is copied into ``chat_id`` when the row does not
+        already have one.
+        """
+
+        if to_scope != SCOPE_USER:
+            raise ValueError("only --to user is currently supported")
+        matched = 0
+        updated = 0
+        skipped_no_user_tag = 0
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM memory_items
+                WHERE scope = ?
+                """,
+                (SCOPE_GLOBAL,),
+            ).fetchall()
+            for row in rows:
+                tags = self._tags_for(conn, int(row["id"]))
+                user_id = _tag_suffix(tags, "user:")
+                if not user_id:
+                    skipped_no_user_tag += 1
+                    continue
+                matched += 1
+                chat_id = row["chat_id"] or _tag_suffix(tags, "source_chat:")
+                if dry_run:
+                    continue
+                conn.execute(
+                    """
+                    UPDATE memory_items
+                    SET scope = ?, user_id = ?, chat_id = COALESCE(chat_id, ?)
+                    WHERE id = ?
+                    """,
+                    (SCOPE_USER, user_id, None if chat_id is None else str(chat_id), int(row["id"])),
+                )
+                updated += 1
+        return {
+            "to": to_scope,
+            "dry_run": dry_run,
+            "matched": matched,
+            "updated": updated,
+            "skipped_no_user_tag": skipped_no_user_tag,
+        }
 
     def fts_candidates(
         self,

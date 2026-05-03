@@ -67,11 +67,23 @@ class AdminServerTests(unittest.TestCase):
         self.assertEqual(data["memories_active"], 2)
         self.assertEqual(data["memories_superseded"], 0)
         self.assertIn("telegram_chats", data)
+        self.assertIn("media_blobs", data)
+        self.assertIn("importance_cache", data)
+        self.assertIn("telegram_decision_avg_llm_calls", data)
 
     def test_memories_endpoint(self) -> None:
         data = self._get_json("/api/memories?limit=10")
         texts = [item["text"] for item in data]
         self.assertIn("alpha fact about coffee", texts)
+
+    def test_memory_graph_endpoint(self) -> None:
+        data = self._get_json("/api/memory-graph?limit=20")
+        self.assertIn("nodes", data)
+        self.assertIn("edges", data)
+        node_ids = {node["id"] for node in data["nodes"]}
+        self.assertTrue(any(node_id.startswith("memory:") for node_id in node_ids))
+        self.assertTrue(any(node_id == "tag:preference" for node_id in node_ids))
+        self.assertTrue(any(edge["kind"] == "tagged" for edge in data["edges"]))
 
     def test_media_endpoint_returns_blob_bytes(self) -> None:
         self.memory.store_media_blob(

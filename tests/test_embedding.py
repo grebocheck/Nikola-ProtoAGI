@@ -27,6 +27,25 @@ class EmbeddingClientTests(unittest.TestCase):
         client = EmbeddingClient(EmbeddingConfig())
         self.assertIsNone(client.embed("anything"))
 
+    def test_cache_eviction_is_lru(self) -> None:
+        client = EmbeddingClient(
+            EmbeddingConfig(base_url="http://embedding.local/v1", model="stub", cache_size=2)
+        )
+        calls: list[str] = []
+
+        def fake_request(text: str) -> list[float]:
+            calls.append(text)
+            return [float(len(text))]
+
+        client._request = fake_request  # type: ignore[method-assign]
+        self.assertEqual(client.embed("hot"), [3.0])
+        self.assertEqual(client.embed("cold"), [4.0])
+        self.assertEqual(client.embed("hot"), [3.0])
+        self.assertEqual(client.embed("new"), [3.0])
+        self.assertIn("hot", client._cache)
+        self.assertNotIn("cold", client._cache)
+        self.assertEqual(calls, ["hot", "cold", "new"])
+
 
 class EmbeddingIndexTests(unittest.TestCase):
     def test_lsh_backend_returns_exact_vector_hit(self) -> None:

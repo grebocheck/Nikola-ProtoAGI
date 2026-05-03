@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
+from typing import Any
 
 from .admin import serve as serve_admin
 from .agent import ProtoAgent
@@ -13,9 +15,16 @@ from .config import AgentConfig, DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PATH, LlamaS
 from .embedding import EmbeddingClient, EmbeddingConfig
 from .memory import MemoryStore
 from .memory_eval import DEFAULT_CORPUS_PATH, run_eval
+from .memory_federation import (
+    MemoryFederationError,
+    export_memory_bundle,
+    import_memory_bundle,
+)
 from .memory_service import MemoryService
 from .openai_compat import OpenAICompatibleClient, OpenAICompatError
 from .runtime import run_server_foreground, status_report
+from .telegram.json_io import DECISION_JSON_SCHEMA, extract_json_object
+from .telegram.tool_runner import TelegramToolRunner
 from .telegram_bot import AsyncBotRunner, BotRunner, TelegramApiError, TelegramConfig, build_nikola_bot, is_telegram_polling_conflict
 from .tools import default_registry
 
@@ -55,6 +64,19 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--max-tokens", type=int, default=256)
     bench.add_argument("--base-url", default=None)
     bench.add_argument("--model", default=None)
+
+    bench_tools = sub.add_parser(
+        "bench-tools",
+        help="Measure whether tools+response_format emits tool_calls or tool_request.",
+    )
+    bench_tools.add_argument(
+        "--prompt",
+        default="Use the recall tool to find what you remember about coffee.",
+    )
+    bench_tools.add_argument("--rounds", type=int, default=3)
+    bench_tools.add_argument("--max-tokens", type=int, default=512)
+    bench_tools.add_argument("--base-url", default=None)
+    bench_tools.add_argument("--model", default=None)
 
     llama_bench = sub.add_parser("bench-llama", help="Run llama-bench against the local GGUF")
     add_server_args(llama_bench)
@@ -125,6 +147,37 @@ def build_parser() -> argparse.ArgumentParser:
     memory_consolidate.add_argument("--persona", default=None)
     memory_consolidate.add_argument("--dry-run", action="store_true")
     memory_consolidate.add_argument("--json", action="store_true", help="Print full JSON including dry-run plan.")
+
+    memory_rescope = sub.add_parser(
+        "memory-rescope",
+        help="One-shot migration for legacy Telegram memory scopes.",
+    )
+    memory_rescope.add_argument("--db", default=None)
+    memory_rescope.add_argument("--to", choices=["user"], required=True)
+    memory_rescope.add_argument("--dry-run", action="store_true")
+    memory_rescope.add_argument("--json", action="store_true")
+
+    memory_export = sub.add_parser(
+        "memory-export",
+        help="Export a signed curated memory bundle for federation.",
+    )
+    memory_export.add_argument("--db", default=None)
+    memory_export.add_argument("--to", required=True)
+    memory_export.add_argument("--secret", default=None)
+    memory_export.add_argument("--secret-env", default="PROTOAGI_FEDERATION_SECRET")
+    memory_export.add_argument("--source", default="protoagi")
+    memory_export.add_argument("--scope", default=None)
+    memory_export.add_argument("--tag", action="append", default=[])
+    memory_export.add_argument("--limit", type=int, default=1000)
+
+    memory_import = sub.add_parser(
+        "memory-import",
+        help="Verify and import a signed federated memory bundle.",
+    )
+    memory_import.add_argument("--db", default=None)
+    memory_import.add_argument("--from", dest="from_path", required=True)
+    memory_import.add_argument("--secret", default=None)
+    memory_import.add_argument("--secret-env", default="PROTOAGI_FEDERATION_SECRET")
 
     backup = sub.add_parser("backup", help="Create an online SQLite backup.")
     backup.add_argument("--db", default=None)
@@ -295,6 +348,80 @@ def cmd_bench(args: argparse.Namespace) -> int:
     )
     print(endpoint_results_to_json(results))
     return 0
+
+
+def cmd_bench_tools(args: argparse.Namespace) -> int:
+    config = AgentConfig.load().with_cli_overrides(base_url=args.base_url, model=args.model)
+    client = OpenAICompatibleClient(config.base_url, config.model)
+    counts = {"tool_calls": 0, "tool_request": 0, "both": 0, "neither": 0}
+    rounds = max(1, int(args.rounds))
+    results: list[dict[str, Any]] = []
+    for index in range(rounds):
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Return Telegram decision JSON. If the user asks what is remembered, "
+                    "use the recall tool instead of guessing."
+                ),
+            },
+            {"role": "user", "content": str(args.prompt)},
+        ]
+        response = client.chat_completion(
+            messages,
+            tools=TelegramToolRunner.schemas(),
+            temperature=0.0,
+            top_p=1.0,
+            max_tokens=int(args.max_tokens),
+            response_format=DECISION_JSON_SCHEMA,
+        )
+        message = response.get("choices", [{}])[0].get("message", {})
+        classification = classify_tool_response_message(message)
+        counts[classification] += 1
+        results.append(
+            {
+                "round": index + 1,
+                "classification": classification,
+                "has_tool_calls": bool(message.get("tool_calls")),
+                "content_preview": str(message.get("content") or "")[:500],
+            }
+        )
+    print(
+        json.dumps(
+            {
+                "rounds": rounds,
+                "counts": counts,
+                "canonical_path_hint": _tool_canonical_hint(counts),
+                "results": results,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
+def classify_tool_response_message(message: dict[str, Any]) -> str:
+    has_tool_calls = bool(message.get("tool_calls"))
+    content = str(message.get("content") or "")
+    payload = extract_json_object(content) if content else {}
+    tool_request = payload.get("tool_request") if isinstance(payload, dict) else None
+    has_tool_request = isinstance(tool_request, dict) and bool(tool_request.get("name"))
+    if has_tool_calls and has_tool_request:
+        return "both"
+    if has_tool_calls:
+        return "tool_calls"
+    if has_tool_request:
+        return "tool_request"
+    return "neither"
+
+
+def _tool_canonical_hint(counts: dict[str, int]) -> str:
+    if counts.get("tool_calls", 0) + counts.get("both", 0) > counts.get("tool_request", 0):
+        return "tool_calls"
+    if counts.get("tool_request", 0) + counts.get("both", 0) > 0:
+        return "tool_request"
+    return "unverified"
 
 
 def cmd_bench_llama(args: argparse.Namespace) -> int:
@@ -520,6 +647,81 @@ def cmd_memory_consolidate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_memory_rescope(args: argparse.Namespace) -> int:
+    db_path = _resolve_db_path(args)
+    if not db_path.exists():
+        print(f"no database at {db_path}", file=sys.stderr)
+        return 2
+    store = MemoryStore(db_path)
+    result = store.rescope_telegram_memories(to_scope=args.to, dry_run=args.dry_run)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(
+            "rescope {matched} matched, {updated} updated, {skipped_no_user_tag} skipped".format(
+                **result
+            )
+        )
+    return 0
+
+
+def cmd_memory_export(args: argparse.Namespace) -> int:
+    db_path = _resolve_db_path(args)
+    if not db_path.exists():
+        print(f"no database at {db_path}", file=sys.stderr)
+        return 2
+    secret = _federation_secret(args)
+    store = MemoryStore(db_path)
+    result = export_memory_bundle(
+        store,
+        Path(args.to).resolve(),
+        secret=secret,
+        source=args.source,
+        scope=args.scope,
+        require_tags=args.tag,
+        limit=args.limit,
+    )
+    print(
+        json.dumps(
+            {
+                "path": str(result.path),
+                "exported": result.exported,
+                "signature": result.signature,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
+def cmd_memory_import(args: argparse.Namespace) -> int:
+    db_path = _resolve_db_path(args)
+    secret = _federation_secret(args)
+    store = MemoryStore(db_path)
+    result = import_memory_bundle(store, Path(args.from_path).resolve(), secret=secret)
+    print(
+        json.dumps(
+            {
+                "source": result.source,
+                "imported": result.imported,
+                "skipped": result.skipped,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _federation_secret(args: argparse.Namespace) -> str:
+    secret = str(getattr(args, "secret", None) or "").strip()
+    if secret:
+        return secret
+    env_name = str(getattr(args, "secret_env", "PROTOAGI_FEDERATION_SECRET"))
+    return os.environ.get(env_name, "").strip()
+
+
 def cmd_backup(args: argparse.Namespace) -> int:
     db_path = _resolve_db_path(args)
     to_path = Path(args.to).resolve() if args.to else default_backup_path(db_path)
@@ -566,6 +768,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_chat(args)
         if args.command == "bench":
             return cmd_bench(args)
+        if args.command == "bench-tools":
+            return cmd_bench_tools(args)
         if args.command == "bench-llama":
             return cmd_bench_llama(args)
         if args.command == "init-config":
@@ -580,6 +784,12 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_memory_prune(args)
         if args.command == "memory-consolidate":
             return cmd_memory_consolidate(args)
+        if args.command == "memory-rescope":
+            return cmd_memory_rescope(args)
+        if args.command == "memory-export":
+            return cmd_memory_export(args)
+        if args.command == "memory-import":
+            return cmd_memory_import(args)
         if args.command == "backup":
             return cmd_backup(args)
         if args.command == "restore":
@@ -604,6 +814,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except BackupError as exc:
         print(f"Backup error: {exc}", file=sys.stderr)
+        return 2
+    except MemoryFederationError as exc:
+        print(f"Memory federation error: {exc}", file=sys.stderr)
         return 2
     return 1
 

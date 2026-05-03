@@ -68,6 +68,7 @@ from .vision import (
     VISION_PROMPT_LEAK_RE,
     clean_vision_description,
 )
+from .voice import VoiceAttachment, VoiceSynthesisConfig, VoiceTranscriptionConfig
 
 
 __all__ = [
@@ -100,6 +101,9 @@ __all__ = [
     "TelegramConfig",
     "VISION_BOILERPLATE_PATTERNS",
     "VISION_PROMPT_LEAK_RE",
+    "VoiceAttachment",
+    "VoiceSynthesisConfig",
+    "VoiceTranscriptionConfig",
     "auto_sticker_choice",
     "build_nikola_bot",
     "clean_vision_description",

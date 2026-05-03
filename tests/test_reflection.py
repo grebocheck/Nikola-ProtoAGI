@@ -146,6 +146,33 @@ class ReflectionTests(unittest.TestCase):
         self.assertGreaterEqual(result["pruned_global"], 1)
         self.assertIsNone(self.memory.get_memory(stored))
 
+    def test_reflection_prunes_orphan_media_and_old_importance_cache(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        self.memory.store_media_blob(file_id="orphan", mime="image/jpeg", data=b"old")
+        self.memory.set_importance_cache(
+            "old-score",
+            importance=0.7,
+            kind="semantic",
+            reasoning="old",
+        )
+        old = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat(timespec="seconds")
+        with self.memory.connect() as conn:
+            conn.execute(
+                "UPDATE media_blobs SET created_at = ? WHERE file_id = ?",
+                (old, "orphan"),
+            )
+            conn.execute(
+                "UPDATE importance_cache SET created_at = ?, last_accessed_at = ? WHERE key = ?",
+                (old, old, "old-score"),
+            )
+        bot = self._make_bot(ScriptedLLM([json.dumps({"reflections": []})]))
+        result = bot.run_reflection_pass()
+        self.assertEqual(result["pruned_media"], 1)
+        self.assertEqual(result["pruned_importance_cache"], 1)
+        self.assertIsNone(self.memory.get_media_blob("orphan"))
+        self.assertIsNone(self.memory.get_importance_cache("old-score"))
+
     def test_reflection_skips_when_disabled(self) -> None:
         bot = NikolaBot(
             telegram=FakeTelegram(),

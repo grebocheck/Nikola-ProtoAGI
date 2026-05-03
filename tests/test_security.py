@@ -1,5 +1,7 @@
 import tempfile
 import unittest
+import socket
+from unittest import mock
 from pathlib import Path
 
 from protoagi.config import ToolPolicy
@@ -21,6 +23,54 @@ class SsrfTests(unittest.TestCase):
     def test_rejects_non_http_schemes(self) -> None:
         self.assertIsNotNone(_validate_public_url("file:///etc/passwd"))
         self.assertIsNotNone(_validate_public_url("ftp://example.com/file"))
+
+    def test_web_get_uses_validated_ip_without_second_dns_lookup(self) -> None:
+        class FakeSocket:
+            def __init__(self) -> None:
+                self.chunks = [
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello",
+                    b"",
+                ]
+
+            def settimeout(self, timeout: int) -> None:
+                return None
+
+            def connect(self, sockaddr) -> None:
+                connected.append(sockaddr)
+
+            def sendall(self, data: bytes) -> None:
+                sent.append(data)
+
+            def recv(self, size: int) -> bytes:
+                return self.chunks.pop(0)
+
+            def close(self) -> None:
+                return None
+
+        calls: list[tuple[str, int]] = []
+        connected: list[tuple[str, int]] = []
+        sent: list[bytes] = []
+
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            calls.append((host, port))
+            if len(calls) == 1:
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            registry = ToolRegistry(
+                ToolContext(root=Path(tmp), memory=memory, policy=ToolPolicy())
+            )
+            with mock.patch("protoagi.tools.socket.getaddrinfo", side_effect=fake_getaddrinfo):
+                with mock.patch("protoagi.tools.socket.socket", return_value=FakeSocket()):
+                    result = registry.execute("web_get", {"url": "http://example.com/", "max_chars": 100})
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["data"]["text"], "hello")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(connected, [("93.184.216.34", 80)])
+        self.assertIn(b"Host: example.com", sent[0])
 
 
 class ShellBlocklistTests(unittest.TestCase):

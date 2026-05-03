@@ -111,6 +111,20 @@ With that flag off, remembered Telegram facts are stored in `scope=user` when
 the sender is known, and recall only returns facts for the current Telegram
 user. Chat-scoped system facts remain available inside the originating chat.
 
+If you previously ran the bot with global Telegram memory and then switch
+`PROTOAGI_TELEGRAM_GLOBAL_MEMORY=0`, migrate legacy rows once so old facts
+tagged with `user:<id>` remain visible to that same user:
+
+```powershell
+$env:PYTHONPATH="src"
+python -m protoagi memory-rescope --db data/protoagi.sqlite3 --to user --dry-run --json
+python -m protoagi memory-rescope --db data/protoagi.sqlite3 --to user
+```
+
+The migration only touches rows that still have `scope=global` and a
+`user:<id>` tag. It copies `source_chat:<id>` into `chat_id` when available,
+so future privacy-mode recall can keep the original Telegram context.
+
 ## Profiles
 
 Profiles are not Telegram commands. Set them in `.env` and restart the bot:
@@ -201,6 +215,12 @@ TELEGRAM_MAX_REPLY_MESSAGES=3
 The automatic sticker nudge is skipped for serious or heavy topics and only
 fires on clear emotional triggers, with a small per-chat cooldown.
 
+The bot also keeps a small per-chat style tuner in SQLite. Replies, reaction
+updates, and edited messages are treated as lightweight engagement signals; the
+next decision prompt receives a soft `adaptive_reply_style` hint for reply
+length, formality, and sticker frequency. The hint is advisory only and is not
+shown to the chat.
+
 ## Images
 
 Photo messages and image documents are accepted. If `PROTOAGI_VISION_MODEL` is
@@ -229,6 +249,29 @@ pack metadata, so the model can react to them instead of ignoring them.
 Image bytes are stored in `media_blobs` with their caption and linked from a
 memory item via `media_id`. This lets later recall surface old photo captions;
 the admin API can serve the original bytes at `/api/media/<file_id>`.
+
+## Voice
+
+Voice messages and Telegram audio messages are accepted. If
+`PROTOAGI_VOICE_MODEL` is configured, the bot downloads the Telegram audio file,
+sends it to an OpenAI-compatible `/audio/transcriptions` endpoint, and includes
+the transcript in the conversation context. Successful transcripts are stored
+as episodic voice memory.
+
+```env
+PROTOAGI_VOICE_BASE_URL=http://127.0.0.1:8083/v1
+PROTOAGI_VOICE_MODEL=whisper-large-v3
+```
+
+Outgoing TTS is opt-in. When enabled, the bot still sends the normal text reply
+and then adds a Telegram voice message generated from `/audio/speech`.
+
+```env
+PROTOAGI_TTS_ENABLED=1
+PROTOAGI_TTS_BASE_URL=http://127.0.0.1:8084/v1
+PROTOAGI_TTS_MODEL=tts-local
+PROTOAGI_TTS_VOICE=alloy
+```
 
 ## Initiative
 

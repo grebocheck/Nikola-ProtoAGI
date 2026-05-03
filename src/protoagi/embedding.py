@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Sequence
 from urllib.error import HTTPError, URLError
@@ -42,8 +43,7 @@ class EmbeddingClient:
 
     def __init__(self, config: EmbeddingConfig) -> None:
         self.config = config
-        self._cache: dict[str, list[float]] = {}
-        self._cache_keys: list[str] = []
+        self._cache: OrderedDict[str, list[float]] = OrderedDict()
 
     def embed(self, text: str) -> list[float] | None:
         text = text.strip()
@@ -51,6 +51,7 @@ class EmbeddingClient:
             return None
         cached = self._cache.get(text)
         if cached is not None:
+            self._cache.move_to_end(text)
             return list(cached)
         try:
             vector = self._request(text)
@@ -91,12 +92,12 @@ class EmbeddingClient:
         if self.config.cache_size <= 0:
             return
         if text in self._cache:
+            self._cache[text] = list(vector)
+            self._cache.move_to_end(text)
             return
         self._cache[text] = list(vector)
-        self._cache_keys.append(text)
-        while len(self._cache_keys) > self.config.cache_size:
-            evict = self._cache_keys.pop(0)
-            self._cache.pop(evict, None)
+        while len(self._cache) > self.config.cache_size:
+            self._cache.popitem(last=False)
 
 
 class EmbeddingBackend:

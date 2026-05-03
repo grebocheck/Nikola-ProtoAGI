@@ -26,7 +26,9 @@ class FakeTelegram:
         ]
 
     def get_updates(self, *, offset, timeout_seconds, allowed_updates):
-        return list(self.updates)
+        if offset is None:
+            return list(self.updates)
+        return [update for update in self.updates if int(update["update_id"]) >= int(offset)]
 
 
 @dataclass(slots=True)
@@ -60,6 +62,24 @@ class SlowBot:
         return None
 
 
+class FlakyBot(SlowBot):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed_once = False
+        self.errors: list[str] = []
+
+    def process_update(self, update: dict) -> bool:
+        update_id = int(update["update_id"])
+        if update_id == 2 and not self.failed_once:
+            self.failed_once = True
+            raise RuntimeError("temporary failure")
+        self.processed.append(update_id)
+        return True
+
+    def _log_loop_exception(self, exc: BaseException) -> None:
+        self.errors.append(str(exc))
+
+
 class AsyncBotRunnerTests(unittest.TestCase):
     def test_poll_once_processes_updates_concurrently(self) -> None:
         bot = SlowBot()
@@ -74,6 +94,20 @@ class AsyncBotRunnerTests(unittest.TestCase):
         self.assertEqual(processed, 2)
         self.assertCountEqual(bot.processed, [1, 2])
         self.assertLess(elapsed, 0.35)
+        self.assertEqual(bot.memory.values[OFFSET_KEY], "3")
+
+    def test_failed_update_is_replayed_next_poll(self) -> None:
+        bot = FlakyBot()
+        runner = AsyncBotRunner(bot, max_concurrent_updates=2)
+
+        first = asyncio.run(runner.poll_once())
+        self.assertEqual(first, 1)
+        self.assertEqual(bot.memory.values[OFFSET_KEY], "2")
+        self.assertIn("temporary failure", bot.errors[0])
+
+        second = asyncio.run(runner.poll_once())
+        self.assertEqual(second, 1)
+        self.assertEqual(bot.processed, [1, 2])
         self.assertEqual(bot.memory.values[OFFSET_KEY], "3")
 
 

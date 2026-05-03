@@ -52,26 +52,42 @@ class AsyncBotRunner:
             self.bot.telegram.get_updates,
             offset=offset,
             timeout_seconds=self.bot.telegram_config.poll_timeout_seconds,
-            allowed_updates=["message"],
+            allowed_updates=["message", "edited_message", "message_reaction"],
         )
         if not updates:
             return 0
         tasks = [asyncio.create_task(self._process_update(update)) for update in updates]
         # ``return_exceptions=True`` keeps a single failure from cancelling
-        # the rest. We still advance the offset to ``max_update_id + 1`` so
-        # we don't busy-loop on a permanently broken update; transient
-        # failures are caught inside ``_process_update`` and logged through
-        # the bot's error log.
+        # the rest. Offsets only acknowledge the contiguous successful prefix:
+        # advancing past a failed update would ask Telegram to drop it.
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        max_update_id = max(int(update.get("update_id", 0)) for update in updates)
-        await asyncio.to_thread(self.bot.memory.set_kv, OFFSET_KEY, str(max_update_id + 1))
         processed = 0
-        for item in results:
+        successful_ids: list[int] = []
+        failed_ids: list[int] = []
+        for update, item in zip(updates, results):
+            update_id = int(update.get("update_id", 0))
             if isinstance(item, BaseException):
                 self.bot._log_loop_exception(item)  # type: ignore[attr-defined]
+                failed_ids.append(update_id)
                 continue
+            successful_ids.append(update_id)
             if item:
                 processed += 1
+        if failed_ids:
+            next_offset = min(failed_ids)
+            acknowledged = [item for item in successful_ids if item < next_offset]
+            if acknowledged:
+                await asyncio.to_thread(
+                    self.bot.memory.set_kv,
+                    OFFSET_KEY,
+                    str(max(acknowledged) + 1),
+                )
+        elif successful_ids:
+            await asyncio.to_thread(
+                self.bot.memory.set_kv,
+                OFFSET_KEY,
+                str(max(successful_ids) + 1),
+            )
         return processed
 
     async def _process_update(self, update: dict) -> bool:

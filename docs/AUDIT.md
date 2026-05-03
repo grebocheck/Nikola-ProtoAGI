@@ -18,6 +18,47 @@ The repository is now arranged so source code and documentation can be pushed to
 git without committing local model files, downloaded runtimes, logs, databases,
 or secrets.
 
+## 2026-05-03 phase 9 (P3 research baselines)
+
+- Self-tuning reply style: `ReplyStyleTuner` records per-chat engagement
+  signals from replies, reaction updates, and edited messages, then passes an
+  `adaptive_reply_style` hint into Telegram decision/reply/initiative prompts.
+- Memory federation: `protoagi memory-export` and `protoagi memory-import`
+  create and verify HMAC-signed JSON bundles. Imports are idempotent through
+  federation-id tags.
+- Admin graph: `GET /api/memory-graph` returns memory/tag nodes plus tag and
+  supersession edges; the dashboard renders them in a dependency-free canvas
+  force layout.
+- Voice: Telegram voice/audio messages can be transcribed through an
+  OpenAI-compatible `/audio/transcriptions` endpoint and stored as episodic
+  voice memory. Optional TTS uses `/audio/speech` and sends a Telegram voice
+  reply after text.
+
+Test count: 130 -> 138.
+
+## 2026-05-03 phase 8 (series A follow-up cleared)
+
+- Privacy-mode migrations: `protoagi memory-rescope --to user` moves legacy
+  Telegram rows from `scope=global` to `scope=user` based on existing
+  `user:<id>` / `source_chat:<id>` tags.
+- Telegram tool decisions now inline trivial `recall` results and record
+  LLM-call histograms / averages in admin stats, so simple memory questions no
+  longer require a merge completion.
+- `protoagi bench-tools` measures whether the local model emits native
+  `tool_calls`, JSON `tool_request`, both, or neither when both `tools` and
+  `response_format` are set.
+- `media_blobs` and LLM importance scores now have garbage collection:
+  reflection prunes old orphan media plus old `importance_cache` rows, and
+  admin stats report both row counts separately.
+- `web_get` resolves and validates DNS once, then opens the HTTP socket to the
+  validated IP to avoid DNS rebinding between validation and fetch.
+- `AsyncBotRunner.poll_once` no longer acknowledges failed updates past the
+  Telegram offset cursor, so transient failures can replay on the next poll.
+- `EmbeddingClient` now uses an `OrderedDict` LRU cache instead of FIFO
+  insertion-order eviction.
+
+Test count: 121 -> 130.
+
 ## 2026-05-03 phase 6 (P2 backlog cleared)
 
 - Embedding recall now goes through an `EmbeddingBackend` boundary. The exact
@@ -39,8 +80,9 @@ Test count: 116 → 121.
 ## 2026-05-03 phase 5 (P1 backlog cleared)
 
 - `MemoryService.score_importance_llm` adds opt-in model scoring for memory
-  importance/kind via `PROTOAGI_LLM_IMPORTANCE=1`, with SHA256 cache entries in
-  `kv` and deterministic heuristic fallback.
+  importance/kind via `PROTOAGI_LLM_IMPORTANCE=1`, with SHA256 cache entries
+  (moved from `kv` to `importance_cache` in Phase 8) and deterministic
+  heuristic fallback.
 - Telegram memory can now be per-user isolated with
   `PROTOAGI_TELEGRAM_GLOBAL_MEMORY=0`; user facts use `scope=user`, recall
   passes the current Telegram `user_id`, and global behavior remains the

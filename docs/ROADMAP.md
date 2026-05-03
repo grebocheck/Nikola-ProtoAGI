@@ -139,12 +139,12 @@ Tightened a few things uncovered by re-reading P1+P2 work:
 - ``AsyncBotRunner.poll_once`` now passes
   ``return_exceptions=True`` to ``asyncio.gather`` and logs per-update
   failures instead of cancelling the rest of the batch. Permanent
-  failures still don't busy-loop; transient failures are tracked as a
-  P0 follow-up (item A6).
+  failures still don't busy-loop; transient replay semantics shipped later
+  in Phase 8 (item A6).
 
 No behavior tests changed. 121 tests still green.
 
-Bugs found but not yet fixed (now items A1–A8 in P0 backlog):
+Bugs found by this audit became items A1–A8 and are fixed in Phase 8:
 
 - **A1** Privacy-mode flag silently hides legacy global rows.
 - **A2** Tool-augmented decisions cost up to 3 LLM calls.
@@ -154,6 +154,47 @@ Bugs found but not yet fixed (now items A1–A8 in P0 backlog):
 - **A6** Async runner advances offset on transient failure.
 - **A7** Importance cache in ``kv`` has no eviction.
 - **A8** ``EmbeddingClient`` cache evicts FIFO instead of LRU.
+
+### Phase 8 — series A audit fixes (2026-05-03)
+Closed the A1–A8 follow-up cohort:
+
+- **A1** added `protoagi memory-rescope --to user`, backed by
+  `MemoryStore.rescope_telegram_memories`, and documented the privacy-mode
+  migration in [docs/TELEGRAM.md](TELEGRAM.md).
+- **A2** inlines trivial `recall` tool answers, avoiding the merge LLM call
+  on simple "what do you remember?" paths, and records per-decision LLM-call
+  histograms / averages in admin stats.
+- **A3** added `protoagi bench-tools`, which reports whether a local model
+  emitted `tool_calls`, `tool_request`, both, or neither when both
+  `tools` and `response_format` are set.
+- **A4** added `MemoryStore.prune_orphan_media(older_than_days=...)` and
+  runs it during reflection.
+- **A5** hardened `web_get` against DNS rebinding by resolving once,
+  validating the resolved IP, then opening the HTTP socket to that same IP.
+- **A6** changed async polling offset handling so failed updates are not
+  acknowledged past Telegram's offset cursor and can be replayed.
+- **A7** moved LLM importance scoring cache out of `kv` into
+  `importance_cache` with pruning and admin row-count stats.
+- **A8** replaced FIFO embedding cache eviction with true LRU via
+  `OrderedDict`.
+
+### Phase 9 — P3 research baselines (2026-05-03)
+Turned each P3 research direction into a dependency-free first working layer:
+
+- **P3-15** self-tuning reply style: a per-chat UCB-style tuner stores
+  engagement signals in SQLite `kv`, learns from replies/reactions/edits,
+  and injects an `adaptive_reply_style` hint into decision/reply/initiative
+  prompts.
+- **P3-16** memory federation: `protoagi memory-export` and
+  `protoagi memory-import` move curated memory bundles between machines as
+  HMAC-signed JSON, with idempotent imports through federation-id tags.
+- **P3-17** admin memory graph: `/api/memory-graph` exposes memory/tag
+  nodes plus tag and supersession edges; the admin dashboard renders a small
+  no-dependency force-directed canvas graph.
+- **P3-18** voice: Telegram voice/audio messages can be transcribed through
+  an OpenAI-compatible `/audio/transcriptions` endpoint and stored as
+  episodic voice memory. Optional TTS sends a generated Telegram voice reply
+  after the normal text reply.
 
 ---
 
@@ -169,7 +210,7 @@ All four original P0 items shipped on 2026-05-03:
 - ✅ #3 Admin pin/unpin + edit
 - ✅ #4 Memory eval regression gate
 
-The follow-up audit added a fresh P0 cohort (A1–A8); see below.
+The follow-up audit added a fresh P0 cohort (A1–A8); all shipped in Phase 8.
 
 ### P1 — done (see Phase 5 above)
 
@@ -189,7 +230,18 @@ All four P2 items shipped on 2026-05-03:
 - ✅ #13 Plan-and-Reflect agent loop
 - ✅ #14 Multi-instance deployment
 
-### P0 — bugs and gaps from the 2026-05-03 follow-up audit
+### P3 — baseline shipped (see Phase 9 above)
+
+All four P3 research baselines shipped on 2026-05-03:
+- ✅ #15 Self-tuning reply style
+- ✅ #16 Memory federation across machines
+- ✅ #17 Memory graph visualization in admin
+- ✅ #18 Voice
+
+### P0 — series A shipped from the 2026-05-03 follow-up audit
+
+All A-series items below shipped in Phase 8; details remain here as the
+historical acceptance record.
 
 #### A1. Privacy mode loses access to legacy global memories — **S**
 **What:** when `PROTOAGI_TELEGRAM_GLOBAL_MEMORY=0`, `_search_chat_memory`
@@ -304,9 +356,10 @@ restart) can still lose updates because we never retry the same id.
 advances per id in a try/finally inside the loop).
 
 **How:** track failed update_ids; if all updates in a batch failed, do
-not advance the offset; if some succeeded, advance to the highest
-successful id + 1 and let Telegram resend the failed ones (Telegram
-keeps unacknowledged updates for ~24h).
+not advance the offset. If some succeeded, only acknowledge the contiguous
+successful prefix before the first failed id; advancing past a failed id
+would ask Telegram to drop it. Later successful ids can replay once, which
+is safer than losing an update.
 
 **Acceptance:** new async test simulates a one-shot transient error and
 confirms the failed update is replayed on the next poll.
@@ -347,7 +400,10 @@ verifies the repeated text is preserved.
 
 ---
 
-### P3 — long-term / research
+### P3 — shipped research baselines
+
+These are no longer blank research items; each now has a working baseline.
+Future work should extend the baseline rather than start from scratch.
 
 #### 15. Self-tuning reply style — **XL**
 The bot watches engagement signals (reply rate, reaction emojis, edits)
@@ -355,19 +411,32 @@ and incrementally adjusts reply length / formality / sticker frequency
 per chat. Requires a lightweight bandit or Thompson-sampling mechanism
 plus a feedback collection step.
 
+**Shipped baseline:** `ReplyStyleTuner` stores per-chat arm stats in `kv`,
+records replies/reactions/edits, and passes `adaptive_reply_style` into the
+Telegram prompts.
+
 #### 16. Memory federation across machines — **XL**
 A second ProtoAGI box should be able to subscribe to a curated subset of
 memories from the first. Requires an export format, signing, and a sync
 protocol (probably Merkle-tree based).
+
+**Shipped baseline:** signed JSON bundles through `memory-export` /
+`memory-import`. Merkle subscriptions remain future work.
 
 #### 17. Memory graph visualization in admin — **L**
 Render `supersedes`/`superseded_by` chains plus tag clusters as an
 interactive graph. Force-directed layout in the admin HTML, no
 external libraries.
 
+**Shipped baseline:** `/api/memory-graph` plus a force-directed canvas in the
+admin dashboard.
+
 #### 18. Voice — **XL**
 Whisper-based transcription for incoming voice messages, TTS for
 outgoing replies. Doubles as a multimodal memory feeder.
+
+**Shipped baseline:** optional OpenAI-compatible transcription + optional
+`/audio/speech` TTS-to-Telegram voice replies.
 
 ---
 
@@ -408,8 +477,15 @@ context.
   picking one?** The model emits either `tool_calls` (OpenAI-style) or
   `tool_request` inside the JSON body, depending on whether llama.cpp
   honored `tools=` or only `response_format=`. We don't yet know which
-  path fires in production with gpt-oss-20b — see open item A3 for a
-  bench and the eventual decision to drop one branch.
+  path fires in production with gpt-oss-20b. Phase 8 added
+  `protoagi bench-tools` so the branch split can be measured before
+  dropping either path.
+- **After `bench-tools`, which tool path is canonical?** Keep
+  `tool_request` as the production-compatible path for now because it works
+  inside the schema content even when llama.cpp ignores native
+  OpenAI-style tool calls. `protoagi bench-tools` now reports the real
+  split for the current local model; if `tool_calls` dominates in a
+  measured run, revisit the branch choice with data.
 - **Why log via `print` from the async runner / vision module instead of
   using the runs/telegram-errors.log file?** Those modules are imported
   from places without easy access to `NikolaBot.error_log_path`. The

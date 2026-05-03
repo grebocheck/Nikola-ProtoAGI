@@ -548,16 +548,17 @@ class MemoryService:
             return ImportanceScore(0.1, fallback_kind, "empty text")
 
         cache_key = self._importance_cache_key(cleaned)
-        cached = self.store.get_kv(cache_key)
+        cached = self.store.get_importance_cache(cache_key)
         if cached:
-            parsed = self._parse_importance_payload(cached, fallback_kind=fallback_kind)
-            if parsed is not None:
-                return ImportanceScore(
-                    parsed.importance,
-                    parsed.kind,
-                    parsed.reasoning,
-                    cached=True,
-                )
+            kind = str(cached.get("kind") or fallback_kind)
+            if kind not in ALL_KINDS:
+                kind = fallback_kind
+            return ImportanceScore(
+                max(0.0, min(1.0, float(cached.get("importance", 0.1)))),
+                kind,
+                str(cached.get("reasoning") or ""),
+                cached=True,
+            )
 
         if self.importance_client is None:
             return ImportanceScore(
@@ -604,16 +605,11 @@ class MemoryService:
                 fallback_kind,
                 "heuristic fallback: model scoring failed",
             )
-        self.store.set_kv(
+        self.store.set_importance_cache(
             cache_key,
-            json.dumps(
-                {
-                    "importance": parsed.importance,
-                    "kind": parsed.kind,
-                    "reasoning": parsed.reasoning,
-                },
-                ensure_ascii=False,
-            ),
+            importance=parsed.importance,
+            kind=parsed.kind,
+            reasoning=parsed.reasoning,
         )
         return parsed
 

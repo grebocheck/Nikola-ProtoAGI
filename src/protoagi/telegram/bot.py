@@ -78,11 +78,20 @@ from .text import (
 )
 from .tool_runner import TelegramToolEvent, TelegramToolRunner
 from .vision import VisionDescriber
+from .style import ReplyStyleTuner
+from .voice import (
+    VoiceAttachment,
+    VoiceSynthesisConfig,
+    VoiceSynthesizer,
+    VoiceTranscriptionConfig,
+    VoiceTranscriber,
+)
 
 
 _TELEGRAM_LOG_TAIL_BYTES = 1_000_000
 _REMINDER_CHECK_KV = "telegram:last_reminder_check"
 _REFLECTION_LAST_KV = "telegram:last_reflection_at"
+_DECISION_METRICS_KV = "telegram:decision_metrics"
 _REMINDER_CHECK_SECONDS = 60
 _REFLECTION_INTERVAL_SECONDS = 6 * 60 * 60
 
@@ -118,6 +127,7 @@ class NikolaBot:
         self._last_reflection_check = 0.0
         self._sticker_cache: dict[str, list[dict[str, str]]] = {}
         self.error_log_path = PROJECT_ROOT / "runs" / "telegram-errors.log"
+        self._style_tuner = ReplyStyleTuner(memory)
         initial_vision_llm = (
             OpenAICompatibleClient(
                 telegram_config.vision_base_url or agent_config.base_url,
@@ -132,6 +142,27 @@ class NikolaBot:
             initial_vision_llm,
             max_bytes=telegram_config.vision_max_bytes,
             memory=memory,
+        )
+        voice_base_url = telegram_config.voice_base_url or agent_config.base_url
+        self._voice = VoiceTranscriber(
+            telegram,
+            VoiceTranscriptionConfig(
+                base_url=voice_base_url if telegram_config.voice_model else "",
+                model=telegram_config.voice_model,
+                timeout_seconds=telegram_config.voice_timeout_seconds,
+                max_bytes=telegram_config.voice_max_bytes,
+            ),
+        )
+        tts_base_url = telegram_config.tts_base_url or agent_config.base_url
+        self._tts = VoiceSynthesizer(
+            VoiceSynthesisConfig(
+                base_url=tts_base_url if telegram_config.tts_enabled else "",
+                model=telegram_config.tts_model,
+                voice=telegram_config.tts_voice,
+                timeout_seconds=telegram_config.voice_timeout_seconds,
+                max_chars=telegram_config.tts_max_chars,
+                enabled=telegram_config.tts_enabled,
+            )
         )
         if memory_service is None:
             embedding_config = EmbeddingConfig(
@@ -203,7 +234,7 @@ class NikolaBot:
         updates = self.telegram.get_updates(
             offset=offset,
             timeout_seconds=self.telegram_config.poll_timeout_seconds,
-            allowed_updates=["message"],
+            allowed_updates=["message", "edited_message", "message_reaction"],
         )
         processed = 0
         for update in updates:
@@ -302,6 +333,8 @@ class NikolaBot:
             "consolidated_persona": 0,
             "pruned_global": 0,
             "pruned_persona": 0,
+            "pruned_media": 0,
+            "pruned_importance_cache": 0,
             "reflections_written": 0,
         }
         try:
@@ -335,6 +368,15 @@ class NikolaBot:
             )["deleted"]
         except sqlite3_error_types() as exc:  # pragma: no cover - defensive
             print(f"reflection prune(persona) failed: {exc}", flush=True)
+        try:
+            result["pruned_media"] = self.memory.prune_orphan_media(older_than_days=60.0)
+        except sqlite3_error_types() as exc:  # pragma: no cover - defensive
+            print(f"reflection prune(media) failed: {exc}", flush=True)
+        try:
+            cache_prune = self.memory.prune_importance_cache(older_than_days=60.0)
+            result["pruned_importance_cache"] = int(cache_prune["deleted"])
+        except sqlite3_error_types() as exc:  # pragma: no cover - defensive
+            print(f"reflection prune(importance_cache) failed: {exc}", flush=True)
         if self.telegram_config.fictional_self_enabled:
             try:
                 result["reflections_written"] = self._write_reflection_memory()
@@ -426,13 +468,18 @@ class NikolaBot:
     # Update handling
 
     def process_update(self, update: dict[str, Any]) -> bool:
+        if isinstance(update.get("message_reaction"), dict):
+            return self._handle_message_reaction(update["message_reaction"])
+        if isinstance(update.get("edited_message"), dict):
+            return self._handle_edited_message(update["edited_message"])
         message = update.get("message")
         if not isinstance(message, dict):
             return False
         text = str(message.get("text") or message.get("caption") or "").strip()
         image = self._extract_image_attachment(message)
+        voice = self._extract_voice_attachment(message)
         incoming_sticker = self._extract_sticker_attachment(message)
-        if not text and image is None and incoming_sticker is None:
+        if not text and image is None and incoming_sticker is None and voice is None:
             return False
         chat = message.get("chat") or {}
         if "id" not in chat:
@@ -450,12 +497,21 @@ class NikolaBot:
         )
         self.memory.mark_telegram_user_message(chat_id)
         self._upsert_user_profile(user)
+        self._style_tuner.record_incoming_reply(chat_id)
 
         current_message_id = int(message.get("message_id", 0))
         thread_id = self.thread_id(chat_id)
         display = display_sender(user)
         image_description = self._vision.describe(image, caption=text) if image is not None else ""
-        incoming_text = self._incoming_text_with_media(text, image, image_description, incoming_sticker)
+        voice_transcript = self._voice.transcribe(voice) if voice is not None else ""
+        incoming_text = self._incoming_text_with_media(
+            text,
+            image,
+            image_description,
+            incoming_sticker,
+            voice,
+            voice_transcript,
+        )
         content = self._history_user_content(chat_state, display, incoming_text)
         self.memory.log_message(thread_id, "user", content)
         if image is not None:
@@ -463,6 +519,13 @@ class NikolaBot:
                 chat_state,
                 image,
                 image_description,
+                user_id=user_id,
+            )
+        if voice is not None:
+            self._remember_voice_fact(
+                chat_state,
+                voice,
+                voice_transcript,
                 user_id=user_id,
             )
         if current_message_id:
@@ -479,6 +542,8 @@ class NikolaBot:
                     "chat": chat,
                     "image": image_to_payload(image),
                     "sticker": sticker_to_payload(incoming_sticker),
+                    "voice": self._voice_to_payload(voice),
+                    "voice_transcript": voice_transcript,
                 },
             )
 
@@ -530,6 +595,43 @@ class NikolaBot:
         self._schedule_from_minutes(chat_state.chat_id, decision.next_check_minutes)
         return True
 
+    def _handle_message_reaction(self, reaction: dict[str, Any]) -> bool:
+        chat = reaction.get("chat") or {}
+        if "id" not in chat:
+            return False
+        chat_id = str(chat["id"])
+        if not self._chat_allowed(chat_id):
+            return False
+        emoji = ""
+        new_reaction = reaction.get("new_reaction") or []
+        if isinstance(new_reaction, list) and new_reaction:
+            first = new_reaction[0]
+            if isinstance(first, dict):
+                emoji = str(first.get("emoji") or "")
+        self._style_tuner.record_reaction(chat_id, emoji)
+        return True
+
+    def _handle_edited_message(self, message: dict[str, Any]) -> bool:
+        chat = message.get("chat") or {}
+        if "id" not in chat:
+            return False
+        chat_id = str(chat["id"])
+        if not self._chat_allowed(chat_id):
+            return False
+        self._style_tuner.record_edit(chat_id)
+        if message.get("message_id"):
+            self.memory.log_telegram_message(
+                chat_id=chat_id,
+                message_id=int(message["message_id"]),
+                persona_key=self.persona.key,
+                role="user",
+                sender_id=(message.get("from") or {}).get("id"),
+                sender_name=display_sender(message.get("from") or {}),
+                text=str(message.get("text") or message.get("caption") or ""),
+                metadata={"edited": True, "message": message},
+            )
+        return True
+
     # ------------------------------------------------------------------
     # Decision pipeline
 
@@ -541,6 +643,9 @@ class NikolaBot:
         addressed: bool,
         user_id: str | None = None,
     ) -> Decision:
+        started = time.monotonic()
+        llm_calls = 0
+        used_tools = False
         recent = self._recent_compact_messages(chat)
         recent_telegram = self._recent_telegram_messages(chat.chat_id)
         facts = self._search_chat_memory(chat, incoming_text, user_id=user_id)
@@ -570,6 +675,7 @@ class NikolaBot:
                 {"text": fact.text, "created_at": fact.created_at}
                 for fact in persona_self_memory
             ],
+            "adaptive_reply_style": self._style_payload(chat),
             "available_sticker_packs": STICKER_PACKS,
         }
         messages = [
@@ -587,6 +693,7 @@ class NikolaBot:
             max_tokens=self.telegram_config.decision_max_tokens,
             response_format=DECISION_JSON_SCHEMA,
         )
+        llm_calls += 1
         message = response.get("choices", [{}])[0].get("message", {})
         content = clean_model_content(message.get("content", ""))
         payload = extract_json_object(content)
@@ -595,7 +702,8 @@ class NikolaBot:
         if tool_calls and not decision.should_reply:
             decision.should_reply = True
         if tool_calls or decision.tool_request:
-            decision = self._merge_decision_tool_results(
+            used_tools = True
+            decision, merge_llm_calls = self._merge_decision_tool_results(
                 chat,
                 incoming_text,
                 sender,
@@ -605,6 +713,7 @@ class NikolaBot:
                 initial_decision=decision,
                 tool_calls=tool_calls,
             )
+            llm_calls += merge_llm_calls
         if self.telegram_config.reply_mode == "always":
             decision.should_reply = True
         if chat.chat_type != "private" and self.telegram_config.reply_mode == "mention" and not addressed:
@@ -620,6 +729,7 @@ class NikolaBot:
                 decision.stickers = []
         if decision.should_reply and not decision.reply and not decision.replies:
             decision.reply = self.compose_reply(chat, incoming_text, sender)
+            llm_calls += 1
         if "[зображення:" in incoming_text:
             decision.reply = "" if is_image_blind_reply(decision.reply) else decision.reply
             decision.replies = [item for item in decision.replies if not is_image_blind_reply(item)]
@@ -627,6 +737,11 @@ class NikolaBot:
                 decision.should_reply = False
         if decision.should_reply and not decision_reply_texts(decision) and not decision.stickers:
             decision.should_reply = False
+        self._record_decision_metrics(
+            llm_calls=llm_calls,
+            used_tools=used_tools,
+            elapsed_seconds=time.monotonic() - started,
+        )
         return decision
 
     def _merge_decision_tool_results(
@@ -640,7 +755,7 @@ class NikolaBot:
         context_payload: dict[str, Any],
         initial_decision: Decision,
         tool_calls: list[dict[str, Any]],
-    ) -> Decision:
+    ) -> tuple[Decision, int]:
         runner = TelegramToolRunner(
             memory_service=self.memory_service,
             chat=chat,
@@ -654,7 +769,10 @@ class NikolaBot:
             tool_calls=tool_calls,
         )
         if not events:
-            return initial_decision
+            return initial_decision, 0
+        inline = self._inline_tool_decision(initial_decision, events)
+        if inline is not None:
+            return inline, 0
         merge_payload = {
             "original_context": context_payload,
             "initial_decision": _decision_to_payload(initial_decision),
@@ -684,7 +802,79 @@ class NikolaBot:
             if fallback:
                 revised.reply = fallback
         revised.tool_request = None
-        return revised
+        return revised, 1
+
+    def _inline_tool_decision(
+        self,
+        initial_decision: Decision,
+        events: list[TelegramToolEvent],
+    ) -> Decision | None:
+        if decision_reply_texts(initial_decision) or initial_decision.stickers:
+            return None
+        if len(events) != 1:
+            return None
+        fallback = self._tool_result_reply(events)
+        if not fallback:
+            return None
+        return Decision(
+            should_reply=True,
+            reply=fallback,
+            memories=list(initial_decision.memories),
+            self_memories=list(initial_decision.self_memories),
+            replies=[],
+            reply_to=initial_decision.reply_to,
+            stickers=list(initial_decision.stickers),
+            reminders=list(initial_decision.reminders),
+            tool_request=None,
+            next_check_minutes=initial_decision.next_check_minutes,
+        )
+
+    def _record_decision_metrics(
+        self,
+        *,
+        llm_calls: int,
+        used_tools: bool,
+        elapsed_seconds: float,
+    ) -> None:
+        try:
+            raw = self.memory.get_kv(_DECISION_METRICS_KV)
+            metrics = json.loads(raw) if raw else {}
+            if not isinstance(metrics, dict):
+                metrics = {}
+            decision_count = int(metrics.get("decisions", 0)) + 1
+            total_llm_calls = int(metrics.get("llm_calls", 0)) + max(0, int(llm_calls))
+            elapsed_ms = max(0.0, elapsed_seconds * 1000.0)
+            histogram = metrics.get("llm_call_histogram")
+            if not isinstance(histogram, dict):
+                histogram = {}
+            bucket = str(max(0, int(llm_calls)))
+            histogram[bucket] = int(histogram.get(bucket, 0)) + 1
+            metrics.update(
+                {
+                    "decisions": decision_count,
+                    "llm_calls": total_llm_calls,
+                    "latency_ms": float(metrics.get("latency_ms", 0.0)) + elapsed_ms,
+                    "max_llm_calls": max(
+                        int(metrics.get("max_llm_calls", 0)),
+                        max(0, int(llm_calls)),
+                    ),
+                    "max_latency_ms": max(
+                        float(metrics.get("max_latency_ms", 0.0)),
+                        elapsed_ms,
+                    ),
+                    "llm_call_histogram": histogram,
+                    "updated_at": utc_now(),
+                }
+            )
+            if used_tools:
+                metrics["tool_decisions"] = int(metrics.get("tool_decisions", 0)) + 1
+                metrics["tool_llm_calls"] = int(metrics.get("tool_llm_calls", 0)) + max(
+                    0,
+                    int(llm_calls),
+                )
+            self.memory.set_kv(_DECISION_METRICS_KV, json.dumps(metrics, ensure_ascii=False))
+        except sqlite3_error_types() + (ValueError, TypeError, json.JSONDecodeError):  # pragma: no cover
+            return None
 
     @staticmethod
     def _tool_result_reply(events: list[TelegramToolEvent]) -> str:
@@ -722,6 +912,7 @@ class NikolaBot:
                             "recent_messages": recent,
                             "relevant_memory": [fact.text for fact in facts],
                             "known_persona_self_memory": [fact.text for fact in persona_self_memory],
+                            "adaptive_reply_style": self._style_payload(chat),
                         },
                         ensure_ascii=False,
                     ),
@@ -796,6 +987,7 @@ class NikolaBot:
                             "recent_telegram_messages": recent_telegram,
                             "memory": [fact.text for fact in facts],
                             "known_persona_self_memory": [fact.text for fact in persona_self_memory],
+                            "adaptive_reply_style": self._style_payload(chat),
                             "available_sticker_packs": STICKER_PACKS,
                         },
                         ensure_ascii=False,
@@ -833,6 +1025,7 @@ class NikolaBot:
         stickers: list[dict[str, str]] | None = None,
     ) -> None:
         stickers = stickers or []
+        style_choice = self._style_tuner.choose(chat.chat_id)
         raw_messages = text if isinstance(text, list) else [text]
         messages: list[str] = []
         for item in raw_messages[: max(1, self.telegram_config.max_reply_messages)]:
@@ -865,6 +1058,25 @@ class NikolaBot:
                     chunk,
                     reply_to_message_id=should_reply_to,
                 )
+        if messages and self.telegram_config.tts_enabled:
+            voice_data = self._tts.synthesize(messages[0])
+            if voice_data:
+                try:
+                    sent_voice = self.telegram.send_voice_bytes(
+                        chat.chat_id,
+                        voice_data,
+                        reply_to_message_id=message_id if not initiative and not sent_text else None,
+                        disable_notification=disable_notification,
+                    )
+                    self._log_sent_telegram_message(
+                        chat,
+                        sent_voice,
+                        "assistant",
+                        "[voice-reply]",
+                        reply_to_message_id=message_id if not initiative and not sent_text else None,
+                    )
+                except (TelegramApiError, OSError):
+                    pass
         for sticker_choice in stickers[:2]:
             file_id = self._select_sticker_file_id(sticker_choice, chat.chat_id)
             if not file_id:
@@ -895,6 +1107,13 @@ class NikolaBot:
                 self._history_assistant_content(chat, history_text),
             )
             self.memory.mark_telegram_bot_message(chat.chat_id, initiative=initiative)
+            self._style_tuner.record_sent(
+                chat.chat_id,
+                arm=style_choice.arm,
+                reply_chars=sum(len(item) for item in messages),
+                sticker_count=len(stickers),
+                message_count=len(messages),
+            )
 
     def _log_sent_telegram_message(
         self,
@@ -1040,7 +1259,7 @@ class NikolaBot:
         return stickers
 
     # ------------------------------------------------------------------
-    # Image / sticker incoming attachments
+    # Image / voice / sticker incoming attachments
 
     def _extract_image_attachment(self, message: dict[str, Any]) -> ImageAttachment | None:
         photos = message.get("photo")
@@ -1071,6 +1290,25 @@ class NikolaBot:
         return None
 
     @staticmethod
+    def _extract_voice_attachment(message: dict[str, Any]) -> VoiceAttachment | None:
+        voice = message.get("voice")
+        label = "voice"
+        if not isinstance(voice, dict):
+            voice = message.get("audio")
+            label = "audio"
+        if not isinstance(voice, dict):
+            return None
+        file_id = str(voice.get("file_id") or "")
+        if not file_id:
+            return None
+        return VoiceAttachment(
+            file_id=file_id,
+            mime_type=str(voice.get("mime_type") or "audio/ogg"),
+            duration=int(voice.get("duration") or 0),
+            label=label,
+        )
+
+    @staticmethod
     def _extract_sticker_attachment(message: dict[str, Any]) -> StickerAttachment | None:
         sticker = message.get("sticker")
         if not isinstance(sticker, dict):
@@ -1090,6 +1328,17 @@ class NikolaBot:
             set_name=str(sticker.get("set_name") or ""),
             kind=kind,
         )
+
+    @staticmethod
+    def _voice_to_payload(voice: VoiceAttachment | None) -> dict[str, Any] | None:
+        if voice is None:
+            return None
+        return {
+            "file_id": voice.file_id,
+            "mime_type": voice.mime_type,
+            "duration": voice.duration,
+            "label": voice.label,
+        }
 
     # ------------------------------------------------------------------
     # Memory hooks
@@ -1164,6 +1413,48 @@ class NikolaBot:
                 "mime_type": image.mime_type,
                 "label": image.label,
                 "file_name": image.file_name,
+            },
+        )
+
+    def _remember_voice_fact(
+        self,
+        chat: TelegramChat,
+        voice: VoiceAttachment,
+        transcript: str,
+        *,
+        user_id: str | None = None,
+    ) -> None:
+        transcript = str(transcript or "").strip()
+        if not transcript:
+            return
+        text = f"Telegram voice in chat {chat.chat_id}: {transcript}"
+        tags = [
+            "telegram",
+            "voice",
+            "audio",
+            TELEGRAM_GLOBAL_MEMORY_TAG,
+            f"source_chat:{chat.chat_id}",
+            f"persona:{self.persona.key}",
+        ]
+        if user_id:
+            tags.append(f"user:{user_id}")
+        scope = SCOPE_GLOBAL if self.telegram_config.global_memory else (SCOPE_USER if user_id else SCOPE_CHAT)
+        self.memory_service.remember(
+            text,
+            kind=KIND_EPISODIC,
+            scope=scope,
+            tags=tags,
+            user_id=user_id,
+            chat_id=chat.chat_id,
+            persona_key=self.persona.key,
+            importance=0.5,
+            source="telegram_voice",
+            metadata={
+                "file_id": voice.file_id,
+                "mime_type": voice.mime_type,
+                "duration": voice.duration,
+                "label": voice.label,
+                "transcript": transcript,
             },
         )
 
@@ -1267,6 +1558,10 @@ class NikolaBot:
     def _chat_allowed(self, chat_id: str) -> bool:
         allowed = self.telegram_config.allowed_chat_ids
         return not allowed or chat_id in allowed
+
+    def _style_payload(self, chat: TelegramChat) -> dict[str, Any]:
+        choice = self._style_tuner.choose(chat.chat_id)
+        return choice.payload
 
     def _should_skip_without_llm(self, chat: TelegramChat, addressed: bool) -> bool:
         mode = chat.reply_mode or self.telegram_config.reply_mode
@@ -1469,6 +1764,8 @@ class NikolaBot:
         image: ImageAttachment | None,
         description: str,
         sticker: StickerAttachment | None,
+        voice: VoiceAttachment | None = None,
+        voice_transcript: str = "",
     ) -> str:
         text = text.strip()
         parts = [text] if text else []
@@ -1482,6 +1779,12 @@ class NikolaBot:
             if sticker.set_name:
                 bits.append(f"pack={sticker.set_name}")
             parts.append("[стікер: " + ", ".join(bits) + "]")
+        if voice is not None:
+            transcript = voice_transcript.strip()
+            if transcript:
+                parts.append(f"[голос: {transcript}]")
+            else:
+                parts.append(f"[голос: {voice.label}, {voice.duration}s, transcription unavailable]")
         return "\n".join(parts)
 
     # ------------------------------------------------------------------

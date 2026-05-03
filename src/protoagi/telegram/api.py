@@ -9,6 +9,7 @@ the package dependency-free.
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -131,6 +132,78 @@ class TelegramApi:
         if reply_to_message_id is not None:
             payload["reply_parameters"] = {"message_id": reply_to_message_id}
         return dict(self.call("sendSticker", payload))
+
+    def send_voice_bytes(
+        self,
+        chat_id: str | int,
+        data: bytes,
+        *,
+        filename: str = "reply.ogg",
+        reply_to_message_id: int | None = None,
+        disable_notification: bool = False,
+    ) -> dict[str, Any]:
+        fields: dict[str, str] = {
+            "chat_id": str(chat_id),
+            "disable_notification": "true" if disable_notification else "false",
+        }
+        if reply_to_message_id is not None:
+            fields["reply_parameters"] = json.dumps({"message_id": reply_to_message_id})
+        return dict(
+            self._call_multipart(
+                "sendVoice",
+                fields,
+                {"voice": (filename, data, "audio/ogg")},
+            )
+        )
+
+    def _call_multipart(
+        self,
+        method: str,
+        fields: dict[str, str],
+        files: dict[str, tuple[str, bytes, str]],
+        *,
+        timeout: int = 60,
+    ) -> Any:
+        if not self.token:
+            raise TelegramApiError("TELEGRAM_BOT_TOKEN is not set")
+        boundary = f"----protoagi-{uuid.uuid4().hex}"
+        chunks: list[bytes] = []
+        for name, value in fields.items():
+            chunks.append(f"--{boundary}\r\n".encode("ascii"))
+            chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("ascii"))
+            chunks.append(str(value).encode("utf-8"))
+            chunks.append(b"\r\n")
+        for name, (filename, data, content_type) in files.items():
+            chunks.append(f"--{boundary}\r\n".encode("ascii"))
+            chunks.append(
+                (
+                    f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
+                    f"Content-Type: {content_type}\r\n\r\n"
+                ).encode("ascii")
+            )
+            chunks.append(data)
+            chunks.append(b"\r\n")
+        chunks.append(f"--{boundary}--\r\n".encode("ascii"))
+        url = f"{self.api_root}/bot{self.token}/{method}"
+        request = Request(
+            url,
+            data=b"".join(chunks),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise TelegramApiError(f"Telegram HTTP {exc.code}: {detail}") from exc
+        except URLError as exc:
+            raise TelegramApiError(f"Telegram network error: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise TelegramApiError("Telegram returned non-JSON response") from exc
+        if not payload.get("ok"):
+            raise TelegramApiError(str(payload.get("description", payload)))
+        return payload.get("result")
 
 
 __all__ = [

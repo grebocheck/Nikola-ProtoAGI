@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from typing import Any
@@ -80,17 +81,80 @@ def _stats(memory: MemoryStore) -> dict[str, Any]:
         reminders_total = int(conn.execute("SELECT COUNT(*) FROM reminders").fetchone()[0])
         chats = int(conn.execute("SELECT COUNT(*) FROM telegram_chats").fetchone()[0])
         users = int(conn.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+        media_blobs = int(conn.execute("SELECT COUNT(*) FROM media_blobs").fetchone()[0])
+        importance_cache = int(conn.execute("SELECT COUNT(*) FROM importance_cache").fetchone()[0])
+        style_chats = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM kv WHERE key LIKE 'telegram:style:%' "
+                "AND key NOT LIKE 'telegram:style:last_sent:%'"
+            ).fetchone()[0]
+        )
     last_reflection = memory.get_kv("telegram:last_reflection_at")
+    decision_metrics = _decision_metrics(memory.get_kv("telegram:decision_metrics"))
     return {
         "memories_active": memories,
         "memories_superseded": superseded,
         "embeddings": embeddings,
+        "media_blobs": media_blobs,
+        "importance_cache": importance_cache,
         "reminders_pending": reminders_pending,
         "reminders_total": reminders_total,
         "telegram_chats": chats,
         "users": users,
+        "telegram_style_chats": style_chats,
         "last_reflection_at": last_reflection,
+        **decision_metrics,
     }
+
+
+def _decision_metrics(raw: str | None) -> dict[str, Any]:
+    if not raw:
+        return {
+            "telegram_decisions": 0,
+            "telegram_decision_avg_llm_calls": 0.0,
+            "telegram_tool_decision_avg_llm_calls": 0.0,
+            "telegram_decision_p95_llm_calls": 0,
+        }
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    decisions = int(payload.get("decisions", 0))
+    llm_calls = int(payload.get("llm_calls", 0))
+    tool_decisions = int(payload.get("tool_decisions", 0))
+    tool_llm_calls = int(payload.get("tool_llm_calls", 0))
+    histogram = payload.get("llm_call_histogram")
+    if not isinstance(histogram, dict):
+        histogram = {}
+    return {
+        "telegram_decisions": decisions,
+        "telegram_decision_avg_llm_calls": round(llm_calls / decisions, 3)
+        if decisions
+        else 0.0,
+        "telegram_tool_decision_avg_llm_calls": round(tool_llm_calls / tool_decisions, 3)
+        if tool_decisions
+        else 0.0,
+        "telegram_decision_p95_llm_calls": _histogram_percentile(histogram, 0.95),
+        "telegram_decision_max_llm_calls": int(payload.get("max_llm_calls", 0)),
+    }
+
+
+def _histogram_percentile(histogram: dict[str, Any], percentile: float) -> int:
+    total = sum(int(value) for value in histogram.values())
+    if total <= 0:
+        return 0
+    target = max(1, int(math.ceil(total * percentile)))
+    seen = 0
+    for raw_bucket, raw_count in sorted(
+        histogram.items(),
+        key=lambda item: int(item[0]) if str(item[0]).isdigit() else 0,
+    ):
+        seen += int(raw_count)
+        if seen >= target:
+            return int(raw_bucket)
+    return 0
 
 
 def _serialize_memory(item: Any) -> dict[str, Any]:
@@ -109,6 +173,46 @@ def _serialize_memory(item: Any) -> dict[str, Any]:
         "access_count": item.access_count,
         "pinned": item.pinned,
     }
+
+
+def _memory_graph(memory: MemoryStore, *, limit: int = 120) -> dict[str, Any]:
+    items = memory.list_memories(limit=max(1, min(limit, 500)), include_superseded=True)
+    nodes: dict[str, dict[str, Any]] = {}
+    edges: list[dict[str, Any]] = []
+    for item in items:
+        node_id = f"memory:{item.id}"
+        nodes[node_id] = {
+            "id": node_id,
+            "kind": "memory",
+            "label": f"#{item.id} {item.kind}",
+            "text": item.text[:160],
+            "scope": item.scope,
+            "importance": item.importance,
+        }
+        for tag in item.tags[:20]:
+            tag_id = f"tag:{tag}"
+            nodes.setdefault(
+                tag_id,
+                {"id": tag_id, "kind": "tag", "label": tag, "text": tag},
+            )
+            edges.append({"source": node_id, "target": tag_id, "kind": "tagged"})
+        if item.supersedes_id:
+            edges.append(
+                {
+                    "source": node_id,
+                    "target": f"memory:{item.supersedes_id}",
+                    "kind": "supersedes",
+                }
+            )
+        if item.superseded_by:
+            edges.append(
+                {
+                    "source": node_id,
+                    "target": f"memory:{item.superseded_by}",
+                    "kind": "superseded_by",
+                }
+            )
+    return {"nodes": list(nodes.values()), "edges": edges}
 
 
 def _dashboard_html(memory: MemoryStore) -> str:
@@ -199,7 +303,8 @@ def _dashboard_html(memory: MemoryStore) -> str:
 <p>JSON endpoints: <a href=\"/api/stats\">/api/stats</a>,
 <a href=\"/api/memories\">/api/memories</a>,
 <a href=\"/api/reminders\">/api/reminders</a>,
-<a href=\"/api/chats\">/api/chats</a>.</p>
+<a href=\"/api/chats\">/api/chats</a>,
+<a href=\"/api/memory-graph\">/api/memory-graph</a>.</p>
 <h2>Stats</h2>
 <dl>{stats_html}</dl>
 <h2>Recent memory (top 20)</h2>
@@ -211,6 +316,8 @@ def _dashboard_html(memory: MemoryStore) -> str:
 <h2>Telegram chats</h2>
 <table><thead><tr><th>chat_id</th><th>name</th><th>type</th><th>last user msg</th><th>last bot msg</th></tr></thead>
 <tbody>{chat_rows or '<tr><td colspan=5>—</td></tr>'}</tbody></table>
+<h2>Memory graph</h2>
+<canvas id=\"memory-graph\" width=\"1040\" height=\"420\" style=\"width:100%;height:420px;border:1px solid #eee;background:#fff\"></canvas>
 <div id=\"flash\" class=\"flash\"></div>
 <script>
 const flash = (msg, isError) => {{
@@ -255,6 +362,59 @@ document.getElementById('memory-tbody').addEventListener('click', async (event) 
     flash(err.message || 'error', true);
   }}
 }});
+const drawGraph = async () => {{
+  const canvas = document.getElementById('memory-graph');
+  const ctx = canvas.getContext('2d');
+  const graph = await fetch('/api/memory-graph?limit=80').then(r => r.json());
+  const nodes = graph.nodes.map((node, index) => ({{
+    ...node,
+    x: canvas.width / 2 + Math.cos(index) * 160,
+    y: canvas.height / 2 + Math.sin(index * 1.7) * 130,
+    vx: 0,
+    vy: 0,
+  }}));
+  const byId = Object.fromEntries(nodes.map(node => [node.id, node]));
+  const edges = graph.edges.filter(edge => byId[edge.source] && byId[edge.target]);
+  for (let step = 0; step < 160; step++) {{
+    for (let i = 0; i < nodes.length; i++) {{
+      for (let j = i + 1; j < nodes.length; j++) {{
+        const a = nodes[i], b = nodes[j];
+        const dx = a.x - b.x, dy = a.y - b.y;
+        const dist2 = Math.max(80, dx * dx + dy * dy);
+        const force = 1600 / dist2;
+        a.vx += dx * force; a.vy += dy * force;
+        b.vx -= dx * force; b.vy -= dy * force;
+      }}
+    }}
+    for (const edge of edges) {{
+      const a = byId[edge.source], b = byId[edge.target];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      a.vx += dx * 0.002; a.vy += dy * 0.002;
+      b.vx -= dx * 0.002; b.vy -= dy * 0.002;
+    }}
+    for (const node of nodes) {{
+      node.vx *= 0.82; node.vy *= 0.82;
+      node.x = Math.max(18, Math.min(canvas.width - 18, node.x + node.vx));
+      node.y = Math.max(18, Math.min(canvas.height - 18, node.y + node.vy));
+    }}
+  }}
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.font = '12px ui-sans-serif, system-ui, sans-serif';
+  for (const edge of edges) {{
+    const a = byId[edge.source], b = byId[edge.target];
+    ctx.strokeStyle = edge.kind === 'tagged' ? '#d8d8d8' : '#8aa0d8';
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  }}
+  for (const node of nodes) {{
+    const isTag = node.kind === 'tag';
+    ctx.fillStyle = isTag ? '#f3f5f7' : '#e7f0ff';
+    ctx.strokeStyle = isTag ? '#adb5bd' : '#5b7cba';
+    ctx.beginPath(); ctx.arc(node.x, node.y, isTag ? 8 : 12, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#202124';
+    ctx.fillText(String(node.label).slice(0, 24), node.x + 14, node.y + 4);
+  }}
+}};
+drawGraph().catch(() => {{}});
 </script>
 </body></html>
 """
@@ -281,6 +441,11 @@ def make_handler(memory: MemoryStore, service: MemoryService) -> type[BaseHTTPRe
                 limit = int(params.get("limit", ["50"])[0])
                 items = memory.list_memories(limit=limit)
                 _json_response(self, [_serialize_memory(item) for item in items])
+                return
+            if parsed.path == "/api/memory-graph":
+                params = parse_qs(parsed.query)
+                limit = int(params.get("limit", ["120"])[0])
+                _json_response(self, _memory_graph(memory, limit=limit))
                 return
             if parsed.path.startswith("/api/media/"):
                 media_id = parsed.path.split("/api/media/", 1)[1]

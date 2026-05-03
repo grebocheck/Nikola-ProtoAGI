@@ -1,8 +1,9 @@
 from pathlib import Path
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 
-from protoagi.memory import MemoryStore
+from protoagi.memory import SCOPE_GLOBAL, SCOPE_USER, MemoryStore
 
 
 class MemoryStoreTests(unittest.TestCase):
@@ -151,6 +152,73 @@ class MemoryStoreTests(unittest.TestCase):
             assert restored is not None
             self.assertEqual(restored.caption, "white mug on a desk")
             self.assertEqual(restored.bytes, b"fake-jpeg")
+
+    def test_prune_orphan_media_removes_only_old_unlinked_blobs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            memory.store_media_blob(
+                file_id="old-orphan",
+                mime="image/jpeg",
+                data=b"old",
+            )
+            linked = memory.store_media_blob(
+                file_id="old-linked",
+                mime="image/jpeg",
+                data=b"linked",
+            )
+            memory.store_memory("linked image", media_id=linked.file_id)
+            old = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat(timespec="seconds")
+            with memory.connect() as conn:
+                conn.execute(
+                    "UPDATE media_blobs SET created_at = ? WHERE file_id IN (?, ?)",
+                    (old, "old-orphan", "old-linked"),
+                )
+            deleted = memory.prune_orphan_media(older_than_days=60)
+            self.assertEqual(deleted, 1)
+            self.assertIsNone(memory.get_media_blob("old-orphan"))
+            self.assertIsNotNone(memory.get_media_blob("old-linked"))
+
+    def test_rescope_telegram_memories_moves_global_user_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            rowid = memory.store_memory(
+                "legacy privacy fact",
+                scope=SCOPE_GLOBAL,
+                tags=["telegram", "telegram_global", "user:telegram:42", "source_chat:123"],
+            )
+            result = memory.rescope_telegram_memories(to_scope=SCOPE_USER)
+            self.assertEqual(result["updated"], 1)
+            item = memory.get_memory(rowid)
+            assert item is not None
+            self.assertEqual(item.scope, SCOPE_USER)
+            self.assertEqual(item.user_id, "telegram:42")
+            self.assertEqual(item.chat_id, "123")
+
+    def test_importance_cache_prune_removes_old_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            memory.set_importance_cache(
+                "old",
+                importance=0.8,
+                kind="semantic",
+                reasoning="old row",
+            )
+            memory.set_importance_cache(
+                "fresh",
+                importance=0.4,
+                kind="fact",
+                reasoning="fresh row",
+            )
+            old = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat(timespec="seconds")
+            with memory.connect() as conn:
+                conn.execute(
+                    "UPDATE importance_cache SET created_at = ?, last_accessed_at = ? WHERE key = ?",
+                    (old, old, "old"),
+                )
+            result = memory.prune_importance_cache(older_than_days=60)
+            self.assertEqual(result["deleted"], 1)
+            self.assertIsNone(memory.get_importance_cache("old"))
+            self.assertIsNotNone(memory.get_importance_cache("fresh"))
 
 
 if __name__ == "__main__":

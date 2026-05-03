@@ -34,6 +34,15 @@ class TelegramConfig:
     vision_model: str = ""
     vision_max_bytes: int = 8 * 1024 * 1024
     vision_timeout_seconds: int = 120
+    voice_base_url: str = ""
+    voice_model: str = ""
+    voice_max_bytes: int = 16 * 1024 * 1024
+    voice_timeout_seconds: int = 120
+    tts_enabled: bool = False
+    tts_base_url: str = ""
+    tts_model: str = ""
+    tts_voice: str = "alloy"
+    tts_max_chars: int = 600
 
     def __post_init__(self) -> None:
         self.set_persona(self.persona_key)
@@ -71,6 +80,15 @@ class TelegramConfig:
             vision_model=os.environ.get("PROTOAGI_VISION_MODEL", "").strip(),
             vision_max_bytes=env_int("PROTOAGI_VISION_MAX_BYTES", 8 * 1024 * 1024),
             vision_timeout_seconds=env_int("PROTOAGI_VISION_TIMEOUT_SECONDS", 120),
+            voice_base_url=os.environ.get("PROTOAGI_VOICE_BASE_URL", "").strip(),
+            voice_model=os.environ.get("PROTOAGI_VOICE_MODEL", "").strip(),
+            voice_max_bytes=env_int("PROTOAGI_VOICE_MAX_BYTES", 16 * 1024 * 1024),
+            voice_timeout_seconds=env_int("PROTOAGI_VOICE_TIMEOUT_SECONDS", 120),
+            tts_enabled=env_bool("PROTOAGI_TTS_ENABLED", False),
+            tts_base_url=os.environ.get("PROTOAGI_TTS_BASE_URL", "").strip(),
+            tts_model=os.environ.get("PROTOAGI_TTS_MODEL", "").strip(),
+            tts_voice=os.environ.get("PROTOAGI_TTS_VOICE", "alloy").strip() or "alloy",
+            tts_max_chars=env_int("PROTOAGI_TTS_MAX_CHARS", 600),
         )
 
 

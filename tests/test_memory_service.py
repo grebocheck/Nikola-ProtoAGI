@@ -177,6 +177,8 @@ class MemoryServiceTests(unittest.TestCase):
         for _ in range(10):
             service.remember("user has a nut allergy", scope=SCOPE_GLOBAL)
         self.assertEqual(client.calls, before)
+        self.assertEqual(store.importance_cache_count(), 2)
+        self.assertIsNone(store.get_kv("memory:importance"))
 
     def test_consolidate_dry_run_returns_plan_without_superseding(self) -> None:
         store, service = self._make()
