@@ -84,13 +84,15 @@ class FakeTelegram:
 
 
 class FakeLLM:
-    def __init__(self, content: str) -> None:
-        self.content = content
+    def __init__(self, content: str | list[str]) -> None:
+        self.content = content[-1] if isinstance(content, list) and content else content
+        self._queue = list(content) if isinstance(content, list) else None
         self.messages = []
 
     def chat_completion(self, messages, **kwargs):
         self.messages.append(messages)
-        return {"choices": [{"message": {"content": self.content}}]}
+        content = self._queue.pop(0) if self._queue is not None and self._queue else self.content
+        return {"choices": [{"message": {"content": content}}]}
 
 
 class FakeVisionLLM(FakeLLM):
@@ -215,6 +217,86 @@ class TelegramBotTests(unittest.TestCase):
             chat = memory.get_telegram_chat("123")
             self.assertIsNotNone(chat)
             self.assertIsNotNone(chat.next_initiative_at)
+
+    def test_privacy_mode_recalls_only_current_user_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            chat = memory.upsert_telegram_chat(
+                {"id": -100, "type": "group", "title": "Lab"},
+                {"id": 1, "first_name": "Alice"},
+            )
+            bot = NikolaBot(
+                telegram=FakeTelegram(),
+                llm=FakeLLM("{}"),
+                memory=memory,
+                telegram_config=TelegramConfig(token="token", global_memory=False),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot._remember_chat_fact(chat, "Alice likes espresso", user_id="telegram:1")
+            bot._remember_chat_fact(chat, "Bob likes espresso", user_id="telegram:2")
+
+            alice = bot._search_chat_memory(chat, "espresso", user_id="telegram:1")
+            self.assertEqual([fact.text for fact in alice], ["Alice likes espresso"])
+
+            global_bot = NikolaBot(
+                telegram=FakeTelegram(),
+                llm=FakeLLM("{}"),
+                memory=MemoryStore(Path(tmp) / "global.sqlite3"),
+                telegram_config=TelegramConfig(token="token", global_memory=True),
+                agent_config=AgentConfig(database_path=Path(tmp) / "global.sqlite3"),
+            )
+            global_chat = global_bot.memory.upsert_telegram_chat(
+                {"id": -100, "type": "group", "title": "Lab"},
+                {"id": 1, "first_name": "Alice"},
+            )
+            global_bot._remember_chat_fact(global_chat, "Alice likes espresso", user_id="telegram:1")
+            global_bot._remember_chat_fact(global_chat, "Bob likes espresso", user_id="telegram:2")
+            texts = [fact.text for fact in global_bot._search_chat_memory(global_chat, "espresso")]
+            self.assertIn("Alice likes espresso", texts)
+            self.assertIn("Bob likes espresso", texts)
+
+    def test_decision_tool_request_recall_merges_tool_result_into_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            memory.remember(
+                "User has a dangerous nut allergy",
+                ["telegram", TELEGRAM_GLOBAL_MEMORY_TAG, "source_chat:123"],
+            )
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                [
+                    '{"should_reply": true, "reply": "", '
+                    '"tool_request": {"name": "recall", "arguments": {"query": "allergy", "limit": 3}}, '
+                    '"memories": [], "next_check_minutes": 60}',
+                    '{"should_reply": true, "reply": "I remember the nut allergy.", '
+                    '"memories": [], "next_check_minutes": 60}',
+                ]
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(token="token"),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.bootstrap()
+            processed = bot.process_update(
+                {
+                    "update_id": 101,
+                    "message": {
+                        "message_id": 501,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "text": "what do you remember about allergies?",
+                    },
+                }
+            )
+            self.assertTrue(processed)
+            self.assertEqual(telegram.sent[0]["text"], "I remember the nut allergy.")
+            self.assertEqual(len(llm.messages), 2)
+            merge_payload = json.loads(llm.messages[1][1]["content"])
+            self.assertEqual(merge_payload["tool_results"][0]["name"], "recall")
+            self.assertIn("nut allergy", json.dumps(merge_payload["tool_results"], ensure_ascii=False))
 
     def test_process_update_stores_persona_self_memory_separately(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -607,6 +689,14 @@ class TelegramBotTests(unittest.TestCase):
             self.assertIn("нарешті", payload)
             self.assertIn("На фото чорний геймпад у коробці.", payload)
             self.assertEqual(telegram.sent[0]["text"], "О, це той самий геймпад?")
+            blob = memory.get_media_blob("big")
+            self.assertIsNotNone(blob)
+            assert blob is not None
+            self.assertEqual(blob.bytes, b"fake-image-bytes")
+            self.assertIn("геймпад", blob.caption)
+            media_items = [item for item in memory.list_memories(limit=10) if item.media_id == "big"]
+            self.assertTrue(media_items)
+            self.assertIn("media", media_items[0].tags)
 
     def test_photo_blind_reply_is_suppressed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

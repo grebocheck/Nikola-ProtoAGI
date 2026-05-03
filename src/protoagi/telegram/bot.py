@@ -18,11 +18,14 @@ from ..config import AgentConfig, PROJECT_ROOT
 from ..embedding import EmbeddingClient, EmbeddingConfig
 from ..harmony import clean_model_content
 from ..memory import (
+    KIND_EPISODIC,
     KIND_FACT,
     KIND_PERSONA_SELF,
     MemoryStore,
+    SCOPE_CHAT,
     SCOPE_GLOBAL,
     SCOPE_PERSONA,
+    SCOPE_USER,
     TelegramChat,
     utc_now,
 )
@@ -73,6 +76,7 @@ from .text import (
     strip_assistanty_phrases,
     strip_speaker_prefixes,
 )
+from .tool_runner import TelegramToolEvent, TelegramToolRunner
 from .vision import VisionDescriber
 
 
@@ -127,6 +131,7 @@ class NikolaBot:
             telegram,
             initial_vision_llm,
             max_bytes=telegram_config.vision_max_bytes,
+            memory=memory,
         )
         if memory_service is None:
             embedding_config = EmbeddingConfig(
@@ -136,7 +141,13 @@ class NikolaBot:
                 request_dimensions=agent_config.embedding.request_dimensions,
             )
             embedding_client = EmbeddingClient(embedding_config) if embedding_config.enabled else None
-            memory_service = MemoryService(memory, embedding_client=embedding_client)
+            memory_service = MemoryService(
+                memory,
+                embedding_client=embedding_client,
+                embedding_backend=agent_config.embedding.backend,
+                importance_client=llm if agent_config.llm_importance else None,
+                llm_importance=agent_config.llm_importance,
+            )
         self.memory_service = memory_service
 
     # ------------------------------------------------------------------
@@ -431,6 +442,7 @@ class NikolaBot:
             return False
 
         user = message.get("from") or {}
+        user_id = self._user_id_for(user)
         chat_state = self.memory.upsert_telegram_chat(
             chat,
             user,
@@ -446,6 +458,13 @@ class NikolaBot:
         incoming_text = self._incoming_text_with_media(text, image, image_description, incoming_sticker)
         content = self._history_user_content(chat_state, display, incoming_text)
         self.memory.log_message(thread_id, "user", content)
+        if image is not None:
+            self._remember_media_fact(
+                chat_state,
+                image,
+                image_description,
+                user_id=user_id,
+            )
         if current_message_id:
             self.memory.log_telegram_message(
                 chat_id=chat_id,
@@ -476,15 +495,21 @@ class NikolaBot:
         if self._should_skip_without_llm(chat_state, addressed):
             return True
 
-        decision = self.decide_incoming(chat_state, incoming_text, display, addressed)
+        decision = self.decide_incoming(
+            chat_state,
+            incoming_text,
+            display,
+            addressed,
+            user_id=user_id,
+        )
         for fact in decision.memories:
-            self._remember_chat_fact(chat_state, fact, user_id=self._user_id_for(user))
+            self._remember_chat_fact(chat_state, fact, user_id=user_id)
         for fact in decision.self_memories:
             self._remember_persona_self_fact(fact)
         self._persist_reminder_requests(
             decision.reminders,
             chat_state=chat_state,
-            user_id=self._user_id_for(user),
+            user_id=user_id,
         )
         self._maybe_add_reaction_sticker(chat_state, incoming_text, decision)
         if not decision.should_reply and not decision.stickers:
@@ -514,57 +539,72 @@ class NikolaBot:
         incoming_text: str,
         sender: str,
         addressed: bool,
+        user_id: str | None = None,
     ) -> Decision:
         recent = self._recent_compact_messages(chat)
         recent_telegram = self._recent_telegram_messages(chat.chat_id)
-        facts = self._search_chat_memory(chat, incoming_text)
+        facts = self._search_chat_memory(chat, incoming_text, user_id=user_id)
         persona_self_memory = self._persona_self_context(incoming_text)
+        context_payload = {
+            "persona": self.persona.payload(),
+            "fictional_self_enabled": self.telegram_config.fictional_self_enabled,
+            "persona_self_lore": list(self.persona.self_lore)
+            if self.telegram_config.fictional_self_enabled
+            else [],
+            "chat": {
+                "id": chat.chat_id,
+                "type": chat.chat_type,
+                "display_name": chat.display_name,
+                "reply_mode": chat.reply_mode,
+                "addressed_to_bot": addressed,
+            },
+            "sender": sender,
+            "incoming_text": incoming_text,
+            "recent_messages": recent,
+            "recent_telegram_messages": recent_telegram,
+            "relevant_memory": [
+                {"text": fact.text, "tags": fact.tags, "created_at": fact.created_at}
+                for fact in facts
+            ],
+            "known_persona_self_memory": [
+                {"text": fact.text, "created_at": fact.created_at}
+                for fact in persona_self_memory
+            ],
+            "available_sticker_packs": STICKER_PACKS,
+        }
         messages = [
             {"role": "system", "content": self._decision_system_prompt()},
             {
                 "role": "user",
-                "content": json.dumps(
-                    {
-                        "persona": self.persona.payload(),
-                        "fictional_self_enabled": self.telegram_config.fictional_self_enabled,
-                        "persona_self_lore": list(self.persona.self_lore)
-                        if self.telegram_config.fictional_self_enabled
-                        else [],
-                        "chat": {
-                            "id": chat.chat_id,
-                            "type": chat.chat_type,
-                            "display_name": chat.display_name,
-                            "reply_mode": chat.reply_mode,
-                            "addressed_to_bot": addressed,
-                        },
-                        "sender": sender,
-                        "incoming_text": incoming_text,
-                        "recent_messages": recent,
-                        "recent_telegram_messages": recent_telegram,
-                        "relevant_memory": [
-                            {"text": fact.text, "tags": fact.tags, "created_at": fact.created_at}
-                            for fact in facts
-                        ],
-                        "known_persona_self_memory": [
-                            {"text": fact.text, "created_at": fact.created_at}
-                            for fact in persona_self_memory
-                        ],
-                        "available_sticker_packs": STICKER_PACKS,
-                    },
-                    ensure_ascii=False,
-                ),
+                "content": json.dumps(context_payload, ensure_ascii=False),
             },
         ]
         response = self.llm.chat_completion(
             messages,
+            tools=TelegramToolRunner.schemas(),
             temperature=self.agent_config.temperature,
             top_p=self.agent_config.top_p,
             max_tokens=self.telegram_config.decision_max_tokens,
             response_format=DECISION_JSON_SCHEMA,
         )
-        content = clean_model_content(response.get("choices", [{}])[0].get("message", {}).get("content", ""))
+        message = response.get("choices", [{}])[0].get("message", {})
+        content = clean_model_content(message.get("content", ""))
         payload = extract_json_object(content)
         decision = decision_from_payload(payload)
+        tool_calls = message.get("tool_calls") or []
+        if tool_calls and not decision.should_reply:
+            decision.should_reply = True
+        if tool_calls or decision.tool_request:
+            decision = self._merge_decision_tool_results(
+                chat,
+                incoming_text,
+                sender,
+                addressed,
+                user_id=user_id,
+                context_payload=context_payload,
+                initial_decision=decision,
+                tool_calls=tool_calls,
+            )
         if self.telegram_config.reply_mode == "always":
             decision.should_reply = True
         if chat.chat_type != "private" and self.telegram_config.reply_mode == "mention" and not addressed:
@@ -588,6 +628,77 @@ class NikolaBot:
         if decision.should_reply and not decision_reply_texts(decision) and not decision.stickers:
             decision.should_reply = False
         return decision
+
+    def _merge_decision_tool_results(
+        self,
+        chat: TelegramChat,
+        incoming_text: str,
+        sender: str,
+        addressed: bool,
+        *,
+        user_id: str | None,
+        context_payload: dict[str, Any],
+        initial_decision: Decision,
+        tool_calls: list[dict[str, Any]],
+    ) -> Decision:
+        runner = TelegramToolRunner(
+            memory_service=self.memory_service,
+            chat=chat,
+            persona_key=self.persona.key,
+            user_id=user_id,
+            global_memory=self.telegram_config.global_memory,
+            max_steps=4,
+        )
+        events = runner.run(
+            tool_request=initial_decision.tool_request,
+            tool_calls=tool_calls,
+        )
+        if not events:
+            return initial_decision
+        merge_payload = {
+            "original_context": context_payload,
+            "initial_decision": _decision_to_payload(initial_decision),
+            "tool_results": [_tool_event_payload(event) for event in events],
+            "instructions": (
+                "Revise the Telegram decision using tool_results. Return final decision JSON only. "
+                "Do not request another tool."
+            ),
+        }
+        response = self.llm.chat_completion(
+            [
+                {"role": "system", "content": self._decision_system_prompt()},
+                {"role": "user", "content": json.dumps(merge_payload, ensure_ascii=False)},
+            ],
+            temperature=self.agent_config.temperature,
+            top_p=self.agent_config.top_p,
+            max_tokens=self.telegram_config.decision_max_tokens,
+            response_format=DECISION_JSON_SCHEMA,
+        )
+        message = response.get("choices", [{}])[0].get("message", {})
+        content = clean_model_content(message.get("content", ""))
+        revised = decision_from_payload(extract_json_object(content))
+        if not revised.should_reply and not decision_reply_texts(revised) and not revised.stickers:
+            revised = initial_decision
+        if revised.should_reply and not decision_reply_texts(revised):
+            fallback = self._tool_result_reply(events)
+            if fallback:
+                revised.reply = fallback
+        revised.tool_request = None
+        return revised
+
+    @staticmethod
+    def _tool_result_reply(events: list[TelegramToolEvent]) -> str:
+        for event in events:
+            if event.name != "recall" or not event.result.get("ok"):
+                continue
+            items = event.result.get("items") or []
+            if not items:
+                return ""
+            first = items[0]
+            text = str(first.get("text") or "").strip()
+            if text:
+                return f"Пам'ятаю: {text}"
+        return ""
 
     def compose_reply(self, chat: TelegramChat, incoming_text: str, sender: str) -> str:
         recent = self._recent_compact_messages(chat)
@@ -1002,15 +1113,58 @@ class NikolaBot:
         ]
         if user_id:
             tags.append(f"user:{user_id}")
+        scope = SCOPE_GLOBAL if self.telegram_config.global_memory else (SCOPE_USER if user_id else SCOPE_CHAT)
         self.memory_service.remember(
             text,
             kind=KIND_FACT,
-            scope=SCOPE_GLOBAL,
+            scope=scope,
             tags=tags,
             user_id=user_id,
             chat_id=chat.chat_id,
             persona_key=self.persona.key,
             source="telegram_chat",
+        )
+
+    def _remember_media_fact(
+        self,
+        chat: TelegramChat,
+        image: ImageAttachment,
+        description: str,
+        *,
+        user_id: str | None = None,
+    ) -> None:
+        description = str(description or "").strip()
+        if not description:
+            return
+        text = f"Telegram image in chat {chat.chat_id}: {description}"
+        tags = [
+            "telegram",
+            "media",
+            "image",
+            TELEGRAM_GLOBAL_MEMORY_TAG,
+            f"source_chat:{chat.chat_id}",
+            f"persona:{self.persona.key}",
+        ]
+        if user_id:
+            tags.append(f"user:{user_id}")
+        scope = SCOPE_GLOBAL if self.telegram_config.global_memory else (SCOPE_USER if user_id else SCOPE_CHAT)
+        self.memory_service.remember(
+            text,
+            kind=KIND_EPISODIC,
+            scope=scope,
+            tags=tags,
+            user_id=user_id,
+            chat_id=chat.chat_id,
+            persona_key=self.persona.key,
+            media_id=image.file_id,
+            importance=0.55,
+            source="telegram_media",
+            metadata={
+                "file_id": image.file_id,
+                "mime_type": image.mime_type,
+                "label": image.label,
+                "file_name": image.file_name,
+            },
         )
 
     def _persist_reminder_requests(
@@ -1137,14 +1291,25 @@ class NikolaBot:
     # ------------------------------------------------------------------
     # Memory recall
 
-    def _search_chat_memory(self, chat: TelegramChat, query: str):
-        # Telegram memory is intentionally global across chats and personas;
-        # do not filter by chat_id here.
+    def _search_chat_memory(
+        self,
+        chat: TelegramChat,
+        query: str,
+        *,
+        user_id: str | None = None,
+    ):
+        # By default Telegram memory is intentionally global across chats and
+        # personas. When privacy mode is enabled, user-scoped memories are
+        # only recalled for the originating Telegram user.
+        private_mode = not self.telegram_config.global_memory
         results = self.memory_service.recall(
             RecallQuery(
                 text=query,
+                user_id=user_id if private_mode else None,
+                chat_id=chat.chat_id if private_mode else None,
                 require_tags=(TELEGRAM_GLOBAL_MEMORY_TAG,),
                 limit=self.telegram_config.max_memory_facts,
+                include_global=not private_mode,
             )
         )
         if len(results) >= self.telegram_config.max_memory_facts:
@@ -1154,8 +1319,11 @@ class NikolaBot:
         fallback = self.memory_service.recall(
             RecallQuery(
                 text=query,
+                user_id=user_id if private_mode else None,
+                chat_id=chat.chat_id if private_mode else None,
                 require_tags=("telegram",),
                 limit=self.telegram_config.max_memory_facts * 2,
+                include_global=not private_mode,
             )
         )
         for result in fallback:
@@ -1374,7 +1542,13 @@ def build_nikola_bot(
         request_dimensions=agent_config.embedding.request_dimensions,
     )
     embedding_client = EmbeddingClient(embedding_config) if embedding_config.enabled else None
-    memory_service = MemoryService(memory, embedding_client=embedding_client)
+    memory_service = MemoryService(
+        memory,
+        embedding_client=embedding_client,
+        embedding_backend=agent_config.embedding.backend,
+        importance_client=llm if agent_config.llm_importance else None,
+        llm_importance=agent_config.llm_importance,
+    )
     return NikolaBot(
         telegram=telegram,
         llm=llm,
@@ -1383,6 +1557,29 @@ def build_nikola_bot(
         agent_config=agent_config,
         memory_service=memory_service,
     )
+
+
+def _decision_to_payload(decision: Decision) -> dict[str, Any]:
+    return {
+        "should_reply": decision.should_reply,
+        "reply": decision.reply,
+        "replies": list(decision.replies),
+        "reply_to": decision.reply_to,
+        "stickers": list(decision.stickers),
+        "memories": list(decision.memories),
+        "self_memories": list(decision.self_memories),
+        "reminders": list(decision.reminders),
+        "tool_request": decision.tool_request,
+        "next_check_minutes": decision.next_check_minutes,
+    }
+
+
+def _tool_event_payload(event: TelegramToolEvent) -> dict[str, Any]:
+    return {
+        "name": event.name,
+        "arguments": event.arguments,
+        "result": event.result,
+    }
 
 
 __all__ = ["NikolaBot", "build_nikola_bot"]

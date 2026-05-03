@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import base64
 import re
-from typing import TYPE_CHECKING
+import sqlite3
 
 from ..harmony import clean_model_content
+from ..memory import MemoryStore
 from ..openai_compat import OpenAICompatError, OpenAICompatibleClient
 from .api import TelegramApi, TelegramApiError
 from .json_io import ImageAttachment
@@ -73,10 +74,12 @@ class VisionDescriber:
         vision_llm: OpenAICompatibleClient | None,
         *,
         max_bytes: int,
+        memory: MemoryStore | None = None,
     ) -> None:
         self.telegram = telegram
         self.vision_llm = vision_llm
         self.max_bytes = max_bytes
+        self.memory = memory
         self._media_marker: str | None = None
 
     @property
@@ -84,7 +87,7 @@ class VisionDescriber:
         return self.vision_llm is not None
 
     def describe(self, image: ImageAttachment, *, caption: str = "") -> str:
-        if self.vision_llm is None:
+        if self.vision_llm is None and self.memory is None:
             return "опис недоступний"
         try:
             file_info = self.telegram.get_file(image.file_id)
@@ -92,6 +95,10 @@ class VisionDescriber:
             if not file_path:
                 return "зображення отримано, але Telegram не повернув file_path"
             data = self.telegram.download_file(file_path, max_bytes=self.max_bytes)
+            if self.vision_llm is None:
+                description = "опис недоступний"
+                self._store_media(image, data, description)
+                return description
             encoded = base64.b64encode(data).decode("ascii")
             prompt = (
                 "You are a visual captioner. Describe only visible content in under 35 words. "
@@ -125,9 +132,27 @@ class VisionDescriber:
             )
             content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
             description = clean_vision_description(content)
-            return description or "зображення отримано, але опис порожній"
+            if not description:
+                description = "зображення отримано, але опис порожній"
+            self._store_media(image, data, description)
+            return description
         except (OpenAICompatError, TelegramApiError, OSError, ValueError) as exc:
             return f"зображення отримано, але опис не вдався: {exc}"
+
+    def _store_media(self, image: ImageAttachment, data: bytes, caption: str) -> None:
+        if self.memory is None:
+            return
+        try:
+            self.memory.store_media_blob(
+                file_id=image.file_id,
+                mime=image.mime_type,
+                data=data,
+                caption=caption,
+            )
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            # Persistence is best-effort; failures must not block the reply
+            # path, but they shouldn't be silent either.
+            print(f"vision media persistence failed: {exc}", flush=True)
 
     def _marker(self) -> str:
         if self._media_marker:

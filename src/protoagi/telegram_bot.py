@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from .telegram import (  # noqa: F401
     ASSISTANTY_SENTENCE_RE,
+    AsyncBotRunner,
     BotRunner,
     DECEPTIVE_IDENTITY_REPLY_RE,
     DECISION_JSON_SCHEMA,
@@ -57,6 +58,7 @@ from .telegram import (  # noqa: F401
     normalize_reply_to,
     normalize_sticker_choices,
     normalize_sticker_pack,
+    normalize_tool_request,
     parse_command,
     split_telegram_message,
     sticker_to_payload,
@@ -67,6 +69,7 @@ from .telegram import (  # noqa: F401
 
 __all__ = [
     "ASSISTANTY_SENTENCE_RE",
+    "AsyncBotRunner",
     "BotRunner",
     "DECEPTIVE_IDENTITY_REPLY_RE",
     "DECISION_JSON_SCHEMA",
@@ -114,6 +117,7 @@ __all__ = [
     "normalize_reply_to",
     "normalize_sticker_choices",
     "normalize_sticker_pack",
+    "normalize_tool_request",
     "parse_command",
     "split_telegram_message",
     "sticker_to_payload",

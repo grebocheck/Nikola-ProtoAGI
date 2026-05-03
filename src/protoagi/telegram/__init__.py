@@ -7,6 +7,7 @@ changes.
 """
 
 from .api import TELEGRAM_API_ROOT, TELEGRAM_MAX_MESSAGE_CHARS, TelegramApi, TelegramApiError, is_telegram_polling_conflict
+from .async_runner import AsyncBotRunner
 from .bot import NikolaBot, build_nikola_bot
 from .config import TelegramConfig
 from .runner import BotRunner
@@ -41,6 +42,7 @@ from .json_io import (
     normalize_reply_messages,
     normalize_reply_to,
     normalize_sticker_choices,
+    normalize_tool_request,
     sticker_to_payload,
 )
 from .stickers import (
@@ -70,6 +72,7 @@ from .vision import (
 
 __all__ = [
     "ASSISTANTY_SENTENCE_RE",
+    "AsyncBotRunner",
     "BotRunner",
     "DECEPTIVE_IDENTITY_REPLY_RE",
     "DECISION_JSON_SCHEMA",
@@ -117,6 +120,7 @@ __all__ = [
     "normalize_reply_to",
     "normalize_sticker_choices",
     "normalize_sticker_pack",
+    "normalize_tool_request",
     "parse_command",
     "split_telegram_message",
     "sticker_to_payload",

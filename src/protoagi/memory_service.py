@@ -16,10 +16,12 @@ not care about:
 from __future__ import annotations
 
 import math
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
 
 from .embedding import EmbeddingClient, EmbeddingIndex
 from .memory import (
@@ -35,6 +37,7 @@ from .memory import (
     SCOPE_PERSONA,
     SCOPE_USER,
 )
+from .openai_compat import OpenAICompatibleClient
 
 
 PRONOUN_TOKENS = {
@@ -44,10 +47,37 @@ PRONOUN_TOKENS = {
 }
 
 
+IMPORTANCE_JSON_SCHEMA: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "memory_importance",
+        "strict": False,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "importance": {"type": "number", "minimum": 0, "maximum": 1},
+                "kind": {"type": "string", "enum": list(ALL_KINDS)},
+                "reasoning": {"type": "string"},
+            },
+            "required": ["importance", "kind"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
 @dataclass(slots=True)
 class StoredMemory:
     memory_id: int
     item: MemoryItem
+
+
+@dataclass(slots=True)
+class ImportanceScore:
+    importance: float
+    kind: str
+    reasoning: str = ""
+    cached: bool = False
 
 
 @dataclass(slots=True)
@@ -69,12 +99,21 @@ class MemoryService:
         *,
         embedding_client: EmbeddingClient | None = None,
         embedding_index: EmbeddingIndex | None = None,
+        embedding_backend: str = "flat",
+        importance_client: OpenAICompatibleClient | None = None,
+        llm_importance: bool = False,
     ) -> None:
         self.store = store
         self.embedding_client = embedding_client
         self.embedding_index = embedding_index
+        self.importance_client = importance_client
+        self.llm_importance = llm_importance
         if embedding_client and embedding_client.config.enabled and embedding_index is None:
-            self.embedding_index = EmbeddingIndex(store, model=embedding_client.config.model)
+            self.embedding_index = EmbeddingIndex(
+                store,
+                model=embedding_client.config.model,
+                backend=embedding_backend,
+            )
 
     # ------------------------------------------------------------------
     # Writes
@@ -89,6 +128,7 @@ class MemoryService:
         user_id: str | None = None,
         chat_id: str | None = None,
         persona_key: str | None = None,
+        media_id: str | None = None,
         importance: float | None = None,
         confidence: float = 0.7,
         source: str | None = None,
@@ -103,8 +143,28 @@ class MemoryService:
             kind = KIND_FACT
         if scope not in ALL_SCOPES:
             scope = SCOPE_GLOBAL
+        tag_values = list(tags or [])
 
-        score = importance if importance is not None else self.score_importance(text, kind=kind)
+        score = importance
+        if score is None and self.llm_importance:
+            scored = self.score_importance_llm(
+                text,
+                context={
+                    "kind": kind,
+                    "scope": scope,
+                    "tags": tag_values,
+                    "source": source,
+                },
+            )
+            score = scored.importance
+            if kind == KIND_FACT and scored.kind in ALL_KINDS:
+                kind = scored.kind
+            if scored.reasoning:
+                metadata = dict(metadata or {})
+                metadata.setdefault("importance_reasoning", scored.reasoning)
+                metadata.setdefault("importance_cached", scored.cached)
+        if score is None:
+            score = self.score_importance(text, kind=kind)
         vector = None
         embed_model: str | None = None
         if embed and self.embedding_client and self.embedding_client.config.enabled:
@@ -116,10 +176,11 @@ class MemoryService:
             text,
             kind=kind,
             scope=scope,
-            tags=tags,
+            tags=tag_values,
             user_id=user_id,
             chat_id=chat_id,
             persona_key=persona_key,
+            media_id=media_id,
             importance=score,
             confidence=confidence,
             source=source,
@@ -254,12 +315,16 @@ class MemoryService:
         persona_key: str | None = None,
         similarity_threshold: float = 0.92,
         max_items: int = 200,
-    ) -> int:
+        dry_run: bool = False,
+        return_plan: bool = False,
+    ) -> int | dict[str, Any]:
         """Heuristic consolidation: merge near-duplicate items.
 
         Walks recent memory items in the requested scope, keeps the latest
         higher-importance version, and supersedes the older duplicate.
-        Returns the number of supersessions performed.
+        Returns the number of supersessions performed. When ``dry_run`` or
+        ``return_plan`` is set, returns counters plus the exact kept/dropped
+        plan without requiring callers to infer it from the database.
         """
 
         items = self.store.list_memories(
@@ -271,6 +336,7 @@ class MemoryService:
         items.sort(key=lambda item: item.id)  # oldest first
         normalized = [(item, _normalize_text(item.text)) for item in items]
         merges = 0
+        plan: list[dict[str, Any]] = []
         active: list[tuple[MemoryItem, str]] = []
         for item, norm in normalized:
             duplicate = None
@@ -296,8 +362,11 @@ class MemoryService:
                 continue
             # Choose which one wins: higher importance, or newer if equal.
             if item.importance >= duplicate.importance:
-                self.store.supersede(duplicate.id, item.id)
-                if self.embedding_index is not None:
+                kept = item
+                dropped = duplicate
+                if not dry_run:
+                    self.store.supersede(duplicate.id, item.id)
+                if not dry_run and self.embedding_index is not None:
                     self.embedding_index.remove(duplicate.id)
                 active = [
                     (existing_item, existing_norm)
@@ -306,10 +375,23 @@ class MemoryService:
                 ]
                 active.append((item, norm))
             else:
-                self.store.supersede(item.id, duplicate.id)
-                if self.embedding_index is not None:
+                kept = duplicate
+                dropped = item
+                if not dry_run:
+                    self.store.supersede(item.id, duplicate.id)
+                if not dry_run and self.embedding_index is not None:
                     self.embedding_index.remove(item.id)
+            if dry_run or return_plan:
+                plan.append(
+                    {
+                        "kept": _memory_plan_view(kept),
+                        "dropped": _memory_plan_view(dropped),
+                        "reason": "near_duplicate",
+                    }
+                )
             merges += 1
+        if dry_run or return_plan:
+            return {"merged": merges, "dry_run": dry_run, "plan": plan}
         return merges
 
     # ------------------------------------------------------------------
@@ -326,7 +408,8 @@ class MemoryService:
         score_threshold: float = 0.12,
         protect_kinds: tuple[str, ...] = (KIND_PERSONA_SELF,),
         dry_run: bool = False,
-    ) -> dict[str, int]:
+        return_plan: bool = False,
+    ) -> dict[str, Any]:
         """Forget low-value memory items.
 
         Each candidate gets a ``score = 0.5*importance + 0.3*recency +
@@ -337,6 +420,8 @@ class MemoryService:
         items already superseded are skipped.
 
         ``dry_run`` returns the same counters without touching the database.
+        When ``dry_run`` or ``return_plan`` is set, the result also includes a
+        per-item ``plan`` list with kept/dropped decisions and reasons.
         """
 
         items = self.store.list_memories(
@@ -351,15 +436,32 @@ class MemoryService:
         skipped_recent = 0
         skipped_pinned = 0
         kept = 0
+        plan: list[dict[str, Any]] = []
         now = datetime.now(timezone.utc)
         for item in items:
             if item.superseded_by is not None:
                 continue
             if item.pinned:
                 skipped_pinned += 1
+                if dry_run or return_plan:
+                    plan.append(
+                        {
+                            "kept": _memory_plan_view(item),
+                            "dropped": None,
+                            "reason": "pinned",
+                        }
+                    )
                 continue
             if item.kind in protect_kinds:
                 skipped_protected += 1
+                if dry_run or return_plan:
+                    plan.append(
+                        {
+                            "kept": _memory_plan_view(item),
+                            "dropped": None,
+                            "reason": "protected_kind",
+                        }
+                    )
                 continue
             try:
                 created = datetime.fromisoformat(item.created_at)
@@ -370,28 +472,150 @@ class MemoryService:
             age_days = max(0.0, (now - created).total_seconds() / 86400.0)
             if age_days < keep_newer_than_days:
                 skipped_recent += 1
+                if dry_run or return_plan:
+                    plan.append(
+                        {
+                            "kept": _memory_plan_view(item),
+                            "dropped": None,
+                            "reason": "recent",
+                            "age_days": round(age_days, 3),
+                        }
+                    )
                 continue
             recency = math.exp(-age_days / 90.0)
             access = math.log(1 + item.access_count) / 4.0  # ~1.0 at 50 accesses
             score = 0.5 * item.importance + 0.3 * recency + 0.2 * min(access, 1.0)
             if score < score_threshold:
+                if dry_run or return_plan:
+                    plan.append(
+                        {
+                            "kept": None,
+                            "dropped": _memory_plan_view(item),
+                            "reason": "score_below_threshold",
+                            "score": round(score, 6),
+                            "threshold": score_threshold,
+                        }
+                    )
                 if not dry_run:
                     self.store.delete_memory(item.id)
                     if self.embedding_index is not None:
                         self.embedding_index.remove(item.id)
                 deleted += 1
             else:
+                if dry_run or return_plan:
+                    plan.append(
+                        {
+                            "kept": _memory_plan_view(item),
+                            "dropped": None,
+                            "reason": "score_at_or_above_threshold",
+                            "score": round(score, 6),
+                            "threshold": score_threshold,
+                        }
+                    )
                 kept += 1
-        return {
+        result: dict[str, Any] = {
             "deleted": deleted,
             "kept": kept,
             "skipped_pinned": skipped_pinned,
             "skipped_protected": skipped_protected,
             "skipped_recent": skipped_recent,
         }
+        if dry_run or return_plan:
+            result["dry_run"] = dry_run
+            result["plan"] = plan
+        return result
 
     # ------------------------------------------------------------------
     # Importance heuristic
+
+    def score_importance_llm(
+        self,
+        text: str,
+        context: dict[str, Any] | None = None,
+    ) -> ImportanceScore:
+        """Score a candidate memory with a tiny opt-in model call.
+
+        Results are cached by SHA256 of normalized text so repeated writes of
+        the same fact do not pay extra latency. Any model or parsing failure
+        falls back to the deterministic heuristic.
+        """
+
+        cleaned = (text or "").strip()
+        fallback_kind = str((context or {}).get("kind") or KIND_FACT)
+        if fallback_kind not in ALL_KINDS:
+            fallback_kind = KIND_FACT
+        if not cleaned:
+            return ImportanceScore(0.1, fallback_kind, "empty text")
+
+        cache_key = self._importance_cache_key(cleaned)
+        cached = self.store.get_kv(cache_key)
+        if cached:
+            parsed = self._parse_importance_payload(cached, fallback_kind=fallback_kind)
+            if parsed is not None:
+                return ImportanceScore(
+                    parsed.importance,
+                    parsed.kind,
+                    parsed.reasoning,
+                    cached=True,
+                )
+
+        if self.importance_client is None:
+            return ImportanceScore(
+                self.score_importance(cleaned, kind=fallback_kind),
+                fallback_kind,
+                "heuristic fallback: no importance client",
+            )
+
+        prompt = (
+            "Score one proposed long-term memory. Return JSON only with "
+            "importance from 0 to 1, kind, and a short reasoning. "
+            "High importance means stable safety, health, identity, strong preference, "
+            "commitment, or durable user fact. Low importance means one-shot mood, "
+            "small talk, or transient context."
+        )
+        user_payload = {
+            "text": cleaned,
+            "context": context or {},
+            "allowed_kinds": list(ALL_KINDS),
+        }
+        try:
+            response = self.importance_client.chat_completion(
+                [
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+                ],
+                temperature=0.0,
+                top_p=1.0,
+                max_tokens=160,
+                response_format=IMPORTANCE_JSON_SCHEMA,
+            )
+            content = str(
+                response.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+            )
+            parsed = self._parse_importance_payload(content, fallback_kind=fallback_kind)
+        except Exception:
+            parsed = None
+
+        if parsed is None:
+            parsed = ImportanceScore(
+                self.score_importance(cleaned, kind=fallback_kind),
+                fallback_kind,
+                "heuristic fallback: model scoring failed",
+            )
+        self.store.set_kv(
+            cache_key,
+            json.dumps(
+                {
+                    "importance": parsed.importance,
+                    "kind": parsed.kind,
+                    "reasoning": parsed.reasoning,
+                },
+                ensure_ascii=False,
+            ),
+        )
+        return parsed
 
     def score_importance(self, text: str, *, kind: str = KIND_FACT) -> float:
         text = (text or "").strip()
@@ -417,11 +641,51 @@ class MemoryService:
     # Helpers
 
     @staticmethod
+    def _importance_cache_key(text: str) -> str:
+        normalized = _normalize_text(text)
+        digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        return f"memory:importance:{digest}"
+
+    @staticmethod
+    def _parse_importance_payload(
+        raw: str,
+        *,
+        fallback_kind: str,
+    ) -> ImportanceScore | None:
+        payload: Any
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start < 0 or end <= start:
+                return None
+            try:
+                payload = json.loads(raw[start : end + 1])
+            except json.JSONDecodeError:
+                return None
+        if not isinstance(payload, dict):
+            return None
+        try:
+            importance = float(payload.get("importance"))
+        except (TypeError, ValueError):
+            return None
+        kind = str(payload.get("kind") or fallback_kind)
+        if kind not in ALL_KINDS:
+            kind = fallback_kind if fallback_kind in ALL_KINDS else KIND_FACT
+        reasoning = str(payload.get("reasoning") or "").strip()
+        return ImportanceScore(
+            max(0.0, min(1.0, importance)),
+            kind,
+            reasoning[:500],
+        )
+
+    @staticmethod
     def _scope_matches(item: MemoryItem, query: RecallQuery) -> bool:
-        if query.user_id and item.user_id and item.user_id != query.user_id:
-            # User-scoped memory must belong to the right principal.
-            if item.scope == SCOPE_USER:
-                return False
+        # User-scoped memory is private to a single principal: only return it
+        # to a query that names the same user.
+        if item.scope == SCOPE_USER:
+            return bool(query.user_id and item.user_id == query.user_id)
         if query.chat_id and item.scope == SCOPE_CHAT:
             if item.chat_id and str(item.chat_id) != str(query.chat_id):
                 return False
@@ -472,7 +736,26 @@ def _signature_match(left: str, right: str) -> bool:
     return len(overlap) / len(union) >= 0.7
 
 
+def _memory_plan_view(item: MemoryItem) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "text": item.text,
+        "kind": item.kind,
+        "scope": item.scope,
+        "importance": item.importance,
+        "user_id": item.user_id,
+        "chat_id": item.chat_id,
+        "persona_key": item.persona_key,
+        "media_id": item.media_id,
+        "created_at": item.created_at,
+        "access_count": item.access_count,
+        "pinned": item.pinned,
+        "tags": list(item.tags),
+    }
+
+
 __all__ = [
+    "ImportanceScore",
     "MemoryService",
     "RecallQuery",
     "StoredMemory",

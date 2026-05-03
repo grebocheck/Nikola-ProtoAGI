@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .env import env_int, load_project_env
+from .env import env_bool, env_int, load_project_env
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -52,6 +52,7 @@ class EmbeddingSettings:
     model: str = ""
     timeout_seconds: int = 30
     request_dimensions: int | None = None
+    backend: str = "flat"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "EmbeddingSettings":
@@ -63,6 +64,7 @@ class EmbeddingSettings:
             model=str(data.get("model", "")),
             timeout_seconds=int(data.get("timeout_seconds", 30)),
             request_dimensions=int(dims) if dims else None,
+            backend=str(data.get("backend", "flat") or "flat"),
         )
 
 
@@ -76,6 +78,9 @@ class AgentConfig:
     max_tokens: int = 1536
     tool_policy: ToolPolicy = field(default_factory=ToolPolicy)
     embedding: EmbeddingSettings = field(default_factory=EmbeddingSettings)
+    llm_importance: bool = False
+    plan_reflect: bool = True
+    plan_call_limit: int = 2
 
     @classmethod
     def load(cls, path: Path | None = None) -> "AgentConfig":
@@ -96,6 +101,8 @@ class AgentConfig:
             embedding_data["request_dimensions"] = env_value
         if env_value := os.environ.get("PROTOAGI_EMBED_TIMEOUT_SECONDS"):
             embedding_data["timeout_seconds"] = env_value
+        if env_value := os.environ.get("PROTOAGI_EMBED_BACKEND"):
+            embedding_data["backend"] = env_value
 
         return cls(
             base_url=os.environ.get("PROTOAGI_BASE_URL", data.get("base_url", cls.base_url)),
@@ -108,6 +115,18 @@ class AgentConfig:
             max_tokens=env_int("PROTOAGI_MAX_TOKENS", int(data.get("max_tokens", 1536))),
             tool_policy=ToolPolicy.from_dict(data.get("tool_policy")),
             embedding=EmbeddingSettings.from_dict(embedding_data),
+            llm_importance=env_bool(
+                "PROTOAGI_LLM_IMPORTANCE",
+                bool(data.get("llm_importance", False)),
+            ),
+            plan_reflect=env_bool(
+                "PROTOAGI_PLAN_REFLECT",
+                bool(data.get("plan_reflect", True)),
+            ),
+            plan_call_limit=env_int(
+                "PROTOAGI_PLAN_CALL_LIMIT",
+                int(data.get("plan_call_limit", 2)),
+            ),
         )
 
     def with_cli_overrides(
@@ -121,6 +140,7 @@ class AgentConfig:
         max_tokens: int | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
+        database_path: str | Path | None = None,
     ) -> "AgentConfig":
         policy = ToolPolicy(
             allow_write=self.tool_policy.allow_write if allow_write is None else allow_write,
@@ -136,12 +156,19 @@ class AgentConfig:
         return AgentConfig(
             base_url=base_url or self.base_url,
             model=model or self.model,
-            database_path=self.database_path,
+            database_path=(
+                _path_from_config(database_path)
+                if database_path is not None
+                else self.database_path
+            ),
             temperature=self.temperature if temperature is None else temperature,
             top_p=self.top_p if top_p is None else top_p,
             max_tokens=self.max_tokens if max_tokens is None else max_tokens,
             tool_policy=policy,
             embedding=self.embedding,
+            llm_importance=self.llm_importance,
+            plan_reflect=self.plan_reflect,
+            plan_call_limit=self.plan_call_limit,
         )
 
 

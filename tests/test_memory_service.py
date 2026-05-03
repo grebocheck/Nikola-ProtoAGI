@@ -9,6 +9,7 @@ from protoagi.memory import (
     SCOPE_CHAT,
     SCOPE_GLOBAL,
     SCOPE_PERSONA,
+    SCOPE_USER,
     MemoryStore,
 )
 from protoagi.memory_service import MemoryService, RecallQuery
@@ -24,6 +25,20 @@ class StubEmbeddingClient:
 
     def embed(self, text: str) -> list[float] | None:
         return self._lookup.get(text)
+
+
+class StubImportanceClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def chat_completion(self, messages, **kwargs):
+        self.calls += 1
+        payload = messages[1]["content"]
+        if "allergy" in payload or "алергі" in payload:
+            content = '{"importance": 0.93, "kind": "semantic", "reasoning": "stable safety fact"}'
+        else:
+            content = '{"importance": 0.22, "kind": "episodic", "reasoning": "transient mood"}'
+        return {"choices": [{"message": {"content": content}}]}
 
 
 class MemoryServiceTests(unittest.TestCase):
@@ -128,6 +143,54 @@ class MemoryServiceTests(unittest.TestCase):
         texts = [result.item.text for result in results]
         self.assertIn("loved chat 1 detail", texts)
         self.assertNotIn("loved chat 2 detail", texts)
+
+    def test_user_scope_requires_matching_user(self) -> None:
+        store, service = self._make()
+        service.remember("alice coffee preference", scope=SCOPE_USER, user_id="telegram:1")
+        service.remember("bob coffee preference", scope=SCOPE_USER, user_id="telegram:2")
+        results = service.recall(RecallQuery(text="coffee", user_id="telegram:1", limit=5))
+        texts = [result.item.text for result in results]
+        self.assertIn("alice coffee preference", texts)
+        self.assertNotIn("bob coffee preference", texts)
+        self.assertEqual(service.recall(RecallQuery(text="coffee", limit=5)), [])
+
+    def test_llm_importance_scoring_is_opt_in_and_cached(self) -> None:
+        store, _ = self._make()
+        client = StubImportanceClient()
+        service = MemoryService(
+            store,
+            importance_client=client,
+            llm_importance=True,
+        )
+        critical = service.remember("user has a nut allergy", scope=SCOPE_GLOBAL)
+        self.assertIsNotNone(critical)
+        assert critical is not None
+        self.assertGreater(critical.item.importance, 0.85)
+        self.assertEqual(critical.item.kind, KIND_SEMANTIC)
+
+        mood = service.remember("user feels sleepy tonight", scope=SCOPE_GLOBAL)
+        self.assertIsNotNone(mood)
+        assert mood is not None
+        self.assertLess(mood.item.importance, 0.3)
+
+        before = client.calls
+        for _ in range(10):
+            service.remember("user has a nut allergy", scope=SCOPE_GLOBAL)
+        self.assertEqual(client.calls, before)
+
+    def test_consolidate_dry_run_returns_plan_without_superseding(self) -> None:
+        store, service = self._make()
+        first = service.remember("user loves coffee", scope=SCOPE_GLOBAL, importance=0.5)
+        second = service.remember("user loves coffee", scope=SCOPE_GLOBAL, importance=0.8)
+        assert first is not None and second is not None
+        result = service.consolidate(scope=SCOPE_GLOBAL, dry_run=True)
+        self.assertIsInstance(result, dict)
+        assert isinstance(result, dict)
+        self.assertEqual(result["merged"], 1)
+        self.assertEqual(result["plan"][0]["kept"]["id"], second.memory_id)
+        self.assertEqual(result["plan"][0]["dropped"]["id"], first.memory_id)
+        active = store.list_memories(scope=SCOPE_GLOBAL, include_superseded=False)
+        self.assertEqual(len(active), 2)
 
 
 if __name__ == "__main__":

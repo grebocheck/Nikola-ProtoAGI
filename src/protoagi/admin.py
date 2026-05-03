@@ -10,6 +10,7 @@ HTML dashboard at ``/`` plus JSON endpoints under ``/api/``:
 - ``GET  /api/chats``                — Telegram chats
 - ``POST /api/memories/<id>/delete`` — delete a memory item
 - ``POST /api/memories/prune``       — run the prune pass (dry_run optional)
+- ``POST /api/memories/*/preview``   — dry-run prune/consolidate with plans
 
 The dashboard is single-file, server-rendered, no external assets, so it
 works offline.
@@ -51,6 +52,19 @@ def _html_response(handler: BaseHTTPRequestHandler, body: str) -> None:
     handler.wfile.write(encoded)
 
 
+def _bytes_response(
+    handler: BaseHTTPRequestHandler,
+    data: bytes,
+    *,
+    content_type: str,
+) -> None:
+    handler.send_response(200)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
 def _stats(memory: MemoryStore) -> dict[str, Any]:
     with memory.connect() as conn:
         memories = int(conn.execute(
@@ -90,6 +104,7 @@ def _serialize_memory(item: Any) -> dict[str, Any]:
         "user_id": item.user_id,
         "chat_id": item.chat_id,
         "persona_key": item.persona_key,
+        "media_id": item.media_id,
         "created_at": item.created_at,
         "access_count": item.access_count,
         "pinned": item.pinned,
@@ -267,6 +282,14 @@ def make_handler(memory: MemoryStore, service: MemoryService) -> type[BaseHTTPRe
                 items = memory.list_memories(limit=limit)
                 _json_response(self, [_serialize_memory(item) for item in items])
                 return
+            if parsed.path.startswith("/api/media/"):
+                media_id = parsed.path.split("/api/media/", 1)[1]
+                item = memory.get_media_blob(media_id)
+                if item is None:
+                    self.send_error(404, "media not found")
+                    return
+                _bytes_response(self, item.bytes, content_type=item.mime)
+                return
             if parsed.path == "/api/reminders":
                 items = memory.due_reminders("9999-12-31T23:59:59+00:00", limit=200)
                 _json_response(
@@ -330,6 +353,20 @@ def make_handler(memory: MemoryStore, service: MemoryService) -> type[BaseHTTPRe
                     score_threshold=float(payload.get("score_threshold", 0.12)),
                     keep_newer_than_days=float(payload.get("keep_newer_than_days", 30.0)),
                     dry_run=bool(payload.get("dry_run", False)),
+                    return_plan=bool(payload.get("return_plan", False)),
+                )
+                _json_response(self, result)
+                return
+
+            if parsed.path == "/api/memories/prune/preview":
+                result = service.prune(
+                    scope=payload.get("scope"),
+                    persona_key=payload.get("persona_key"),
+                    chat_id=payload.get("chat_id"),
+                    score_threshold=float(payload.get("score_threshold", 0.12)),
+                    keep_newer_than_days=float(payload.get("keep_newer_than_days", 30.0)),
+                    dry_run=True,
+                    return_plan=True,
                 )
                 _json_response(self, result)
                 return
@@ -393,12 +430,25 @@ def make_handler(memory: MemoryStore, service: MemoryService) -> type[BaseHTTPRe
                 return
 
             if parsed.path == "/api/memories/consolidate":
-                merged = service.consolidate(
+                result = service.consolidate(
                     scope=payload.get("scope"),
                     persona_key=payload.get("persona_key"),
                     chat_id=payload.get("chat_id"),
+                    dry_run=bool(payload.get("dry_run", False)),
+                    return_plan=bool(payload.get("return_plan", False)),
                 )
-                _json_response(self, {"merged": merged})
+                _json_response(self, result if isinstance(result, dict) else {"merged": result})
+                return
+
+            if parsed.path == "/api/memories/consolidate/preview":
+                result = service.consolidate(
+                    scope=payload.get("scope"),
+                    persona_key=payload.get("persona_key"),
+                    chat_id=payload.get("chat_id"),
+                    dry_run=True,
+                    return_plan=True,
+                )
+                _json_response(self, result)
                 return
 
             self.send_error(404, "not found")

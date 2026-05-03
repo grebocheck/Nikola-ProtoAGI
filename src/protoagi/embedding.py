@@ -9,10 +9,10 @@ write attaches a vector and recall combines BM25 with cosine similarity.
 
 from __future__ import annotations
 
+import hashlib
 import json
-import sqlite3
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -99,18 +99,34 @@ class EmbeddingClient:
             self._cache.pop(evict, None)
 
 
-class EmbeddingIndex:
-    """In-memory cache of all active embeddings for fast cosine recall.
+class EmbeddingBackend:
+    """Backend interface for vector search over stored embeddings."""
 
-    SQLite returns a few hundred kB of vectors quickly enough for an
-    experiment-sized memory, but we still avoid hitting disk on the hot path
-    by caching everything once and refreshing lazily.
-    """
+    def add(self, memory_id: int, vector: Sequence[float]) -> None:
+        raise NotImplementedError
+
+    def remove(self, memory_id: int) -> None:
+        raise NotImplementedError
+
+    def refresh(self) -> None:
+        raise NotImplementedError
+
+    def similar(
+        self,
+        query_vector: Sequence[float],
+        *,
+        limit: int,
+        candidate_ids: set[int] | None = None,
+    ) -> list[tuple[int, float]]:
+        raise NotImplementedError
+
+
+class FlatEmbeddingBackend(EmbeddingBackend):
+    """Exact cosine scan, kept as the deterministic baseline."""
 
     def __init__(self, store: MemoryStore, *, model: str | None = None) -> None:
         self.store = store
         self.model = model
-        self._loaded_at = 0.0
         self._vectors: dict[int, list[float]] = {}
 
     def add(self, memory_id: int, vector: Sequence[float]) -> None:
@@ -124,20 +140,14 @@ class EmbeddingIndex:
             memory_id: vector
             for memory_id, vector in self.store.all_embeddings(model=self.model)
         }
-        self._loaded_at = time.time()
-
-    def ensure_loaded(self) -> None:
-        if not self._vectors and self._loaded_at == 0.0:
-            self.refresh()
 
     def similar(
         self,
         query_vector: Sequence[float],
         *,
-        limit: int = 20,
+        limit: int,
         candidate_ids: set[int] | None = None,
     ) -> list[tuple[int, float]]:
-        self.ensure_loaded()
         if not self._vectors:
             return []
         scored: list[tuple[int, float]] = []
@@ -152,9 +162,178 @@ class EmbeddingIndex:
         return scored[:limit]
 
 
+@dataclass(slots=True)
+class LSHSettings:
+    planes: int = 14
+    min_candidates: int = 512
+    max_candidates: int = 4096
+    seed: str = "protoagi-lsh-v1"
+    _plane_cache: dict[tuple[int, int], list[float]] = field(default_factory=dict)
+
+
+class LSHEmbeddingBackend(FlatEmbeddingBackend):
+    """Small pure-Python approximate backend based on random-hyperplane LSH.
+
+    This is not a full HNSW implementation, but it gives ``EmbeddingIndex`` a
+    real backend boundary and a dependency-free path that avoids scanning every
+    vector once memory grows beyond experiment size. Exact re-ranking still
+    happens within the selected candidate bucket.
+    """
+
+    def __init__(
+        self,
+        store: MemoryStore,
+        *,
+        model: str | None = None,
+        settings: LSHSettings | None = None,
+    ) -> None:
+        super().__init__(store, model=model)
+        self.settings = settings or LSHSettings()
+        self._buckets: dict[int, set[int]] = {}
+
+    def add(self, memory_id: int, vector: Sequence[float]) -> None:
+        super().add(memory_id, vector)
+        bucket = self._hash(vector)
+        self._buckets.setdefault(bucket, set()).add(int(memory_id))
+
+    def remove(self, memory_id: int) -> None:
+        memory_id = int(memory_id)
+        vector = self._vectors.get(memory_id)
+        if vector is not None:
+            bucket = self._hash(vector)
+            values = self._buckets.get(bucket)
+            if values is not None:
+                values.discard(memory_id)
+                if not values:
+                    self._buckets.pop(bucket, None)
+        super().remove(memory_id)
+
+    def refresh(self) -> None:
+        super().refresh()
+        self._buckets = {}
+        for memory_id, vector in self._vectors.items():
+            self._buckets.setdefault(self._hash(vector), set()).add(memory_id)
+
+    def similar(
+        self,
+        query_vector: Sequence[float],
+        *,
+        limit: int,
+        candidate_ids: set[int] | None = None,
+    ) -> list[tuple[int, float]]:
+        if not self._vectors:
+            return []
+        candidates = self._candidate_ids(query_vector)
+        if candidate_ids is not None:
+            candidates &= candidate_ids
+        if not candidates:
+            return []
+        return super().similar(query_vector, limit=limit, candidate_ids=candidates)
+
+    def _candidate_ids(self, query_vector: Sequence[float]) -> set[int]:
+        primary = self._hash(query_vector)
+        candidates = set(self._buckets.get(primary, set()))
+        if len(candidates) >= self.settings.min_candidates:
+            return set(list(candidates)[: self.settings.max_candidates])
+        # Add nearby buckets by flipping one bit. This keeps recall sane for
+        # small stores without falling all the way back to a global scan.
+        for bit in range(self.settings.planes):
+            candidates.update(self._buckets.get(primary ^ (1 << bit), set()))
+            if len(candidates) >= self.settings.max_candidates:
+                break
+        if not candidates and len(self._vectors) <= self.settings.max_candidates:
+            return set(self._vectors)
+        return set(list(candidates)[: self.settings.max_candidates])
+
+    def _hash(self, vector: Sequence[float]) -> int:
+        bits = 0
+        dim = len(vector)
+        for plane_index in range(self.settings.planes):
+            plane = self._plane(dim, plane_index)
+            dot = sum(float(left) * right for left, right in zip(vector, plane))
+            if dot >= 0:
+                bits |= 1 << plane_index
+        return bits
+
+    def _plane(self, dim: int, plane_index: int) -> list[float]:
+        key = (dim, plane_index)
+        cached = self.settings._plane_cache.get(key)
+        if cached is not None:
+            return cached
+        values: list[float] = []
+        for axis in range(dim):
+            digest = hashlib.sha256(
+                f"{self.settings.seed}:{dim}:{plane_index}:{axis}".encode("utf-8")
+            ).digest()
+            # Deterministic pseudo-random hyperplane component in [-1, 1].
+            raw = int.from_bytes(digest[:4], "big") / 0xFFFFFFFF
+            values.append((raw * 2.0) - 1.0)
+        self.settings._plane_cache[key] = values
+        return values
+
+
+class EmbeddingIndex:
+    """In-memory cache of all active embeddings for fast cosine recall.
+
+    SQLite returns a few hundred kB of vectors quickly enough for an
+    experiment-sized memory, but we still avoid hitting disk on the hot path
+    by caching everything once and refreshing lazily.
+    """
+
+    def __init__(
+        self,
+        store: MemoryStore,
+        *,
+        model: str | None = None,
+        backend: str | EmbeddingBackend = "flat",
+    ) -> None:
+        self.store = store
+        self.model = model
+        self._loaded_at = 0.0
+        self.backend = backend if isinstance(backend, EmbeddingBackend) else self._make_backend(backend)
+
+    def add(self, memory_id: int, vector: Sequence[float]) -> None:
+        self.backend.add(memory_id, vector)
+
+    def remove(self, memory_id: int) -> None:
+        self.backend.remove(memory_id)
+
+    def refresh(self) -> None:
+        self.backend.refresh()
+        self._loaded_at = time.time()
+
+    def ensure_loaded(self) -> None:
+        if self._loaded_at == 0.0:
+            self.refresh()
+
+    def similar(
+        self,
+        query_vector: Sequence[float],
+        *,
+        limit: int = 20,
+        candidate_ids: set[int] | None = None,
+    ) -> list[tuple[int, float]]:
+        self.ensure_loaded()
+        return self.backend.similar(
+            query_vector,
+            limit=limit,
+            candidate_ids=candidate_ids,
+        )
+
+    def _make_backend(self, backend: str) -> EmbeddingBackend:
+        normalized = backend.strip().lower()
+        if normalized in {"lsh", "hnsw", "auto"}:
+            return LSHEmbeddingBackend(self.store, model=self.model)
+        return FlatEmbeddingBackend(self.store, model=self.model)
+
+
 __all__ = [
     "EmbeddingClient",
     "EmbeddingConfig",
     "EmbeddingError",
+    "EmbeddingBackend",
     "EmbeddingIndex",
+    "FlatEmbeddingBackend",
+    "LSHEmbeddingBackend",
+    "LSHSettings",
 ]

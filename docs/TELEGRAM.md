@@ -51,6 +51,18 @@ Or start the model server and Telegram bot together:
 .\scripts\start-nikola-stack.ps1
 ```
 
+For side-by-side personas, run separate Telegram bot tokens and separate
+SQLite databases:
+
+```powershell
+$env:PYTHONPATH="src"
+python -m protoagi telegram --persona mykola --db data/mykola.sqlite3 --token "123:AAA"
+python -m protoagi telegram --persona solomiya --db data/solomiya.sqlite3 --token "456:BBB"
+```
+
+Each database keeps its own poll offset, chat table, reminders, and memory, so
+instances do not fight over Telegram `getUpdates` state.
+
 When the stack is running, `Ctrl+C` stops the Telegram bot and local
 `llama-server` processes. Use `-KeepServers` to leave the model servers loaded
 after the bot exits.
@@ -86,6 +98,18 @@ You can also pass it directly:
 ```powershell
 .\scripts\start-telegram.ps1 -AllowedChatId 123456789
 ```
+
+By default Telegram memory is global, which is convenient for a single-owner
+bot that moves between private chats, groups, and personas. For multi-user
+deployments, switch to per-user memory isolation:
+
+```env
+PROTOAGI_TELEGRAM_GLOBAL_MEMORY=0
+```
+
+With that flag off, remembered Telegram facts are stored in `scope=user` when
+the sender is known, and recall only returns facts for the current Telegram
+user. Chat-scoped system facts remain available inside the originating chat.
 
 ## Profiles
 
@@ -202,6 +226,10 @@ Telegram images are paired with the image bytes instead of failing tokenization.
 Incoming stickers are also treated as conversational messages with emoji and
 pack metadata, so the model can react to them instead of ignoring them.
 
+Image bytes are stored in `media_blobs` with their caption and linked from a
+memory item via `media_id`. This lets later recall surface old photo captions;
+the admin API can serve the original bytes at `/api/media/<file_id>`.
+
 ## Initiative
 
 The active profile periodically reviews known chats and may send a message first
@@ -218,6 +246,13 @@ When the Telegram bot is running, `BotRunner`'s worker thread checks for due
 reminders every minute and delivers them into the originating chat with a
 ``⏰`` prefix. Reminders without a deliverable chat are marked ``cancelled``
 to avoid retry loops.
+
+The Telegram decision loop can also request bounded tools directly. The first
+wired tools are `recall` and `remind_me`: if the model returns a
+`tool_request` or OpenAI-style `tool_calls`, the bot executes up to four tool
+steps and asks the profile to revise the final decision with the tool results.
+This lets questions like "what do you remember about me?" quote real memory
+instead of guessing from the current prompt.
 
 ## Reflection
 
@@ -240,3 +275,13 @@ pass twice in a row.
 and a small worker thread for periodic tasks (initiative, reminders,
 reflection). Pass ``--single-thread`` to ``protoagi telegram`` to fall back
 to the legacy interleaved loop, mostly useful for step-through debugging.
+
+An opt-in asyncio supervisor is available for concurrent update handling:
+
+```powershell
+$env:PYTHONPATH="src"
+python -m protoagi telegram --async --max-concurrent-updates 2
+```
+
+It keeps the synchronous bot internals and wraps blocking Telegram/LLM work in
+`asyncio.to_thread`, with a semaphore bounding concurrent LLM calls.

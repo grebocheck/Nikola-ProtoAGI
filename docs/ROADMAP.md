@@ -76,208 +76,274 @@ Test count grew 53 → 99.
 
 Test count: 99 → 107.
 
+### Phase 5 — P1 finished (2026-05-03)
+- **P1-5** LLM-driven importance scoring is opt-in via
+  `PROTOAGI_LLM_IMPORTANCE=1`. `MemoryService.score_importance_llm`
+  asks for `{importance, kind, reasoning}`, caches by SHA256 of normalized
+  text in `kv`, and falls back to the deterministic heuristic.
+- **P1-6** Telegram memory can be isolated per user with
+  `PROTOAGI_TELEGRAM_GLOBAL_MEMORY=0`; chat facts are stored under
+  `scope=user` when a Telegram sender is known, and recall passes the
+  current `user_id`.
+- **P1-7** `protoagi backup` / `protoagi restore` use SQLite's online
+  backup API, validate with `PRAGMA integrity_check`, and restore through
+  an atomic swap plus WAL/SHM cleanup.
+- **P1-8** `memory-prune` and `memory-consolidate` can emit dry-run JSON
+  plans with per-item kept/dropped reasons. Admin exposes preview endpoints
+  for both operations.
+- **P1-9** Telegram decisions can request bounded tools (`recall`,
+  `remind_me`) via `tool_request` or OpenAI-style `tool_calls`; results are
+  merged back into the final decision.
+- **P1-10** `AsyncBotRunner` adds opt-in concurrent Telegram update
+  handling through `asyncio.to_thread` and a semaphore; CLI flag:
+  `protoagi telegram --async`.
+
+Test count: 107 → 116.
+
+### Phase 6 — P2 finished (2026-05-03)
+- **P2-11** Embedding search now has a backend boundary:
+  `EmbeddingBackend`, exact `FlatEmbeddingBackend`, and pure-Python
+  `LSHEmbeddingBackend` selectable with `PROTOAGI_EMBED_BACKEND=lsh`
+  (or `hnsw`/`auto` alias). Exact cosine remains the default.
+- **P2-12** Multimodal memory landed: `media_blobs(file_id, mime, sha256,
+  bytes, caption, created_at)`, optional `memory_items.media_id`, admin
+  `GET /api/media/<id>`, and Telegram image messages persist bytes +
+  caption-linked memory items.
+- **P2-13** `ProtoAgent` now runs a bounded Plan-and-Reflect loop:
+  an initial JSON plan plus at most one post-tool plan update by default
+  (`PROTOAGI_PLAN_CALL_LIMIT=2`). Tool execution remains capped by the
+  normal `max_steps`.
+- **P2-14** Telegram supports multi-instance deployment flags:
+  `protoagi telegram --db data/<persona>.sqlite3 --persona <key> --token ...`.
+  The startup line prints the active database path.
+
+Test count: 116 → 121.
+
+### Phase 7 — follow-up audit cleanup (2026-05-03)
+Tightened a few things uncovered by re-reading P1+P2 work:
+
+- ``MemoryService._scope_matches`` had a dead branch that re-checked
+  ``item.scope == SCOPE_USER`` after an early return — removed for
+  clarity. Behavior unchanged.
+- ``VisionDescriber.describe`` had unreachable English-fallback text and
+  a confusing double-fallback chain; collapsed to a single Ukrainian
+  fallback so logs and recall stay in one language.
+- ``VisionDescriber._store_media`` was silently swallowing every
+  exception. It now narrows to ``sqlite3.Error / OSError / ValueError``
+  and prints the error to the runtime log so persistence failures stop
+  being invisible.
+- ``embedding.py`` carried an unused ``import sqlite3``; removed.
+- ``MemoryStore`` docstring said "single long-lived connection" but the
+  module switched to per-call connections with WAL-set-once-at-init for
+  Windows compatibility — docstring corrected.
+- ``AsyncBotRunner.poll_once`` now passes
+  ``return_exceptions=True`` to ``asyncio.gather`` and logs per-update
+  failures instead of cancelling the rest of the batch. Permanent
+  failures still don't busy-loop; transient failures are tracked as a
+  P0 follow-up (item A6).
+
+No behavior tests changed. 121 tests still green.
+
+Bugs found but not yet fixed (now items A1–A8 in P0 backlog):
+
+- **A1** Privacy-mode flag silently hides legacy global rows.
+- **A2** Tool-augmented decisions cost up to 3 LLM calls.
+- **A3** ``tools`` + ``response_format`` interaction not measured.
+- **A4** ``media_blobs`` has no garbage collection.
+- **A5** SSRF guard is vulnerable to DNS rebinding.
+- **A6** Async runner advances offset on transient failure.
+- **A7** Importance cache in ``kv`` has no eviction.
+- **A8** ``EmbeddingClient`` cache evicts FIFO instead of LRU.
+
 ---
 
 ## Backlog
 
 Ordered by priority. Reorder freely as new evidence arrives.
 
-### P0 — done (see Phase 4 above)
+### Original P0 — done (see Phase 4 above)
 
-All four P0 items shipped on 2026-05-03:
+All four original P0 items shipped on 2026-05-03:
 - ✅ #1 Embedding server in stack
 - ✅ #2 Auto-prune in `run_reflection_pass`
 - ✅ #3 Admin pin/unpin + edit
 - ✅ #4 Memory eval regression gate
 
-### P1 — meaningful work that needs design before code
+The follow-up audit added a fresh P0 cohort (A1–A8); see below.
 
-#### 5. LLM-driven importance scoring with cache — **M**
-**Why:** the current heuristic in
-[memory_service.py:score_importance](../src/protoagi/memory_service.py)
-is intentionally simple. A small LLM call per write could rate facts much
-better, but cost and latency must stay bounded.
+### P1 — done (see Phase 5 above)
 
-**How:** add `MemoryService.score_importance_llm(text, context)` that
-sends a tiny prompt (~150 tokens) requesting `{importance: 0..1, kind:
-..., reasoning: ...}`. Cache responses by SHA256 of normalized text.
-Make it opt-in via `PROTOAGI_LLM_IMPORTANCE=1`. Heuristic remains the
-fallback so tests stay deterministic.
+All six P1 items shipped on 2026-05-03:
+- ✅ #5 LLM-driven importance scoring with cache
+- ✅ #6 Per-user privacy scopes
+- ✅ #7 Backup / restore CLI
+- ✅ #8 Memory diff for `consolidate` / `prune`
+- ✅ #9 Tool-use inside Telegram persona
+- ✅ #10 Async polling
 
-**Files:** [src/protoagi/memory_service.py](../src/protoagi/memory_service.py),
-[src/protoagi/config.py](../src/protoagi/config.py),
-new tests in `tests/test_memory_service.py`.
+### P2 — done (see Phase 6 above)
 
-**Acceptance:** with `PROTOAGI_LLM_IMPORTANCE=1` and a real model, a
-critical fact ("користувач має алергію на горіхи") gets importance > 0.85
-and a one-shot mood note gets < 0.3. Cache hit rate ≥ 90 % on repeated
-writes.
+All four P2 items shipped on 2026-05-03:
+- ✅ #11 HNSW/approximate embedding backend path
+- ✅ #12 Multimodal memory
+- ✅ #13 Plan-and-Reflect agent loop
+- ✅ #14 Multi-instance deployment
 
----
+### P0 — bugs and gaps from the 2026-05-03 follow-up audit
 
-#### 6. Per-user privacy scopes — **M**
-**Why:** today Telegram facts are global by design. Multi-user bots leak
-user A's preferences into chats with user B. The dimension exists in the
-schema (`user_id`, `scope=user`) but the recall path doesn't use it.
+#### A1. Privacy mode loses access to legacy global memories — **S**
+**What:** when `PROTOAGI_TELEGRAM_GLOBAL_MEMORY=0`, `_search_chat_memory`
+sets `include_global=False`. Existing rows (written before the flag flipped)
+have `scope=SCOPE_GLOBAL`, so they become invisible. SCOPE_USER rows
+written during privacy mode also become invisible to non-private callers
+(``query.user_id=None``).
 
-**How:** add a `PROTOAGI_TELEGRAM_GLOBAL_MEMORY=0` env flag. When off,
-`NikolaBot._search_chat_memory` passes `user_id` to `RecallQuery` and
-`MemoryService.recall` enforces user isolation (already supported by
-`_scope_matches`). Keep current behavior as default for the single-owner
-use case; document the flag.
+**Why:** silent recall regression for users who toggle the flag mid-stream;
+hard to debug without reading the scope-matcher.
 
-**Files:** [src/protoagi/telegram/bot.py](../src/protoagi/telegram/bot.py),
-[src/protoagi/telegram/config.py](../src/protoagi/telegram/config.py),
-[.env.example](../.env.example), [docs/TELEGRAM.md](TELEGRAM.md), tests.
+**How:** add a one-shot ``protoagi memory-rescope --to user`` command that
+reassigns ``scope`` and ``user_id`` based on existing
+``user:<id>``/``source_chat:<id>`` tags. Document the trade-off in
+[docs/TELEGRAM.md](TELEGRAM.md). Optionally support a "permissive
+private" mode that still recalls SCOPE_GLOBAL items but never writes new
+ones.
 
-**Acceptance:** with the flag off, two test users in the same group only
-recall their own facts; with the flag on, behavior matches today's
-golden tests.
+**Acceptance:** existing test still passes; new rescoping CLI test
+verifies a global → user migration.
 
 ---
 
-#### 7. Backup / restore CLI — **S**
-**Why:** the SQLite database is single-point-of-failure. WAL is great for
-concurrency but does not protect against corruption or a `data/` wipe.
+#### A2. Tool-augmented decisions cost three LLM calls — **M**
+**What:** when the model emits a `tool_request` or `tool_calls`,
+`decide_incoming` runs (call #1), the tool runner executes, and
+`_merge_decision_tool_results` runs another full chat completion (#2).
+If `compose_reply` then triggers (no `reply` text yet), that's #3. On a
+20B local model this is ~30 s end-to-end.
 
-**How:** `protoagi backup --to data/backups/<timestamp>.sqlite3` calls
-SQLite's online `.backup` API (`Connection.backup`). `protoagi restore
---from <path>` validates and atomically swaps. Document a 7-day rolling
-retention recipe.
+**Why:** noticeable latency for what should feel like a quick chat
+reaction.
 
-**Files:** [src/protoagi/cli.py](../src/protoagi/cli.py),
-new `src/protoagi/backup.py`, tests, README "Memory ops" section.
+**How:** option A — make the merge call optional when the tool result is
+trivially formattable (skip merge for `recall` with one strong hit;
+inline the text directly). Option B — short-circuit `compose_reply` when
+the merge call already produced `reply`/`replies`. Item already partially
+mitigated; needs a measurement: log per-decision call counts and surface
+in admin stats.
 
-**Acceptance:** backup → restore round-trip preserves all rows including
-embeddings BLOBs.
-
----
-
-#### 8. Memory diff for `consolidate` / `prune` — **S**
-**Why:** today running prune/consolidate does the work and reports counts.
-A "what would change" view with per-item before/after would build trust
-in the heuristic.
-
-**How:** extend both methods with a `dry_run=True` mode (prune already
-has it; add to consolidate). When set, return a list of `{kept, dropped,
-reason}` entries. Add `--json` output to the CLIs and a "preview"
-endpoint to the admin server.
-
-**Files:** [src/protoagi/memory_service.py](../src/protoagi/memory_service.py),
-[src/protoagi/cli.py](../src/protoagi/cli.py),
-[src/protoagi/admin.py](../src/protoagi/admin.py), tests.
-
-**Acceptance:** `protoagi memory-consolidate --dry-run --json` prints the
-exact supersession plan without touching the DB.
+**Acceptance:** P95 latency for a simple "що ти памʼятаєш?" path drops
+below 2× a no-tool reply on the local model.
 
 ---
 
-#### 9. Tool-use inside Telegram persona — **L**
-**Why:** the workspace agent has tools (`recall`, `web_get`, `remind_me`,
-…). The Telegram persona is a separate ad-hoc decision loop and cannot
-call them. That asymmetry blocks turning the bot into something genuinely
-"agentic".
+#### A3. `tools` + `response_format` combined behavior is unverified — **S**
+**What:** `decide_incoming` passes both `tools=TelegramToolRunner.schemas()`
+and `response_format=DECISION_JSON_SCHEMA`. llama.cpp's behavior with both
+set is model-specific: the gpt-oss-20b harness usually picks one path
+(text content matching the schema) and ignores the tool calls. This means
+the carefully-typed `tool_calls` branch in `_merge_decision_tool_results`
+may be reached far less often than the `tool_request` branch.
 
-**How:** introduce a two-mode model. Default Telegram path stays as is
-(decision-only). When the model adds `tool_calls` to its response or the
-decision JSON includes a `tool_request` field, run a bounded
-`ProtoAgent`-style loop (max 4 steps), then merge the result back into
-the decision (e.g. `reply` becomes the tool-augmented answer). Recall and
-remind would be the first wired tools.
+**Why:** silently degraded tool coverage; tests cover both branches but
+real-world ratios are unknown.
 
-**Files:** [src/protoagi/telegram/bot.py](../src/protoagi/telegram/bot.py),
-[src/protoagi/telegram/json_io.py](../src/protoagi/telegram/json_io.py),
-new `src/protoagi/telegram/tool_runner.py`, tests.
+**How:** add a small bench that issues a "use the recall tool to find …"
+prompt and reports whether the model emitted `tool_calls`, `tool_request`,
+both, or neither. Pin the choice we trust as the canonical path; consider
+dropping the unused branch.
 
-**Acceptance:** "Соломіє, що ти памʼятаєш про мене?" triggers a `recall`
-tool call and the reply quotes a real fact; the loop respects a 4-step
-budget.
+**Acceptance:** `protoagi bench-tools` writes a counts report; ROADMAP
+decision log records which branch is the production path.
 
 ---
 
-#### 10. Async polling — **L**
-**Why:** today the long-poll blocks the main thread; the worker thread
-mitigates reminders but a slow LLM call still blocks new updates being
-read. Async unlocks parallel handling.
+#### A4. Vision blob persistence has no garbage collection — **S**
+**What:** `media_blobs` rows accumulate forever; the only deletion is via
+`memory_items` cascade, but `_remember_media_fact` only writes the memory
+when the description is non-empty. Images received without a vision model
+configured persist as blobs with no linked memory item, so they are never
+cleaned up.
 
-**How:** option A — keep stdlib only and use `asyncio` + `urllib` via
-`asyncio.to_thread`. Option B — accept `httpx` (the only external dep
-we'd add). Pipeline: `asyncio.TaskGroup` with separate tasks for
-polling, initiative, reminders, reflection; `asyncio.Semaphore` to bound
-concurrent LLM calls.
+**Why:** SQLite database can grow unbounded with binary content even
+during ordinary use.
 
-Decision pending: keep zero-deps or accept httpx? Current consensus is
-to defer until Tool-use (#9) lands, since both will benefit from async
-together.
+**How:** add a `MemoryStore.prune_orphan_media(older_than_days=…)`
+method. Wire it into `run_reflection_pass` next to the existing prune
+step. Surface counts.
 
-**Files:** new `src/protoagi/telegram/async_runner.py`,
-[src/protoagi/openai_compat.py](../src/protoagi/openai_compat.py)
-(async variant), tests.
-
-**Acceptance:** with a model that takes 8 s per reply, two messages
-arriving 1 s apart finish their replies in roughly 8 s total instead of
-16.
+**Acceptance:** unit test verifies a 60-day-old orphan blob is removed
+while a recently-linked one survives.
 
 ---
 
-### P2 — bigger investments, defer until P0/P1 settle
+#### A5. `_validate_public_url` is vulnerable to DNS rebinding — **S**
+**What:** the SSRF guard resolves DNS once, validates IPs, then
+`urlopen` resolves DNS again. A malicious server can advertise a public
+IP for the validation lookup and a private IP for the actual fetch.
 
-#### 11. HNSW or sqlite-vec for embeddings — **M**
-**Why:** the in-memory cosine index is fine for ≤ 10 k items. Past that
-recall latency creeps up linearly per query (Python loop over BLOBs).
+**Why:** the experimental risk is low (no privileged services on the
+host except llama-server on 127.0.0.1, which is the very thing we are
+trying to protect). Still, the guard reads as if it were robust.
 
-**How:** option A — bind `sqlite-vec` (single C extension, fast). Option
-B — pure-Python HNSW (more code, no extension). Either way `MemoryStore`
-gains an `EmbeddingBackend` interface and the cosine path becomes one
-implementation among several.
+**How:** open a TCP socket to one of the validated IPs ourselves
+(``socket.create_connection`` with explicit address), then issue the
+HTTP request through that socket. Or document the limitation and
+restrict `web_get` to an allowlist of hosts.
 
-**Acceptance:** benchmark recall over 50 k items completes in < 50 ms
-end-to-end (today's flat scan needs ~250 ms at that size).
-
----
-
-#### 12. Multimodal memory — **L**
-**Why:** today image content is stored as a text caption; the original
-bytes vanish after the vision call. Re-asking about an old image fails.
-
-**How:** new table `media_blobs(file_id PK, mime, sha256, bytes BLOB,
-caption TEXT, created_at)`. Vision module writes here. Memory items
-get an optional `media_id` link. Embedding path can call CLIP-style
-joint encoders later.
-
-**Acceptance:** "що було на тій фотці тиждень тому?" returns the
-correct caption and (optionally) re-renders the image in the admin
-dashboard.
+**Acceptance:** new test exercises the rebinding scenario with a fake
+DNS hook.
 
 ---
 
-#### 13. Plan-and-Reflect agent loop — **L**
-**Why:** [agent.py](../src/protoagi/agent.py) is a flat tool-use loop
-without an explicit planning step. Long tasks tend to wander.
+#### A6. Async runner advances offset on transient failures — **S**
+**What:** ``poll_once`` now uses ``return_exceptions=True`` and advances
+the offset to ``max_update_id + 1`` regardless of failure. Permanent
+failures are skipped, but transient failures (network blip, llama-server
+restart) can still lose updates because we never retry the same id.
 
-**How:** insert a planning prompt before tool execution that returns
-`{plan: [...], step: 1}`; after each tool result, a tiny reflection
-prompt updates the plan. Cap planning calls at 2 per run to control
-cost.
+**Why:** synchronous polling reprocesses on transient failure (offset
+advances per id in a try/finally inside the loop).
 
-**Acceptance:** a multi-step task ("read README, propose 3 changes,
-write a draft to runs/draft.md") reliably completes within the 8-step
-budget instead of looping.
+**How:** track failed update_ids; if all updates in a batch failed, do
+not advance the offset; if some succeeded, advance to the highest
+successful id + 1 and let Telegram resend the failed ones (Telegram
+keeps unacknowledged updates for ~24h).
+
+**Acceptance:** new async test simulates a one-shot transient error and
+confirms the failed update is replayed on the next poll.
 
 ---
 
-#### 14. Multi-instance deployment — **L**
-**Why:** running two personas against the same Telegram token is illegal
-(409 conflict). Running them with separate tokens but a shared SQLite
-file works but couples them.
+#### A7. Importance cache is forever-pinned in `kv` — **S**
+**What:** `score_importance_llm` writes scores into the `kv` table keyed
+by SHA256. There is no eviction policy, so a long-running bot accumulates
+millions of entries.
 
-**How:** add `--db` and `--persona` flags to `protoagi telegram` (#7
-backup CLI dovetails). Document a per-persona deployment recipe with
-separate `data/<persona>.sqlite3` files. Optional: cross-instance memory
-mirror through admin API.
+**Why:** unbounded growth in a table that was meant for small singleton
+state (offsets, last-reflection-at, sticker pack caches).
 
-**Acceptance:** two personas (Mykola + Solomiya) run side-by-side on
-distinct tokens with distinct memory and never conflict on poll offsets.
+**How:** move importance cache to a dedicated `importance_cache` table
+with `created_at` and a periodic prune (e.g. drop entries older than
+30 days, or LRU on count). Or store it in `memory_items.metadata` so the
+cache lives with the memory itself.
+
+**Acceptance:** stats endpoint reports importance-cache row count
+separately; reflection pass evicts old entries.
+
+---
+
+#### A8. Embedding cache evicts on insertion order, not LRU — **XS**
+**What:** ``EmbeddingClient._cache`` is keyed by text; eviction pops the
+oldest *inserted* key, not the least *recently used*. Hot facts can drop
+out while cold ones linger.
+
+**Why:** small but real perf hit when the workload reuses the same query
+strings.
+
+**How:** swap the list-based eviction for an `OrderedDict` with
+`move_to_end` on hit.
+
+**Acceptance:** unit test inserts N+1 items with one repeat hit and
+verifies the repeated text is preserved.
 
 ---
 
@@ -318,17 +384,17 @@ context.
   overhead matters.
 - **Why JSON instead of YAML for personas?** Zero dependencies. Loss is
   minor — persona configs are short and not edited live.
-- **Why pure Python cosine instead of `sqlite-vec`?** Single binary
-  dependency we'd need to ship per-platform. The current implementation
-  is fast enough up to ~10 k facts, which is the experiment-scale we
-  target. Item #11 covers the upgrade path when scale demands it.
-- **Why a thread-based `BotRunner` instead of asyncio?** Smaller
-  surface change, no new dependencies, immediate win for reminder
-  latency. Async is item #10 once we have a concrete reason to migrate
-  (most likely Tool-use #9).
-- **Why heuristic importance instead of LLM-scored?** Determinism in
-  tests + zero per-write latency. LLM scoring is item #5 and can be
-  toggled when accuracy matters more than latency.
+- **Why flat cosine by default even after the LSH backend landed?** Exact
+  ranking is simplest and deterministic for small stores. `lsh` is now an
+  opt-in pure-Python backend for larger stores without taking a binary
+  `sqlite-vec` dependency.
+- **Why keep thread-based `BotRunner` after async landed?** It remains the
+  conservative default with the smallest operational surface. `--async` is
+  available when concurrent update handling matters more than simplicity.
+- **Why heuristic importance by default after LLM scoring landed?**
+  Determinism and zero per-write latency still make sense for local dev.
+  `PROTOAGI_LLM_IMPORTANCE=1` flips on the cached model scorer when quality
+  matters more.
 - **Why self-contained FTS5 instead of `content='memory_items'`?** With
   external content, plain `DELETE FROM memory_items_fts WHERE rowid = ?`
   is a no-op against the index — you have to use the
@@ -338,6 +404,19 @@ context.
   storage but lets DELETE/INSERT work normally. Schema is recreated on
   fresh checkouts; existing experiment DBs keep their old FTS but the
   `try/except` in `_init_db` is a no-op for them.
+- **Why keep two parallel tool-call paths in `decide_incoming` instead of
+  picking one?** The model emits either `tool_calls` (OpenAI-style) or
+  `tool_request` inside the JSON body, depending on whether llama.cpp
+  honored `tools=` or only `response_format=`. We don't yet know which
+  path fires in production with gpt-oss-20b — see open item A3 for a
+  bench and the eventual decision to drop one branch.
+- **Why log via `print` from the async runner / vision module instead of
+  using the runs/telegram-errors.log file?** Those modules are imported
+  from places without easy access to `NikolaBot.error_log_path`. The
+  current pattern is: catch known exception types, print to stdout/stderr
+  so the launcher captures it, never re-raise unless the failure should
+  abort the loop. A small `protoagi.log` shim with rotation could
+  centralize this — currently out of scope.
 
 ---
 

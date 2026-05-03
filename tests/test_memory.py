@@ -130,6 +130,28 @@ class MemoryStoreTests(unittest.TestCase):
             hits = memory.recent_telegram_messages(123, persona_key="solomiya")
             self.assertEqual([(item["persona_key"], item["text"]) for item in hits], [("solomiya", "warm")])
 
+    def test_media_blob_can_link_to_memory_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            blob = memory.store_media_blob(
+                file_id="photo-1",
+                mime="image/jpeg",
+                data=b"fake-jpeg",
+                caption="white mug on a desk",
+            )
+            rowid = memory.store_memory(
+                "image showed a white mug on a desk",
+                tags=["media", "image"],
+                media_id=blob.file_id,
+            )
+            item = memory.get_memory(rowid)
+            assert item is not None
+            self.assertEqual(item.media_id, "photo-1")
+            restored = memory.get_media_blob("photo-1")
+            assert restored is not None
+            self.assertEqual(restored.caption, "white mug on a desk")
+            self.assertEqual(restored.bytes, b"fake-jpeg")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -36,6 +36,24 @@ Constraints:
 """
 
 
+PLAN_JSON_SCHEMA: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "agent_plan",
+        "strict": False,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "plan": {"type": "array", "items": {"type": "string"}},
+                "step": {"type": "integer", "minimum": 1},
+            },
+            "required": ["plan", "step"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
 @dataclass(slots=True)
 class AgentRun:
     thread_id: str
@@ -43,6 +61,8 @@ class AgentRun:
     steps: int
     tool_events: list[dict[str, Any]] = field(default_factory=list)
     raw_response: dict[str, Any] | None = None
+    plan: list[str] = field(default_factory=list)
+    plan_updates: list[list[str]] = field(default_factory=list)
 
 
 class ProtoAgent:
@@ -67,7 +87,11 @@ class ProtoAgent:
                 request_dimensions=config.embedding.request_dimensions,
             )
             embedding_client = EmbeddingClient(embedding_config) if embedding_config.enabled else None
-            memory_service = MemoryService(memory, embedding_client=embedding_client)
+            memory_service = MemoryService(
+                memory,
+                embedding_client=embedding_client,
+                embedding_backend=config.embedding.backend,
+            )
         self.memory_service = memory_service
 
     def run(self, user_prompt: str, *, thread_id: str | None = None, max_steps: int = 8) -> AgentRun:
@@ -82,6 +106,14 @@ class ProtoAgent:
             system += "\nRelevant durable memory:\n" + memory_context + "\n"
 
         wrapped_prompt = f"<user_input>\n{user_prompt}\n</user_input>"
+        plan: list[str] = []
+        plan_updates: list[list[str]] = []
+        planning_calls = 0
+        if self.config.plan_reflect and max_steps > 1:
+            plan = self._initial_plan(user_prompt, memory_context)
+            planning_calls = 1 if plan else 0
+            if plan:
+                system += "\nExecution plan:\n" + _format_plan(plan) + "\n"
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         messages.extend(self.memory.recent_messages(thread_id, limit=10))
         messages.append({"role": "user", "content": wrapped_prompt})
@@ -117,6 +149,8 @@ class ProtoAgent:
                     steps=step,
                     tool_events=tool_events,
                     raw_response=raw_response,
+                    plan=plan,
+                    plan_updates=plan_updates,
                 )
 
             assistant_message: dict[str, Any] = {"role": "assistant", "content": content, "tool_calls": tool_calls}
@@ -138,6 +172,22 @@ class ProtoAgent:
                         "content": result_to_tool_content(result),
                     }
                 )
+                if (
+                    self.config.plan_reflect
+                    and plan
+                    and planning_calls < max(1, self.config.plan_call_limit)
+                ):
+                    updated = self._reflect_plan(plan, event)
+                    planning_calls += 1
+                    if updated:
+                        plan = updated
+                        plan_updates.append(list(plan))
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": "Updated execution plan:\n" + _format_plan(plan),
+                            }
+                        )
 
         final = self._finalize_after_step_limit(messages)
         self.memory.log_message(thread_id, "assistant", final)
@@ -147,7 +197,74 @@ class ProtoAgent:
             steps=max_steps,
             tool_events=tool_events,
             raw_response=raw_response,
+            plan=plan,
+            plan_updates=plan_updates,
         )
+
+    def _initial_plan(self, user_prompt: str, memory_context: str) -> list[str]:
+        try:
+            response = self.client.chat_completion(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Create a short execution plan for the agent. "
+                            "Return JSON only. Keep steps observable and tool-oriented."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "user_prompt": user_prompt,
+                                "memory_context": memory_context,
+                                "available_tools": [schema["function"]["name"] for schema in self.tools.schemas()],
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                ],
+                tools=None,
+                temperature=0.2,
+                top_p=1.0,
+                max_tokens=320,
+                response_format=PLAN_JSON_SCHEMA,
+            )
+        except Exception:
+            return []
+        return _parse_plan(response)
+
+    def _reflect_plan(self, plan: list[str], event: dict[str, Any]) -> list[str]:
+        try:
+            response = self.client.chat_completion(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Update the execution plan after this tool observation. "
+                            "Return JSON only. Keep at most five short steps."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {
+                                "current_plan": plan,
+                                "tool_event": event,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    },
+                ],
+                tools=None,
+                temperature=0.2,
+                top_p=1.0,
+                max_tokens=240,
+                response_format=PLAN_JSON_SCHEMA,
+            )
+        except Exception:
+            return []
+        return _parse_plan(response)
 
     def _finalize_after_step_limit(self, messages: list[dict[str, Any]]) -> str:
         messages = [
@@ -211,3 +328,30 @@ class ProtoAgent:
                 "arguments": json.dumps(payload.get("arguments", {}), ensure_ascii=False),
             },
         }
+
+
+def _parse_plan(response: dict[str, Any]) -> list[str]:
+    content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+    payload: Any
+    try:
+        payload = json.loads(str(content))
+    except json.JSONDecodeError:
+        start = str(content).find("{")
+        end = str(content).rfind("}")
+        if start < 0 or end <= start:
+            return []
+        try:
+            payload = json.loads(str(content)[start : end + 1])
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(payload, dict):
+        return []
+    items = payload.get("plan")
+    if not isinstance(items, list):
+        return []
+    plan = [str(item).strip() for item in items if str(item).strip()]
+    return plan[:5]
+
+
+def _format_plan(plan: list[str]) -> str:
+    return "\n".join(f"{index}. {step}" for index, step in enumerate(plan, start=1))

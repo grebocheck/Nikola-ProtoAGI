@@ -27,6 +27,7 @@ class Decision:
     reply_to: str | int | None = None
     stickers: list[dict[str, str]] = field(default_factory=list)
     reminders: list[dict[str, Any]] = field(default_factory=list)
+    tool_request: dict[str, Any] | None = None
     next_check_minutes: int | None = None
 
 
@@ -86,6 +87,17 @@ _REMINDER_ITEM_SCHEMA = {
 }
 
 
+_TOOL_REQUEST_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string", "enum": ["recall", "remind_me"]},
+        "arguments": {"type": "object"},
+    },
+    "required": ["name"],
+    "additionalProperties": False,
+}
+
+
 DECISION_JSON_SCHEMA: dict[str, Any] = {
     "type": "json_schema",
     "json_schema": {
@@ -108,6 +120,9 @@ DECISION_JSON_SCHEMA: dict[str, Any] = {
                 "memories": {"type": "array", "items": {"type": "string"}},
                 "self_memories": {"type": "array", "items": {"type": "string"}},
                 "reminders": {"type": "array", "items": _REMINDER_ITEM_SCHEMA},
+                "tool_request": {
+                    "anyOf": [{"type": "null"}, _TOOL_REQUEST_SCHEMA]
+                },
                 "next_check_minutes": {
                     "anyOf": [{"type": "null"}, {"type": "integer"}]
                 },
@@ -179,6 +194,7 @@ def decision_from_payload(payload: dict[str, Any]) -> Decision:
         reply_to=normalize_reply_to(payload.get("reply_to")),
         stickers=normalize_sticker_choices(payload.get("stickers", [])),
         reminders=normalize_reminder_requests(payload.get("reminders", [])),
+        tool_request=normalize_tool_request(payload.get("tool_request")),
         next_check_minutes=_optional_int(payload.get("next_check_minutes")),
     )
 
@@ -225,6 +241,18 @@ def normalize_reminder_requests(value: Any) -> list[dict[str, Any]]:
         if len(requests) >= 5:
             break
     return requests
+
+
+def normalize_tool_request(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    name = str(value.get("name") or value.get("tool") or "").strip()
+    if name not in {"recall", "remind_me"}:
+        return None
+    arguments = value.get("arguments")
+    if not isinstance(arguments, dict):
+        arguments = {}
+    return {"name": name, "arguments": dict(arguments)}
 
 
 def normalize_reply_to(value: Any) -> str | int | None:
@@ -333,5 +361,6 @@ __all__ = [
     "normalize_reply_messages",
     "normalize_reply_to",
     "normalize_sticker_choices",
+    "normalize_tool_request",
     "sticker_to_payload",
 ]

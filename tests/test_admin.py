@@ -4,6 +4,7 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from protoagi.admin import serve
@@ -72,6 +73,22 @@ class AdminServerTests(unittest.TestCase):
         texts = [item["text"] for item in data]
         self.assertIn("alpha fact about coffee", texts)
 
+    def test_media_endpoint_returns_blob_bytes(self) -> None:
+        self.memory.store_media_blob(
+            file_id="photo-admin",
+            mime="image/jpeg",
+            data=b"admin-image",
+            caption="admin caption",
+        )
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{self.port}/api/media/photo-admin",
+            timeout=2,
+        ) as resp:
+            body = resp.read()
+            content_type = resp.headers.get("Content-Type")
+        self.assertEqual(body, b"admin-image")
+        self.assertEqual(content_type, "image/jpeg")
+
     def test_delete_memory_endpoint(self) -> None:
         data = self._get_json("/api/memories?limit=10")
         target_id = data[0]["id"]
@@ -119,6 +136,30 @@ class AdminServerTests(unittest.TestCase):
             self.assertEqual(exc.code, 400)
             return
         self.fail("expected HTTP 400 for empty text")
+
+    def test_prune_preview_returns_plan_without_deleting(self) -> None:
+        stored = self.service.remember("old low value note", importance=0.01)
+        assert stored is not None
+        old = (datetime.now(timezone.utc) - timedelta(days=120)).isoformat(timespec="seconds")
+        with self.memory.connect() as conn:
+            conn.execute("UPDATE memory_items SET created_at = ? WHERE id = ?", (old, stored.memory_id))
+        result = self._post_json(
+            "/api/memories/prune/preview",
+            {"score_threshold": 0.9, "keep_newer_than_days": 30},
+        )
+        self.assertEqual(result["deleted"], 1)
+        self.assertEqual(result["plan"][0]["dropped"]["id"], stored.memory_id)
+        self.assertIsNotNone(self.memory.get_memory(stored.memory_id))
+
+    def test_consolidate_preview_returns_supersession_plan(self) -> None:
+        first = self.service.remember("duplicate admin preview", importance=0.3)
+        second = self.service.remember("duplicate admin preview", importance=0.8)
+        assert first is not None and second is not None
+        result = self._post_json("/api/memories/consolidate/preview", {})
+        self.assertEqual(result["merged"], 1)
+        self.assertEqual(result["plan"][0]["kept"]["id"], second.memory_id)
+        self.assertEqual(result["plan"][0]["dropped"]["id"], first.memory_id)
+        self.assertIsNone(self.memory.get_memory(first.memory_id).superseded_by)
 
 
 if __name__ == "__main__":

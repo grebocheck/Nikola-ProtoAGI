@@ -92,6 +92,8 @@ class PruneTests(unittest.TestCase):
         )
         self.assertEqual(result["deleted"], 1)
         self.assertIsNotNone(self.memory.get_memory(stored.memory_id))
+        self.assertEqual(result["plan"][0]["dropped"]["id"], stored.memory_id)
+        self.assertEqual(result["plan"][0]["reason"], "score_below_threshold")
 
 
 if __name__ == "__main__":

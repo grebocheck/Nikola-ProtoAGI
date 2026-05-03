@@ -20,6 +20,7 @@ prefers the v2 methods (``store_memory``, ``recall``, etc.).
 from __future__ import annotations
 
 import array
+import hashlib
 import json
 import math
 import sqlite3
@@ -77,6 +78,7 @@ class MemoryItem:
     user_id: str | None
     chat_id: str | None
     persona_key: str | None
+    media_id: str | None
     importance: float
     confidence: float
     source: str | None
@@ -88,6 +90,16 @@ class MemoryItem:
     access_count: int
     tags: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class MediaBlob:
+    file_id: str
+    mime: str
+    sha256: str
+    bytes: bytes
+    caption: str
+    created_at: str
 
 
 @dataclass(slots=True)
@@ -200,12 +212,15 @@ def cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
 class MemoryStore:
     """SQLite-backed memory storage with v2 schema and legacy-compatible API.
 
-    The store keeps a single long-lived connection in WAL mode for low-latency
-    reads and concurrent polling. Use ``connect()`` for bulk operations that
-    need an explicit transaction.
+    The database is opened in WAL mode once at init, then every operation
+    uses a short-lived per-call connection through ``connect()``. WAL mode
+    is persistent at the file level, so a fresh connection still benefits
+    from concurrent readers + single-writer semantics. Per-call connections
+    keep Windows tempdir cleanup in tests trivial (no lingering file
+    handles).
     """
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -263,6 +278,14 @@ class MemoryStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS media_blobs (
+                    file_id TEXT PRIMARY KEY,
+                    mime TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    bytes BLOB NOT NULL,
+                    caption TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS memory_items (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     kind TEXT NOT NULL DEFAULT 'fact',
@@ -271,6 +294,7 @@ class MemoryStore:
                     user_id TEXT,
                     chat_id TEXT,
                     persona_key TEXT,
+                    media_id TEXT,
                     importance REAL NOT NULL DEFAULT 0.5,
                     confidence REAL NOT NULL DEFAULT 0.7,
                     source TEXT,
@@ -288,6 +312,8 @@ class MemoryStore:
                     ON memory_items(chat_id);
                 CREATE INDEX IF NOT EXISTS idx_memory_items_persona
                     ON memory_items(persona_key);
+                CREATE INDEX IF NOT EXISTS idx_memory_items_media
+                    ON memory_items(media_id);
                 CREATE INDEX IF NOT EXISTS idx_memory_items_kind
                     ON memory_items(kind);
                 CREATE INDEX IF NOT EXISTS idx_memory_items_active
@@ -372,6 +398,10 @@ class MemoryStore:
                     ON reminders(status, trigger_at);
                 """
             )
+            self._ensure_column(conn, "memory_items", "media_id", "TEXT")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_items_media ON memory_items(media_id)"
+            )
             try:
                 # Self-contained FTS5 (no external-content) so DELETE / INSERT
                 # work with plain SQL during update_memory. The rowid still
@@ -406,6 +436,7 @@ class MemoryStore:
         importance: float = 0.5,
         confidence: float = 0.7,
         source: str | None = None,
+        media_id: str | None = None,
         pinned: bool = False,
         supersedes_id: int | None = None,
         embedding: Sequence[float] | None = None,
@@ -427,11 +458,11 @@ class MemoryStore:
             cur = conn.execute(
                 """
                 INSERT INTO memory_items(
-                    kind, text, scope, user_id, chat_id, persona_key,
+                    kind, text, scope, user_id, chat_id, persona_key, media_id,
                     importance, confidence, source, supersedes_id,
                     pinned, created_at, metadata
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     kind,
@@ -440,6 +471,7 @@ class MemoryStore:
                     user_id,
                     None if chat_id is None else str(chat_id),
                     persona_key,
+                    media_id,
                     importance,
                     confidence,
                     source,
@@ -485,6 +517,46 @@ class MemoryStore:
                     ),
                 )
         return rowid
+
+    def store_media_blob(
+        self,
+        *,
+        file_id: str,
+        mime: str,
+        data: bytes,
+        caption: str = "",
+    ) -> MediaBlob:
+        file_id = str(file_id or "").strip()
+        if not file_id:
+            raise ValueError("media file_id cannot be empty")
+        if not data:
+            raise ValueError("media bytes cannot be empty")
+        digest = hashlib.sha256(data).hexdigest()
+        now = utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO media_blobs(file_id, mime, sha256, bytes, caption, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(file_id) DO UPDATE SET
+                    mime = excluded.mime,
+                    sha256 = excluded.sha256,
+                    bytes = excluded.bytes,
+                    caption = excluded.caption
+                """,
+                (file_id, mime or "application/octet-stream", digest, data, caption, now),
+            )
+        found = self.get_media_blob(file_id)
+        if found is None:
+            raise RuntimeError("media blob store failed")
+        return found
+
+    def get_media_blob(self, file_id: str) -> MediaBlob | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM media_blobs WHERE file_id = ?", (str(file_id),)
+            ).fetchone()
+        return None if row is None else self._media_from_row(row)
 
     def attach_embedding(
         self,
@@ -1329,6 +1401,7 @@ class MemoryStore:
             user_id=row["user_id"],
             chat_id=row["chat_id"],
             persona_key=row["persona_key"],
+            media_id=row["media_id"],
             importance=float(row["importance"]),
             confidence=float(row["confidence"]),
             source=row["source"],
@@ -1340,6 +1413,17 @@ class MemoryStore:
             access_count=int(row["access_count"]),
             tags=tags,
             metadata=json.loads(row["metadata"] or "{}"),
+        )
+
+    @staticmethod
+    def _media_from_row(row: sqlite3.Row) -> MediaBlob:
+        return MediaBlob(
+            file_id=str(row["file_id"]),
+            mime=str(row["mime"]),
+            sha256=str(row["sha256"]),
+            bytes=bytes(row["bytes"]),
+            caption=str(row["caption"] or ""),
+            created_at=str(row["created_at"]),
         )
 
     @staticmethod
@@ -1361,6 +1445,18 @@ class MemoryStore:
             (memory_id,),
         ).fetchall()
         return [str(row["tag"]) for row in rows]
+
+    @staticmethod
+    def _ensure_column(
+        conn: sqlite3.Connection,
+        table: str,
+        column: str,
+        definition: str,
+    ) -> None:
+        columns = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column in columns:
+            return
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     @staticmethod
     def _infer_legacy_dimensions(

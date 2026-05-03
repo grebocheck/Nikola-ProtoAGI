@@ -5,6 +5,9 @@
   "temperature": 0.6,
   "top_p": 1.0,
   "max_tokens": 1536,
+  "llm_importance": false,
+  "plan_reflect": true,
+  "plan_call_limit": 2,
   "tool_policy": {
     "allow_write": true,
     "allow_shell": false,

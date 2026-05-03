@@ -18,6 +18,47 @@ The repository is now arranged so source code and documentation can be pushed to
 git without committing local model files, downloaded runtimes, logs, databases,
 or secrets.
 
+## 2026-05-03 phase 6 (P2 backlog cleared)
+
+- Embedding recall now goes through an `EmbeddingBackend` boundary. The exact
+  flat cosine backend remains the default, while `PROTOAGI_EMBED_BACKEND=lsh`
+  enables a pure-Python random-hyperplane LSH backend for larger stores without
+  adding binary dependencies.
+- Multimodal memory persists Telegram image bytes in `media_blobs` and links
+  image-derived memory items through `memory_items.media_id`. The admin API can
+  serve stored media at `GET /api/media/<file_id>`.
+- `ProtoAgent` now makes a short JSON execution plan before tool use and can
+  update it once after a tool observation by default. `PROTOAGI_PLAN_REFLECT`
+  and `PROTOAGI_PLAN_CALL_LIMIT` control the extra calls.
+- Telegram multi-instance deployment is explicit: `protoagi telegram --db ...`
+  selects a per-persona SQLite file and `--persona ...` overrides the env
+  persona for that process.
+
+Test count: 116 → 121.
+
+## 2026-05-03 phase 5 (P1 backlog cleared)
+
+- `MemoryService.score_importance_llm` adds opt-in model scoring for memory
+  importance/kind via `PROTOAGI_LLM_IMPORTANCE=1`, with SHA256 cache entries in
+  `kv` and deterministic heuristic fallback.
+- Telegram memory can now be per-user isolated with
+  `PROTOAGI_TELEGRAM_GLOBAL_MEMORY=0`; user facts use `scope=user`, recall
+  passes the current Telegram `user_id`, and global behavior remains the
+  default for single-owner bots.
+- `protoagi backup` / `protoagi restore` use SQLite's online backup API,
+  validate backups with `PRAGMA integrity_check`, and restore via an atomic
+  replacement that cleans stale WAL/SHM sidecars.
+- `memory-prune` and `memory-consolidate` expose dry-run JSON plans with
+  per-item kept/dropped reasons. Admin has preview endpoints for both passes.
+- Telegram decisions can request bounded tools (`recall`, `remind_me`) via
+  `tool_request` or OpenAI-style `tool_calls`; tool results are merged into a
+  final decision JSON before sending.
+- `AsyncBotRunner` provides opt-in concurrent polling through `asyncio`,
+  `asyncio.to_thread`, and a semaphore around update handling. CLI flag:
+  `protoagi telegram --async`.
+
+Test count: 107 → 116.
+
 ## 2026-05-03 phase 4 (P0 backlog cleared)
 
 - Embedding llama-server is part of the stack:
@@ -148,9 +189,9 @@ Test count: 99 → 107.
   build the runtime again.
 - The local SQLite database is ignored. This is correct for git, but production
   deployments need backup/export if memory matters.
-- Telegram remembered facts and compact model dialogue history are shared
-  globally. This is intentional for a single-owner bot, but multi-user
-  deployments need an explicit privacy policy before enabling broad access.
+- Telegram remembered facts are global by default for the single-owner bot.
+  Multi-user deployments should set `PROTOAGI_TELEGRAM_GLOBAL_MEMORY=0` and
+  still define an explicit privacy policy before broad access.
 - The model file is ignored. Document or script model acquisition before sharing
   the repo with another machine.
 - The agent has a safe shell policy, but enabling `--allow-unsafe-shell` remains

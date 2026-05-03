@@ -61,6 +61,11 @@ python -m protoagi chat --allow-write --allow-shell
 inside this workspace. Destructive command patterns are still blocked unless
 `--allow-unsafe-shell` is also used.
 
+The agent does a small Plan-and-Reflect pass around tool use by default: one
+short JSON plan before acting and, by default, one plan update after the first
+tool observation. Tune it with `PROTOAGI_PLAN_REFLECT` and
+`PROTOAGI_PLAN_CALL_LIMIT`.
+
 ## Telegram mode
 
 Telegram mode uses a profile selected in `.env`. Start with `mykola` or switch
@@ -69,6 +74,13 @@ Telegram memory is shared globally across chats and profiles:
 
 ```env
 PROTOAGI_TELEGRAM_PERSONA=solomiya
+```
+
+For multi-user bots, disable global Telegram memory so user facts are stored
+and recalled with per-user isolation:
+
+```env
+PROTOAGI_TELEGRAM_GLOBAL_MEMORY=0
 ```
 
 Start the model server, create a bot with `@BotFather`, then run:
@@ -83,6 +95,15 @@ Or start the local model server and Telegram bot together:
 ```powershell
 $env:TELEGRAM_BOT_TOKEN="123456:ABC..."
 .\scripts\start-nikola-stack.ps1
+```
+
+Run multiple personas as separate instances by giving each process a distinct
+token and database:
+
+```powershell
+$env:PYTHONPATH="src"
+python -m protoagi telegram --persona mykola --db data/mykola.sqlite3 --token "123:AAA"
+python -m protoagi telegram --persona solomiya --db data/solomiya.sqlite3 --token "456:BBB"
 ```
 
 There is also a root convenience launcher:
@@ -119,6 +140,8 @@ Optional Telegram image recognition is available through
 `PROTOAGI_VISION_BASE_URL` and `PROTOAGI_VISION_MODEL`. When the vision model is
 configured for localhost, `run-nikola.bat` starts a separate lightweight
 `llama-server` on port `8081` and downloads the GGUF on first launch.
+Incoming image bytes and captions are persisted in SQLite media memory so later
+recall can refer back to old photos.
 
 More details: [docs/TELEGRAM.md](docs/TELEGRAM.md).
 
@@ -157,11 +180,28 @@ python -m protoagi memory-eval
 python -m protoagi memory-stats
 
 # Forget low-value old items
-python -m protoagi memory-prune --dry-run
+python -m protoagi memory-prune --dry-run --json
+
+# Preview near-duplicate consolidation
+python -m protoagi memory-consolidate --dry-run --json
+
+# Back up and restore the SQLite store
+python -m protoagi backup --to data/backups/manual.sqlite3
+python -m protoagi restore --from data/backups/manual.sqlite3
+
+# Keep only the last 7 days of backups
+Get-ChildItem data/backups/*.sqlite3 | Where-Object LastWriteTime -lt (Get-Date).AddDays(-7) | Remove-Item
 
 # Local admin dashboard at http://127.0.0.1:8765
 python -m protoagi admin
 ```
+
+Set `PROTOAGI_LLM_IMPORTANCE=1` to let the chat model score new memory writes
+for importance/kind with a SHA256 cache. The deterministic heuristic remains
+the default.
+
+Embedding recall uses exact flat cosine by default. For larger stores, set
+`PROTOAGI_EMBED_BACKEND=lsh` to use the dependency-free approximate backend.
 
 ## Project layout
 

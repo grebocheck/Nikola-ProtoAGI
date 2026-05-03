@@ -25,6 +25,7 @@ class TelegramConfig:
     sticker_frequency: str = "normal"
     sticker_cooldown_messages: int = 3
     fictional_self_enabled: bool = True
+    global_memory: bool = True
     proactive_enabled: bool = True
     proactive_check_seconds: int = 300
     proactive_cooldown_seconds: int = 6 * 60 * 60
@@ -35,7 +36,10 @@ class TelegramConfig:
     vision_timeout_seconds: int = 120
 
     def __post_init__(self) -> None:
-        self.persona_key = resolve_persona_key(self.persona_key)
+        self.set_persona(self.persona_key)
+
+    def set_persona(self, persona_key: str) -> None:
+        self.persona_key = resolve_persona_key(persona_key)
         self.bot_name = get_persona(self.persona_key).display_name
 
     @classmethod
@@ -59,6 +63,7 @@ class TelegramConfig:
             sticker_frequency=sticker_frequency,
             sticker_cooldown_messages=env_int("NIKOLA_STICKER_COOLDOWN_MESSAGES", 3),
             fictional_self_enabled=env_bool("NIKOLA_FICTIONAL_SELF", True),
+            global_memory=env_bool("PROTOAGI_TELEGRAM_GLOBAL_MEMORY", True),
             proactive_enabled=env_bool("NIKOLA_PROACTIVE", True),
             proactive_check_seconds=env_int("NIKOLA_PROACTIVE_CHECK_SECONDS", 300),
             proactive_cooldown_seconds=env_int("NIKOLA_PROACTIVE_COOLDOWN_SECONDS", 6 * 60 * 60),

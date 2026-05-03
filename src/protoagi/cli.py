@@ -7,6 +7,7 @@ import sys
 
 from .admin import serve as serve_admin
 from .agent import ProtoAgent
+from .backup import BackupError, backup_database, default_backup_path, restore_database
 from .bench import bench_endpoint, endpoint_results_to_json, run_llama_bench
 from .config import AgentConfig, DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PATH, LlamaServerProfile, PROJECT_ROOT
 from .embedding import EmbeddingClient, EmbeddingConfig
@@ -15,7 +16,7 @@ from .memory_eval import DEFAULT_CORPUS_PATH, run_eval
 from .memory_service import MemoryService
 from .openai_compat import OpenAICompatibleClient, OpenAICompatError
 from .runtime import run_server_foreground, status_report
-from .telegram_bot import BotRunner, TelegramApiError, TelegramConfig, build_nikola_bot, is_telegram_polling_conflict
+from .telegram_bot import AsyncBotRunner, BotRunner, TelegramApiError, TelegramConfig, build_nikola_bot, is_telegram_polling_conflict
 from .tools import default_registry
 
 
@@ -72,6 +73,8 @@ def build_parser() -> argparse.ArgumentParser:
     telegram.add_argument("--reply-mode", choices=["smart", "always", "mention", "silent"], default=None)
     telegram.add_argument("--base-url", default=None)
     telegram.add_argument("--model", default=None)
+    telegram.add_argument("--db", default=None, help="SQLite database path for this Telegram instance.")
+    telegram.add_argument("--persona", default=None, help="Persona key, e.g. mykola or solomiya.")
     telegram.add_argument("--poll-timeout", type=int, default=None)
     telegram.add_argument("--once", action="store_true", help="Process one polling batch and exit")
     telegram.add_argument("--no-proactive", action="store_true")
@@ -84,6 +87,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run the legacy single-thread loop (no background reminder/reflection worker).",
     )
+    telegram.add_argument(
+        "--async",
+        dest="async_runner",
+        action="store_true",
+        help="Run the asyncio polling supervisor with concurrent update handling.",
+    )
+    telegram.add_argument("--max-concurrent-updates", type=int, default=2)
 
     memory_eval = sub.add_parser(
         "memory-eval",
@@ -104,6 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
     memory_prune.add_argument("--score-threshold", type=float, default=0.12)
     memory_prune.add_argument("--keep-newer-than-days", type=float, default=30.0)
     memory_prune.add_argument("--dry-run", action="store_true")
+    memory_prune.add_argument("--json", action="store_true", help="Print full JSON including dry-run plan.")
 
     memory_consolidate = sub.add_parser(
         "memory-consolidate",
@@ -112,6 +123,16 @@ def build_parser() -> argparse.ArgumentParser:
     memory_consolidate.add_argument("--db", default=None)
     memory_consolidate.add_argument("--scope", default=None)
     memory_consolidate.add_argument("--persona", default=None)
+    memory_consolidate.add_argument("--dry-run", action="store_true")
+    memory_consolidate.add_argument("--json", action="store_true", help="Print full JSON including dry-run plan.")
+
+    backup = sub.add_parser("backup", help="Create an online SQLite backup.")
+    backup.add_argument("--db", default=None)
+    backup.add_argument("--to", default=None, help="Target .sqlite3 path; defaults to data/backups/<timestamp>.sqlite3")
+
+    restore = sub.add_parser("restore", help="Validate and restore a SQLite backup.")
+    restore.add_argument("--db", default=None)
+    restore.add_argument("--from", dest="from_path", required=True, help="Backup .sqlite3 path to restore from.")
 
     admin = sub.add_parser("admin", help="Run the local admin web UI.")
     admin.add_argument("--db", default=None)
@@ -164,7 +185,27 @@ def make_agent(args: argparse.Namespace) -> ProtoAgent:
     memory = MemoryStore(config.database_path)
     tools = default_registry(memory, config.tool_policy)
     client = OpenAICompatibleClient(config.base_url, config.model)
-    return ProtoAgent(config=config, client=client, memory=memory, tools=tools)
+    embedding_config = EmbeddingConfig(
+        base_url=config.embedding.base_url,
+        model=config.embedding.model,
+        timeout_seconds=config.embedding.timeout_seconds,
+        request_dimensions=config.embedding.request_dimensions,
+    )
+    embedding_client = EmbeddingClient(embedding_config) if embedding_config.enabled else None
+    memory_service = MemoryService(
+        memory,
+        embedding_client=embedding_client,
+        embedding_backend=config.embedding.backend,
+        importance_client=client if config.llm_importance else None,
+        llm_importance=config.llm_importance,
+    )
+    return ProtoAgent(
+        config=config,
+        client=client,
+        memory=memory,
+        tools=tools,
+        memory_service=memory_service,
+    )
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -284,6 +325,9 @@ def cmd_init_config(args: argparse.Namespace) -> int:
         "temperature": 0.6,
         "top_p": 1.0,
         "max_tokens": 1536,
+        "llm_importance": False,
+        "plan_reflect": True,
+        "plan_call_limit": 2,
         "tool_policy": {
             "allow_write": True,
             "allow_shell": False,
@@ -297,8 +341,14 @@ def cmd_init_config(args: argparse.Namespace) -> int:
 
 
 def cmd_telegram(args: argparse.Namespace) -> int:
-    agent_config = AgentConfig.load().with_cli_overrides(base_url=args.base_url, model=args.model)
+    agent_config = AgentConfig.load().with_cli_overrides(
+        base_url=args.base_url,
+        model=args.model,
+        database_path=args.db,
+    )
     telegram_config = TelegramConfig.from_env()
+    if args.persona:
+        telegram_config.set_persona(args.persona)
     if args.token:
         telegram_config.token = args.token
     if args.allowed_chat_id:
@@ -322,7 +372,7 @@ def cmd_telegram(args: argparse.Namespace) -> int:
     print(
         f"{telegram_config.bot_name} online as @{me.get('username', 'unknown')} | "
         f"persona={telegram_config.persona_key} | reply_mode={telegram_config.reply_mode} | "
-        f"proactive={telegram_config.proactive_enabled}"
+        f"proactive={telegram_config.proactive_enabled} | db={agent_config.database_path}"
     )
     if args.once:
         processed = bot.poll_once()
@@ -335,6 +385,15 @@ def cmd_telegram(args: argparse.Namespace) -> int:
         return 0
     if args.single_thread:
         bot.run_forever()
+        return 0
+    if args.async_runner:
+        import asyncio
+
+        runner = AsyncBotRunner(
+            bot,
+            max_concurrent_updates=args.max_concurrent_updates,
+        )
+        asyncio.run(runner.run())
         return 0
     runner = BotRunner(bot)
     runner.run()
@@ -359,7 +418,18 @@ def _build_memory_service(db_path: Path) -> tuple[MemoryStore, MemoryService]:
         request_dimensions=config.embedding.request_dimensions,
     )
     embedding_client = EmbeddingClient(embedding_config) if embedding_config.enabled else None
-    service = MemoryService(store, embedding_client=embedding_client)
+    importance_client = (
+        OpenAICompatibleClient(config.base_url, config.model)
+        if config.llm_importance
+        else None
+    )
+    service = MemoryService(
+        store,
+        embedding_client=embedding_client,
+        embedding_backend=config.embedding.backend,
+        importance_client=importance_client,
+        llm_importance=config.llm_importance,
+    )
     return store, service
 
 
@@ -425,6 +495,7 @@ def cmd_memory_prune(args: argparse.Namespace) -> int:
         score_threshold=args.score_threshold,
         keep_newer_than_days=args.keep_newer_than_days,
         dry_run=args.dry_run,
+        return_plan=bool(args.json),
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
@@ -436,8 +507,31 @@ def cmd_memory_consolidate(args: argparse.Namespace) -> int:
         print(f"no database at {db_path}", file=sys.stderr)
         return 2
     _, service = _build_memory_service(db_path)
-    merged = service.consolidate(scope=args.scope, persona_key=args.persona)
-    print(json.dumps({"merged": merged}, ensure_ascii=False, indent=2))
+    result = service.consolidate(
+        scope=args.scope,
+        persona_key=args.persona,
+        dry_run=args.dry_run,
+        return_plan=bool(args.json),
+    )
+    if isinstance(result, dict):
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(json.dumps({"merged": result}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_backup(args: argparse.Namespace) -> int:
+    db_path = _resolve_db_path(args)
+    to_path = Path(args.to).resolve() if args.to else default_backup_path(db_path)
+    written = backup_database(db_path, to_path)
+    print(json.dumps({"backup": str(written)}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_restore(args: argparse.Namespace) -> int:
+    db_path = _resolve_db_path(args)
+    restored = restore_database(db_path, Path(args.from_path).resolve())
+    print(json.dumps({"restored": str(restored)}, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -486,6 +580,10 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_memory_prune(args)
         if args.command == "memory-consolidate":
             return cmd_memory_consolidate(args)
+        if args.command == "backup":
+            return cmd_backup(args)
+        if args.command == "restore":
+            return cmd_restore(args)
         if args.command == "admin":
             return cmd_admin(args)
     except OpenAICompatError as exc:
@@ -503,6 +601,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except FileNotFoundError as exc:
         print(f"Missing file: {exc}", file=sys.stderr)
+        return 2
+    except BackupError as exc:
+        print(f"Backup error: {exc}", file=sys.stderr)
         return 2
     return 1
 
