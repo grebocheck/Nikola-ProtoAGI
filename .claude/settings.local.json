@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(PYTHONPATH=src python -m pytest tests/ -x --tb=short)",
+      "Bash(PYTHONPATH=src python -m unittest discover -s tests -v)",
+      "Bash(PYTHONPATH=src python -m unittest discover -s tests)"
+    ]
+  }
+}

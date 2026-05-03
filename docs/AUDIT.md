@@ -1,6 +1,6 @@
 # Architecture Audit
 
-Last audit: 2026-05-01
+Last audit: 2026-05-03
 
 ## Current Shape
 
@@ -14,6 +14,36 @@ ProtoAGI has four main layers:
 The repository is now arranged so source code and documentation can be pushed to
 git without committing local model files, downloaded runtimes, logs, databases,
 or secrets.
+
+## 2026-05-03 modernization
+
+- Replaced the flat `facts` table with a typed `memory_items` schema: `kind`
+  (semantic / episodic / procedural / persona_self / fact), `scope`
+  (global / user / chat / persona), `importance`, `confidence`,
+  `supersedes_id` / `superseded_by`, access metadata, and a normalized
+  `memory_tags` table that fixed the substring-matching bug in legacy
+  `search_tagged`.
+- Added an optional embedding pipeline (`/v1/embeddings`) plus a pure-Python
+  cosine index in `protoagi.embedding`.
+- Added `protoagi.memory_service` as the canonical recall facade with a
+  blended FTS + cosine + recency + importance score and a heuristic
+  consolidation pass.
+- Added a `users` table and a `reminders` table; the agent gained
+  `remind_me` / `list_reminders` tools.
+- Refactored the 1.5k-line `telegram_bot.py` monolith into the
+  `protoagi.telegram` package (`api`, `config`, `text`, `json_io`,
+  `stickers`, `vision`, `identity`, `prompts`, `bot`). The legacy module is
+  preserved as a compatibility shim.
+- Personas moved out of Python into `config/personas/*.json` with built-in
+  fallbacks for fresh checkouts.
+- Hardened `web_get` against SSRF (loopback / private / link-local /
+  multicast / reserved IPs and `localhost` are blocked).
+- Tightened the PowerShell command blocklist with anchored regex patterns to
+  remove the substring-evasion gap (e.g. `del.exe`, `reg delete`, `shutdown`).
+- Switched SQLite to WAL mode with a single long-lived connection.
+- Added size-based rotation for `runs/telegram-errors.log`.
+- Wrapped agent user prompts in `<user_input>` markers and instructed the
+  system prompt to treat them as data rather than instructions.
 
 ## Fixed During Audit
 

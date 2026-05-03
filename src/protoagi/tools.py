@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
+import ipaddress
 import json
-import os
-from pathlib import Path
+import re
+import socket
 import subprocess
 import sys
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable
 from urllib.error import URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from .config import PROJECT_ROOT, ToolPolicy
@@ -35,19 +38,25 @@ TEXT_EXTENSIONS = {
     ".yml",
 }
 
-BLOCKED_SHELL_PATTERNS = [
-    "remove-item",
-    "rm ",
-    "rmdir",
-    "del ",
-    "erase ",
-    "format ",
-    "git reset --hard",
-    "git checkout --",
-    "set-executionpolicy",
-    "takeown",
-    "icacls",
-]
+# Tokens that are highly likely to indicate a destructive intent. We compile
+# them as standalone words to avoid the substring evasion trap that the older
+# implementation suffered from (e.g. ``Remove-Itemy`` matching ``remove-item``).
+BLOCKED_SHELL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(^|\s)remove-item\b", re.IGNORECASE),
+    re.compile(r"(^|\s)ri\b", re.IGNORECASE),
+    re.compile(r"(^|\s)rm\b", re.IGNORECASE),
+    re.compile(r"(^|\s)rmdir\b", re.IGNORECASE),
+    re.compile(r"(^|\s)del(\.exe)?\b", re.IGNORECASE),
+    re.compile(r"(^|\s)erase\b", re.IGNORECASE),
+    re.compile(r"(^|\s)format\b", re.IGNORECASE),
+    re.compile(r"git\s+reset\s+--hard", re.IGNORECASE),
+    re.compile(r"git\s+checkout\s+--", re.IGNORECASE),
+    re.compile(r"set-executionpolicy", re.IGNORECASE),
+    re.compile(r"takeown", re.IGNORECASE),
+    re.compile(r"icacls", re.IGNORECASE),
+    re.compile(r"reg\s+delete", re.IGNORECASE),
+    re.compile(r"shutdown\b", re.IGNORECASE),
+)
 
 
 @dataclass(slots=True)
@@ -82,6 +91,8 @@ class ToolRegistry:
             "run_powershell": self._run_powershell,
             "web_get": self._web_get,
             "gpu_status": self._gpu_status,
+            "remind_me": self._remind_me,
+            "list_reminders": self._list_reminders,
         }
 
     def schemas(self) -> list[dict[str, Any]]:
@@ -104,6 +115,7 @@ class ToolRegistry:
                         "properties": {
                             "text": {"type": "string"},
                             "tags": {"type": "array", "items": {"type": "string"}},
+                            "importance": {"type": "number", "minimum": 0, "maximum": 1},
                         },
                         "required": ["text"],
                         "additionalProperties": False,
@@ -226,7 +238,7 @@ class ToolRegistry:
                 "type": "function",
                 "function": {
                     "name": "web_get",
-                    "description": "Fetch a URL and return a trimmed text response.",
+                    "description": "Fetch a public URL and return a trimmed text response.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -244,6 +256,42 @@ class ToolRegistry:
                     "name": "gpu_status",
                     "description": "Inspect current NVIDIA GPU memory and driver state.",
                     "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "remind_me",
+                    "description": "Create a reminder for the bot to surface later.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string"},
+                            "in_minutes": {"type": "integer", "minimum": 1, "maximum": 60 * 24 * 365},
+                            "trigger_at": {
+                                "type": "string",
+                                "description": "ISO 8601 UTC timestamp; takes precedence over in_minutes if set.",
+                            },
+                            "user_id": {"type": "string"},
+                            "chat_id": {"type": "string"},
+                        },
+                        "required": ["text"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_reminders",
+                    "description": "List pending reminders that are due now or in the near future.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                        },
+                        "additionalProperties": False,
+                    },
                 },
             },
         ]
@@ -284,7 +332,12 @@ class ToolRegistry:
         )
 
     def _remember(self, args: dict[str, Any]) -> ToolResult:
-        rowid = self.context.memory.remember(str(args["text"]), list(args.get("tags", [])))
+        rowid = self.context.memory.store_memory(
+            str(args["text"]),
+            tags=list(args.get("tags", [])),
+            importance=float(args.get("importance", 0.5)),
+            source="agent_remember",
+        )
         return ToolResult(True, {"id": rowid})
 
     def _recall(self, args: dict[str, Any]) -> ToolResult:
@@ -292,7 +345,14 @@ class ToolRegistry:
         return ToolResult(
             True,
             [
-                {"id": fact.id, "text": fact.text, "tags": fact.tags, "created_at": fact.created_at}
+                {
+                    "id": fact.id,
+                    "text": fact.text,
+                    "tags": fact.tags,
+                    "created_at": fact.created_at,
+                    "importance": fact.importance,
+                    "kind": fact.kind,
+                }
                 for fact in facts
             ],
         )
@@ -393,11 +453,14 @@ class ToolRegistry:
         if not self.context.policy.allow_shell:
             return ToolResult(False, error="run_powershell denied by tool policy")
         command = str(args["command"])
-        lowered = f" {command.lower()} "
         if not self.context.policy.allow_unsafe_shell:
-            for blocked in BLOCKED_SHELL_PATTERNS:
-                if blocked in lowered:
-                    return ToolResult(False, error=f"blocked unsafe command pattern: {blocked.strip()}")
+            for pattern in BLOCKED_SHELL_PATTERNS:
+                match = pattern.search(command)
+                if match:
+                    return ToolResult(
+                        False,
+                        error=f"blocked unsafe command pattern: {match.group(0).strip()}",
+                    )
         timeout = min(
             int(args.get("timeout_seconds", self.context.policy.command_timeout_seconds)),
             120,
@@ -422,7 +485,10 @@ class ToolRegistry:
     def _web_get(self, args: dict[str, Any]) -> ToolResult:
         url = str(args["url"])
         max_chars = int(args.get("max_chars", 12000))
-        request = Request(url, headers={"User-Agent": "ProtoAGI/0.1"})
+        ssrf_error = _validate_public_url(url)
+        if ssrf_error is not None:
+            return ToolResult(False, error=ssrf_error)
+        request = Request(url, headers={"User-Agent": "ProtoAGI/0.2"})
         try:
             with urlopen(request, timeout=30) as response:
                 content_type = response.headers.get("content-type", "")
@@ -455,6 +521,42 @@ class ToolRegistry:
             None if completed.returncode == 0 else "nvidia-smi failed",
         )
 
+    def _remind_me(self, args: dict[str, Any]) -> ToolResult:
+        text = str(args.get("text") or "").strip()
+        if not text:
+            return ToolResult(False, error="reminder text is required")
+        trigger_at = str(args.get("trigger_at") or "").strip()
+        if not trigger_at:
+            in_minutes = int(args.get("in_minutes", 60))
+            trigger = datetime.now(timezone.utc) + timedelta(minutes=max(1, in_minutes))
+            trigger_at = trigger.isoformat(timespec="seconds")
+        reminder_id = self.context.memory.add_reminder(
+            text=text,
+            trigger_at=trigger_at,
+            user_id=args.get("user_id"),
+            chat_id=args.get("chat_id"),
+        )
+        return ToolResult(True, {"id": reminder_id, "trigger_at": trigger_at, "text": text})
+
+    def _list_reminders(self, args: dict[str, Any]) -> ToolResult:
+        limit = int(args.get("limit", 10))
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        items = self.context.memory.due_reminders(now, limit=limit)
+        return ToolResult(
+            True,
+            [
+                {
+                    "id": item.id,
+                    "text": item.text,
+                    "trigger_at": item.trigger_at,
+                    "user_id": item.user_id,
+                    "chat_id": item.chat_id,
+                    "status": item.status,
+                }
+                for item in items
+            ],
+        )
+
 
 def default_registry(memory: MemoryStore, policy: ToolPolicy, root: Path = PROJECT_ROOT) -> ToolRegistry:
     return ToolRegistry(ToolContext(root=root.resolve(), memory=memory, policy=policy))
@@ -463,3 +565,62 @@ def default_registry(memory: MemoryStore, policy: ToolPolicy, root: Path = PROJE
 def result_to_tool_content(result: dict[str, Any]) -> str:
     return json.dumps(result, ensure_ascii=False)
 
+
+# ---------------------------------------------------------------------------
+# SSRF guard
+
+
+_BLOCKED_HOSTS = {"localhost", "metadata.google.internal", "metadata"}
+
+
+def _validate_public_url(url: str) -> str | None:
+    """Return an error message if the URL points at private infra.
+
+    The check resolves the hostname and rejects any IP that falls into a
+    private, loopback, link-local, multicast, or reserved range. Schemes are
+    restricted to http(s); credentials embedded in the URL are also rejected.
+    """
+
+    try:
+        parsed = urlparse(url)
+    except ValueError as exc:
+        return f"invalid url: {exc}"
+    if parsed.scheme not in ("http", "https"):
+        return "only http(s) URLs are allowed"
+    if not parsed.hostname:
+        return "url must contain a hostname"
+    if parsed.username or parsed.password:
+        return "credentials in url are not allowed"
+    host = parsed.hostname.strip().lower()
+    if host in _BLOCKED_HOSTS:
+        return f"blocked hostname: {host}"
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        return f"hostname resolution failed: {exc}"
+    for info in infos:
+        addr = info[4][0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            return f"unable to parse address: {addr}"
+        if (
+            ip.is_loopback
+            or ip.is_private
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            return f"blocked private address: {addr}"
+    return None
+
+
+__all__ = [
+    "BLOCKED_SHELL_PATTERNS",
+    "ToolContext",
+    "ToolRegistry",
+    "ToolResult",
+    "default_registry",
+    "result_to_tool_content",
+]

@@ -1,6 +1,18 @@
+"""Persona definitions for ProtoAGI's Telegram personalities.
+
+Personas are loaded from ``config/personas/*.json`` so new identities can be
+added without touching Python. A small set of built-in defaults remains in
+this module so the bot keeps running even when the JSON files are missing
+(for example after a fresh checkout where the config directory has not been
+populated yet).
+"""
+
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable
 
 
 DEFAULT_PERSONA_KEY = "mykola"
@@ -52,7 +64,40 @@ class PersonaProfile:
         }
 
 
-PERSONAS: dict[str, PersonaProfile] = {
+def _profile_from_dict(data: dict) -> PersonaProfile:
+    def _str(value: object) -> str:
+        return str(value or "").strip()
+
+    def _tuple(values: object) -> tuple[str, ...]:
+        if isinstance(values, str):
+            return (values.strip(),) if values.strip() else ()
+        if isinstance(values, Iterable):
+            return tuple(str(item).strip() for item in values if str(item).strip())
+        return ()
+
+    key = _str(data.get("key"))
+    if not key:
+        raise ValueError("persona is missing 'key'")
+    return PersonaProfile(
+        key=key,
+        display_name=_str(data.get("display_name")) or key.title(),
+        memory_tag=_str(data.get("memory_tag")) or key,
+        aliases=_tuple(data.get("aliases")),
+        self_model=_str(data.get("self_model")),
+        user_model=_str(data.get("user_model")),
+        relationship_model=_str(data.get("relationship_model")),
+        decision_style=_tuple(data.get("decision_style")),
+        reply_style=_tuple(data.get("reply_style")),
+        memory_policy=_tuple(data.get("memory_policy")),
+        initiative_policy=_tuple(data.get("initiative_policy")),
+        start_message=_str(data.get("start_message")),
+        self_lore=_tuple(data.get("self_lore")),
+    )
+
+
+# Hard-coded fallbacks. They are used both when ``config/personas/`` is empty
+# and as the canonical source for tests that don't want to rely on disk.
+_BUILTIN_PERSONAS: dict[str, PersonaProfile] = {
     "mykola": PersonaProfile(
         key="mykola",
         display_name="Микола",
@@ -174,6 +219,66 @@ PERSONA_ALIASES: dict[str, str] = {
 }
 
 
+_LOADED_PERSONAS: dict[str, PersonaProfile] | None = None
+_LOADED_FROM: Path | None = None
+
+
+def _load_from_dir(directory: Path) -> dict[str, PersonaProfile]:
+    if not directory.is_dir():
+        return {}
+    profiles: dict[str, PersonaProfile] = {}
+    for path in sorted(directory.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        try:
+            profile = _profile_from_dict(data)
+        except ValueError:
+            continue
+        profiles[profile.key] = profile
+    return profiles
+
+
+def _resolve_personas_dir() -> Path:
+    """Avoid import cycles by computing the personas directory locally."""
+
+    return Path(__file__).resolve().parents[2] / "config" / "personas"
+
+
+def load_personas(directory: Path | None = None, *, force: bool = False) -> dict[str, PersonaProfile]:
+    """Return the active persona registry, loading from disk on first use."""
+
+    global _LOADED_PERSONAS, _LOADED_FROM
+    if not force and _LOADED_PERSONAS is not None:
+        return _LOADED_PERSONAS
+    target = directory or _resolve_personas_dir()
+    on_disk = _load_from_dir(target)
+    merged: dict[str, PersonaProfile] = dict(_BUILTIN_PERSONAS)
+    merged.update(on_disk)
+    aliases = dict(PERSONA_ALIASES)
+    for profile in merged.values():
+        for alias in profile.aliases:
+            aliases.setdefault(alias.strip().lower(), profile.key)
+        aliases.setdefault(profile.key.lower(), profile.key)
+    PERSONA_ALIASES.clear()
+    PERSONA_ALIASES.update(aliases)
+    _LOADED_PERSONAS = merged
+    _LOADED_FROM = target
+    return merged
+
+
+# Backwards-compatible mapping. It is a live view that mirrors the loaded
+# personas so callers that imported ``PERSONAS`` keep working.
+PERSONAS: dict[str, PersonaProfile] = load_personas()
+
+
+def reload_personas(directory: Path | None = None) -> dict[str, PersonaProfile]:
+    PERSONAS.clear()
+    PERSONAS.update(load_personas(directory, force=True))
+    return PERSONAS
+
+
 def resolve_persona_key(raw: str | None) -> str:
     value = (raw or "").strip().lower()
     if not value:
@@ -182,8 +287,23 @@ def resolve_persona_key(raw: str | None) -> str:
 
 
 def get_persona(raw: str | None) -> PersonaProfile:
-    return PERSONAS[resolve_persona_key(raw)]
+    key = resolve_persona_key(raw)
+    profiles = load_personas()
+    return profiles.get(key) or profiles[DEFAULT_PERSONA_KEY]
 
 
 def available_persona_keys() -> tuple[str, ...]:
-    return tuple(PERSONAS.keys())
+    return tuple(load_personas().keys())
+
+
+__all__ = [
+    "DEFAULT_PERSONA_KEY",
+    "PERSONAS",
+    "PERSONA_ALIASES",
+    "PersonaProfile",
+    "available_persona_keys",
+    "get_persona",
+    "load_personas",
+    "reload_personas",
+    "resolve_persona_key",
+]

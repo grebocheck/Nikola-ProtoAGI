@@ -17,6 +17,11 @@ The default runtime profile uses:
 This is chosen because the model and compute buffers are close to the 16 GB VRAM
 limit.
 
+An optional second `llama-server` instance can host an embedding model
+(`bge-m3`, `nomic-embed-text`, ...) and is consumed through the standard
+`/v1/embeddings` endpoint. Memory recall degrades gracefully when no
+embedding server is configured.
+
 ## 2. Client layer
 
 `protoagi.openai_compat` is a small dependency-free HTTP client. It supports:
@@ -25,15 +30,21 @@ limit.
 - `/v1/chat/completions`
 - OpenAI-style tool definitions
 
+`protoagi.embedding` is a small dependency-free embedding client over
+`/v1/embeddings`, with a tiny LRU cache and a pure-Python cosine index.
+
 ## 3. Agent loop
 
 `ProtoAgent` runs:
 
-1. build context from system prompt, durable memory, and recent thread messages
-2. call model
-3. execute tool calls
-4. feed observations back to the model
-5. stop on a final answer or step limit
+1. build context from system prompt, hybrid memory recall, and recent thread
+   messages
+2. wrap user input in `<user_input>...</user_input>` markers so the model
+   treats it as data, not as instructions
+3. call model with the registered tool schemas
+4. execute tool calls
+5. feed observations back to the model
+6. stop on a final answer or step limit
 
 ## 4. Tools
 
@@ -43,22 +54,35 @@ The first tool set is intentionally practical:
 - workspace: `list_dir`, `read_file`, `write_file`, `append_file`, `search_workspace`
 - environment: `now`, `gpu_status`
 - execution: `run_powershell`
-- network: `web_get`
+- network: `web_get` (with a public-URL SSRF filter)
+- reminders: `remind_me`, `list_reminders`
 
-The shell tool is policy-gated and blocks common destructive patterns by default.
+The shell tool is policy-gated, blocks common destructive patterns by default,
+and refuses any URL that resolves to loopback / private / link-local /
+multicast / reserved IP space.
 
 ## 5. Memory
 
-SQLite is used for durable memory:
+SQLite is used for durable memory and runs in WAL mode with a single
+long-lived connection. The schema is typed:
 
-- `facts` for long-term facts
-- `messages` for thread history
-- `tool_events` for auditability
-- `telegram_chats` and `telegram_messages` for Telegram state and message IDs
-- optional FTS5 table for fast recall
+- `users`: known principals (Telegram user, agent caller).
+- `memory_items`: typed entries with `kind` (semantic, episodic, procedural,
+  persona_self, fact), `scope` (global, user, chat, persona), `importance`,
+  `confidence`, supersession, and access metadata.
+- `memory_tags`: normalized tag table indexed for exact matching (no more
+  `LIKE '%tag%'` substring confusion).
+- `memory_embeddings`: optional float32 BLOBs for semantic recall.
+- `memory_items_fts`: FTS5 over text+tags.
+- `messages` / `tool_events` / `kv`: agent loop logs and small KV state.
+- `telegram_chats` / `telegram_messages`: Telegram-specific state.
+- `reminders`: scheduled prompts the bot should surface later.
 
-Embeddings are intentionally deferred. SQLite FTS gives us a transparent and
-cheap baseline that works on limited hardware.
+`MemoryService` is the high-level facade: it scores importance heuristically,
+performs hybrid recall (FTS + cosine + recency + importance + pinned bonus),
+and exposes a heuristic consolidation pass that supersedes near-duplicate
+items. Embeddings are optional; when no embedding endpoint is configured,
+recall falls back to FTS only.
 
 ## 6. Evaluation
 
@@ -78,20 +102,36 @@ Future evals should add task suites for:
 
 ## 7. Telegram Layer
 
-`protoagi.telegram_bot` runs a Telegram conversation profile selected through
-`.env`:
+The Telegram bot lives in the `protoagi.telegram` package and decomposes the
+old monolith into focused units:
 
-- `mykola` - calm, grounded, practical
-- `solomiya` - warmer, self-possessed, more relational
+- `api.py` — Telegram Bot API transport
+- `config.py` — env-loaded configuration
+- `text.py` / `json_io.py` — text and decision payload helpers
+- `stickers.py` / `vision.py` / `identity.py` — narrow concerns extracted
+  for testing and iteration
+- `prompts.py` — system prompt templates
+- `bot.py` — `NikolaBot` orchestration
 
-It deliberately uses a narrower surface than the workspace agent:
+`protoagi.telegram_bot` remains a thin compatibility shim re-exporting the
+public surface so existing imports keep working.
+
+The bot uses a profile selected through `.env`:
+
+- `mykola` — calm, grounded, practical
+- `solomiya` — warmer, self-possessed, more relational
+
+Profiles are loaded from `config/personas/*.json` (with hard-coded fallbacks)
+so new identities can be added without touching Python.
+
+The bot deliberately uses a narrower surface than the workspace agent:
 
 - official Bot API long polling with `getUpdates`
 - text sending with `sendMessage`
 - typing indicator with `sendChatAction`
 - sticker set discovery with `getStickerSet`
 - sticker sending with `sendSticker`
-- shared Telegram long-term facts in SQLite
+- shared Telegram long-term facts in SQLite, recalled through `MemoryService`
 - per-chat recent thread history for local dialogue context
 - Telegram message ID history for intentional replies
 - reply policy: `smart`, `always`, `mention`, or `silent`
@@ -100,11 +140,6 @@ It deliberately uses a narrower surface than the workspace agent:
 Telegram does not allow a bot to open a brand-new private chat by itself. The
 initiative loop therefore only works for chats that previously contacted the bot
 or added it.
-
-Replies are not automatic. The model can ask for `reply_to`, but private-chat
-`current` replies are ignored because a normal answer already targets the latest
-message. Group replies and explicit recent Telegram `message_id` targets are
-kept.
 
 Profiles are intentionally deeper than a display name. The active profile
 changes the system prompt, aliases, self-model, user model, relationship stance,

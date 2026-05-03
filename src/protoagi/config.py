@@ -15,6 +15,7 @@ DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "protoagi.sqlite3"
 DEFAULT_LLAMA_DIR = PROJECT_ROOT / "tools" / "llama.cpp"
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "protoagi.json"
 EXAMPLE_CONFIG_PATH = PROJECT_ROOT / "config" / "protoagi.example.json"
+DEFAULT_PERSONAS_DIR = PROJECT_ROOT / "config" / "personas"
 
 
 def _path_from_config(value: str | os.PathLike[str], *, root: Path = PROJECT_ROOT) -> Path:
@@ -46,6 +47,26 @@ class ToolPolicy:
 
 
 @dataclass(slots=True)
+class EmbeddingSettings:
+    base_url: str = ""
+    model: str = ""
+    timeout_seconds: int = 30
+    request_dimensions: int | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "EmbeddingSettings":
+        if not data:
+            return cls()
+        dims = data.get("request_dimensions")
+        return cls(
+            base_url=str(data.get("base_url", "")),
+            model=str(data.get("model", "")),
+            timeout_seconds=int(data.get("timeout_seconds", 30)),
+            request_dimensions=int(dims) if dims else None,
+        )
+
+
+@dataclass(slots=True)
 class AgentConfig:
     base_url: str = "http://127.0.0.1:8080/v1"
     model: str = "gpt-oss-20b-MXFP4"
@@ -54,6 +75,7 @@ class AgentConfig:
     top_p: float = 1.0
     max_tokens: int = 1536
     tool_policy: ToolPolicy = field(default_factory=ToolPolicy)
+    embedding: EmbeddingSettings = field(default_factory=EmbeddingSettings)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "AgentConfig":
@@ -65,6 +87,16 @@ class AgentConfig:
         elif EXAMPLE_CONFIG_PATH.exists():
             data = json.loads(EXAMPLE_CONFIG_PATH.read_text(encoding="utf-8"))
 
+        embedding_data = dict(data.get("embedding") or {})
+        if env_value := os.environ.get("PROTOAGI_EMBED_BASE_URL"):
+            embedding_data["base_url"] = env_value
+        if env_value := os.environ.get("PROTOAGI_EMBED_MODEL"):
+            embedding_data["model"] = env_value
+        if env_value := os.environ.get("PROTOAGI_EMBED_DIMENSIONS"):
+            embedding_data["request_dimensions"] = env_value
+        if env_value := os.environ.get("PROTOAGI_EMBED_TIMEOUT_SECONDS"):
+            embedding_data["timeout_seconds"] = env_value
+
         return cls(
             base_url=os.environ.get("PROTOAGI_BASE_URL", data.get("base_url", cls.base_url)),
             model=os.environ.get("PROTOAGI_MODEL", data.get("model", cls.model)),
@@ -75,6 +107,7 @@ class AgentConfig:
             top_p=float(os.environ.get("PROTOAGI_TOP_P", data.get("top_p", 1.0))),
             max_tokens=env_int("PROTOAGI_MAX_TOKENS", int(data.get("max_tokens", 1536))),
             tool_policy=ToolPolicy.from_dict(data.get("tool_policy")),
+            embedding=EmbeddingSettings.from_dict(embedding_data),
         )
 
     def with_cli_overrides(
@@ -108,6 +141,7 @@ class AgentConfig:
             top_p=self.top_p if top_p is None else top_p,
             max_tokens=self.max_tokens if max_tokens is None else max_tokens,
             tool_policy=policy,
+            embedding=self.embedding,
         )
 
 

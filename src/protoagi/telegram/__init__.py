@@ -1,63 +1,66 @@
-"""Backwards-compatible facade for the Telegram package.
+"""Telegram persona package.
 
-The Telegram bot was refactored into the :mod:`protoagi.telegram` package.
-This module re-exports the same public symbols so existing imports such as
-``from protoagi.telegram_bot import NikolaBot`` keep working without
+The package decomposes the previously monolithic ``telegram_bot.py`` module
+into focused units. The legacy module path ``protoagi.telegram_bot`` keeps
+re-exporting the same public symbols so existing callers and tests need no
 changes.
 """
 
-from __future__ import annotations
-
-from .telegram import (  # noqa: F401
-    ASSISTANTY_SENTENCE_RE,
-    DECEPTIVE_IDENTITY_REPLY_RE,
-    Decision,
-    GENERIC_CHECKIN_RE,
-    GENERIC_STICKER_FILLER_RE,
-    IDENTITY_QUESTION_RE,
-    IMAGE_BLIND_REPLY_RE,
-    ImageAttachment,
-    InitiativeDecision,
-    NikolaBot,
+from .api import TELEGRAM_API_ROOT, TELEGRAM_MAX_MESSAGE_CHARS, TelegramApi, TelegramApiError, is_telegram_polling_conflict
+from .bot import NikolaBot, build_nikola_bot
+from .config import TelegramConfig
+from .constants import (
     OFFSET_KEY,
-    SERIOUS_STICKER_RE,
-    STICKER_ALIASES,
-    STICKER_PACKS,
-    StickerAttachment,
-    TELEGRAM_API_ROOT,
     TELEGRAM_CHAT_THREAD_PREFIX,
     TELEGRAM_GLOBAL_MEMORY_TAG,
-    TELEGRAM_MAX_MESSAGE_CHARS,
     TELEGRAM_PERSONA_SELF_MEMORY_TAG,
-    TelegramApi,
-    TelegramApiError,
-    TelegramConfig,
-    VISION_BOILERPLATE_PATTERNS,
-    VISION_PROMPT_LEAK_RE,
-    auto_sticker_choice,
-    build_nikola_bot,
-    clean_vision_description,
-    decision_from_payload,
-    decision_reply_texts,
-    display_sender,
-    extract_json_object,
+)
+from .identity import (
+    DECEPTIVE_IDENTITY_REPLY_RE,
+    IDENTITY_QUESTION_RE,
+    IMAGE_BLIND_REPLY_RE,
     honest_identity_reply,
-    image_to_payload,
-    initiative_from_payload,
     is_deceptive_identity_reply,
     is_identity_question,
     is_image_blind_reply,
-    is_telegram_polling_conflict,
-    looks_serious_for_sticker,
+)
+from .json_io import (
+    Decision,
+    ImageAttachment,
+    InitiativeDecision,
+    StickerAttachment,
+    decision_from_payload,
+    decision_reply_texts,
+    extract_json_object,
+    image_to_payload,
+    initiative_from_payload,
     normalize_reply_messages,
     normalize_reply_to,
     normalize_sticker_choices,
+    sticker_to_payload,
+)
+from .stickers import (
+    SERIOUS_STICKER_RE,
+    STICKER_ALIASES,
+    STICKER_PACKS,
+    auto_sticker_choice,
+    looks_serious_for_sticker,
     normalize_sticker_pack,
+)
+from .text import (
+    ASSISTANTY_SENTENCE_RE,
+    GENERIC_CHECKIN_RE,
+    GENERIC_STICKER_FILLER_RE,
+    display_sender,
     parse_command,
     split_telegram_message,
-    sticker_to_payload,
     strip_assistanty_phrases,
     strip_speaker_prefixes,
+)
+from .vision import (
+    VISION_BOILERPLATE_PATTERNS,
+    VISION_PROMPT_LEAK_RE,
+    clean_vision_description,
 )
 
 
