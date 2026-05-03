@@ -5,13 +5,17 @@ import json
 from pathlib import Path
 import sys
 
+from .admin import serve as serve_admin
 from .agent import ProtoAgent
 from .bench import bench_endpoint, endpoint_results_to_json, run_llama_bench
 from .config import AgentConfig, DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PATH, LlamaServerProfile, PROJECT_ROOT
+from .embedding import EmbeddingClient, EmbeddingConfig
 from .memory import MemoryStore
+from .memory_eval import DEFAULT_CORPUS_PATH, run_eval
+from .memory_service import MemoryService
 from .openai_compat import OpenAICompatibleClient, OpenAICompatError
 from .runtime import run_server_foreground, status_report
-from .telegram_bot import TelegramApiError, TelegramConfig, build_nikola_bot, is_telegram_polling_conflict
+from .telegram_bot import BotRunner, TelegramApiError, TelegramConfig, build_nikola_bot, is_telegram_polling_conflict
 from .tools import default_registry
 
 
@@ -38,6 +42,11 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--max-tokens", type=int, default=None)
     chat.add_argument("--temperature", type=float, default=None)
     chat.add_argument("--top-p", type=float, default=None)
+    chat.add_argument(
+        "--stream",
+        action="store_true",
+        help="Stream a one-off plain reply (no tools). Useful for quick sanity checks.",
+    )
 
     bench = sub.add_parser("bench", help="Benchmark the running OpenAI-compatible endpoint")
     bench.add_argument("--prompt", default="In three bullet points, explain what makes a good local agent.")
@@ -70,6 +79,44 @@ def build_parser() -> argparse.ArgumentParser:
     telegram.add_argument("--proactive-cooldown-seconds", type=int, default=None)
     telegram.add_argument("--delete-webhook", action="store_true")
     telegram.add_argument("--drop-pending-updates", action="store_true")
+    telegram.add_argument(
+        "--single-thread",
+        action="store_true",
+        help="Run the legacy single-thread loop (no background reminder/reflection worker).",
+    )
+
+    memory_eval = sub.add_parser(
+        "memory-eval",
+        help="Run the memory recall benchmark against a fact corpus.",
+    )
+    memory_eval.add_argument("--corpus", default=str(DEFAULT_CORPUS_PATH))
+    memory_eval.add_argument("--k", default="1,3,5")
+    memory_eval.add_argument("--with-embeddings", action="store_true")
+    memory_eval.add_argument("--json", action="store_true", help="Print full JSON report.")
+
+    memory_stats = sub.add_parser("memory-stats", help="Print memory store counters.")
+    memory_stats.add_argument("--db", default=None)
+
+    memory_prune = sub.add_parser("memory-prune", help="Forget low-value memory items.")
+    memory_prune.add_argument("--db", default=None)
+    memory_prune.add_argument("--scope", default=None)
+    memory_prune.add_argument("--persona", default=None)
+    memory_prune.add_argument("--score-threshold", type=float, default=0.12)
+    memory_prune.add_argument("--keep-newer-than-days", type=float, default=30.0)
+    memory_prune.add_argument("--dry-run", action="store_true")
+
+    memory_consolidate = sub.add_parser(
+        "memory-consolidate",
+        help="Run the consolidation pass to supersede near-duplicate memories.",
+    )
+    memory_consolidate.add_argument("--db", default=None)
+    memory_consolidate.add_argument("--scope", default=None)
+    memory_consolidate.add_argument("--persona", default=None)
+
+    admin = sub.add_parser("admin", help="Run the local admin web UI.")
+    admin.add_argument("--db", default=None)
+    admin.add_argument("--host", default="127.0.0.1")
+    admin.add_argument("--port", type=int, default=8765)
 
     return parser
 
@@ -137,6 +184,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
 
 def cmd_chat(args: argparse.Namespace) -> int:
+    if args.stream and args.prompt:
+        return _cmd_chat_stream(args)
     agent = make_agent(args)
     if args.prompt:
         run = agent.run(args.prompt, thread_id=args.thread_id, max_steps=args.max_steps)
@@ -164,6 +213,34 @@ def cmd_chat(args: argparse.Namespace) -> int:
         print(f"\nProtoAGI> {run.final}")
         if run.tool_events:
             print(f"[tool events: {len(run.tool_events)} | thread: {run.thread_id}]")
+
+
+def _cmd_chat_stream(args: argparse.Namespace) -> int:
+    config = AgentConfig.load().with_cli_overrides(
+        base_url=getattr(args, "base_url", None),
+        model=getattr(args, "model", None),
+        max_tokens=getattr(args, "max_tokens", None),
+        temperature=getattr(args, "temperature", None),
+        top_p=getattr(args, "top_p", None),
+    )
+    client = OpenAICompatibleClient(config.base_url, config.model)
+    messages = [
+        {"role": "system", "content": "You are ProtoAGI, answering directly without tool calls."},
+        {"role": "user", "content": str(args.prompt)},
+    ]
+    try:
+        for chunk in client.chat_completion_stream(
+            messages,
+            temperature=config.temperature,
+            top_p=config.top_p,
+            max_tokens=config.max_tokens,
+        ):
+            print(chunk, end="", flush=True)
+        print()
+        return 0
+    except OpenAICompatError as exc:
+        print(f"streaming error: {exc}", file=sys.stderr)
+        return 2
 
 
 def cmd_bench(args: argparse.Namespace) -> int:
@@ -250,9 +327,135 @@ def cmd_telegram(args: argparse.Namespace) -> int:
     if args.once:
         processed = bot.poll_once()
         proactive = bot.run_initiative_once() if telegram_config.proactive_enabled else 0
-        print(f"Processed updates: {processed}; proactive messages: {proactive}")
+        delivered = bot.dispatch_due_reminders()
+        print(
+            f"Processed updates: {processed}; proactive messages: {proactive}; "
+            f"reminders delivered: {delivered}"
+        )
         return 0
-    bot.run_forever()
+    if args.single_thread:
+        bot.run_forever()
+        return 0
+    runner = BotRunner(bot)
+    runner.run()
+    return 0
+
+
+def _resolve_db_path(args: argparse.Namespace) -> Path:
+    config = AgentConfig.load()
+    raw = getattr(args, "db", None)
+    if raw:
+        return Path(raw).resolve()
+    return config.database_path
+
+
+def _build_memory_service(db_path: Path) -> tuple[MemoryStore, MemoryService]:
+    config = AgentConfig.load()
+    store = MemoryStore(db_path)
+    embedding_config = EmbeddingConfig(
+        base_url=config.embedding.base_url,
+        model=config.embedding.model,
+        timeout_seconds=config.embedding.timeout_seconds,
+        request_dimensions=config.embedding.request_dimensions,
+    )
+    embedding_client = EmbeddingClient(embedding_config) if embedding_config.enabled else None
+    service = MemoryService(store, embedding_client=embedding_client)
+    return store, service
+
+
+def cmd_memory_eval(args: argparse.Namespace) -> int:
+    k_values = tuple(int(v.strip()) for v in args.k.split(",") if v.strip())
+    config = AgentConfig.load()
+    embedding_client: EmbeddingClient | None = None
+    if args.with_embeddings:
+        embedding_config = EmbeddingConfig(
+            base_url=config.embedding.base_url,
+            model=config.embedding.model,
+            timeout_seconds=config.embedding.timeout_seconds,
+            request_dimensions=config.embedding.request_dimensions,
+        )
+        if not embedding_config.enabled:
+            print(
+                "PROTOAGI_EMBED_MODEL is not configured; running FTS-only.",
+                file=sys.stderr,
+            )
+        else:
+            embedding_client = EmbeddingClient(embedding_config)
+    report = run_eval(
+        corpus_path=Path(args.corpus).resolve(),
+        embedding_client=embedding_client,
+        k_values=k_values,
+    )
+    if args.json:
+        print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2))
+    else:
+        print(f"queries: {len(report.queries)}")
+        for k, value in sorted(report.recall_at_k.items()):
+            print(f"recall@{k}: {value:.3f}")
+        print(f"MRR: {report.mrr:.3f}")
+        misses = [item for item in report.queries if item.rank is None]
+        if misses:
+            print("\nMisses:")
+            for miss in misses:
+                print(f"  - {miss.query!r}: expected one of {miss.retrieved[:3]}")
+    return 0
+
+
+def cmd_memory_stats(args: argparse.Namespace) -> int:
+    db_path = _resolve_db_path(args)
+    if not db_path.exists():
+        print(f"no database at {db_path}", file=sys.stderr)
+        return 2
+    store, _ = _build_memory_service(db_path)
+    from .admin import _stats
+
+    print(json.dumps(_stats(store), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_memory_prune(args: argparse.Namespace) -> int:
+    db_path = _resolve_db_path(args)
+    if not db_path.exists():
+        print(f"no database at {db_path}", file=sys.stderr)
+        return 2
+    _, service = _build_memory_service(db_path)
+    result = service.prune(
+        scope=args.scope,
+        persona_key=args.persona,
+        score_threshold=args.score_threshold,
+        keep_newer_than_days=args.keep_newer_than_days,
+        dry_run=args.dry_run,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_memory_consolidate(args: argparse.Namespace) -> int:
+    db_path = _resolve_db_path(args)
+    if not db_path.exists():
+        print(f"no database at {db_path}", file=sys.stderr)
+        return 2
+    _, service = _build_memory_service(db_path)
+    merged = service.consolidate(scope=args.scope, persona_key=args.persona)
+    print(json.dumps({"merged": merged}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_admin(args: argparse.Namespace) -> int:
+    db_path = _resolve_db_path(args)
+    if not db_path.exists():
+        print(f"no database at {db_path}", file=sys.stderr)
+        return 2
+    store, service = _build_memory_service(db_path)
+    server = serve_admin(store, service, host=args.host, port=args.port)
+    url = f"http://{args.host}:{args.port}"
+    print(f"ProtoAGI admin listening on {url}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nshutting down")
+    finally:
+        server.server_close()
     return 0
 
 
@@ -275,6 +478,16 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_init_config(args)
         if args.command == "telegram":
             return cmd_telegram(args)
+        if args.command == "memory-eval":
+            return cmd_memory_eval(args)
+        if args.command == "memory-stats":
+            return cmd_memory_stats(args)
+        if args.command == "memory-prune":
+            return cmd_memory_prune(args)
+        if args.command == "memory-consolidate":
+            return cmd_memory_consolidate(args)
+        if args.command == "admin":
+            return cmd_admin(args)
     except OpenAICompatError as exc:
         print(f"OpenAI-compatible endpoint error: {exc}", file=sys.stderr)
         return 2

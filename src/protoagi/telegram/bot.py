@@ -45,7 +45,9 @@ from .identity import (
     is_image_blind_reply,
 )
 from .json_io import (
+    DECISION_JSON_SCHEMA,
     Decision,
+    INITIATIVE_JSON_SCHEMA,
     ImageAttachment,
     InitiativeDecision,
     StickerAttachment,
@@ -75,6 +77,18 @@ from .vision import VisionDescriber
 
 
 _TELEGRAM_LOG_TAIL_BYTES = 1_000_000
+_REMINDER_CHECK_KV = "telegram:last_reminder_check"
+_REFLECTION_LAST_KV = "telegram:last_reflection_at"
+_REMINDER_CHECK_SECONDS = 60
+_REFLECTION_INTERVAL_SECONDS = 6 * 60 * 60
+
+
+def sqlite3_error_types() -> tuple[type[BaseException], ...]:
+    """Return the runtime sqlite3 exception types as a tuple."""
+
+    import sqlite3
+
+    return (sqlite3.Error,)
 
 
 class NikolaBot:
@@ -96,6 +110,8 @@ class NikolaBot:
         self.persona: PersonaProfile = get_persona(telegram_config.persona_key)
         self.bot_username = self.memory.get_kv("telegram:bot_username") or ""
         self._last_proactive_check = 0.0
+        self._last_reminder_check = 0.0
+        self._last_reflection_check = 0.0
         self._sticker_cache: dict[str, list[dict[str, str]]] = {}
         self.error_log_path = PROJECT_ROOT / "runs" / "telegram-errors.log"
         initial_vision_llm = (
@@ -155,6 +171,8 @@ class NikolaBot:
             try:
                 self.poll_once()
                 self.maybe_run_initiative()
+                self.maybe_dispatch_reminders()
+                self.maybe_run_reflection()
             except TelegramApiError as exc:
                 if is_telegram_polling_conflict(exc):
                     raise
@@ -194,6 +212,204 @@ class NikolaBot:
             return 0
         self._last_proactive_check = now_monotonic
         return self.run_initiative_once()
+
+    def maybe_dispatch_reminders(self) -> int:
+        now_monotonic = time.monotonic()
+        if now_monotonic - self._last_reminder_check < _REMINDER_CHECK_SECONDS:
+            return 0
+        self._last_reminder_check = now_monotonic
+        return self.dispatch_due_reminders()
+
+    def dispatch_due_reminders(self, *, limit: int = 20) -> int:
+        delivered = 0
+        now = utc_now()
+        for reminder in self.memory.due_reminders(now, limit=limit):
+            chat_id = reminder.chat_id
+            if not chat_id or not self._chat_allowed(str(chat_id)):
+                # No chat to deliver into; mark as cancelled so we stop
+                # retrying. The text is still recorded in the reminders
+                # table for auditing.
+                self.memory.mark_reminder(reminder.id, "cancelled")
+                continue
+            chat = self.memory.get_telegram_chat(chat_id)
+            if chat is None:
+                self.memory.mark_reminder(reminder.id, "cancelled")
+                continue
+            if reminder.persona_key and reminder.persona_key != self.persona.key:
+                # Reminder targets a different persona; another worker can
+                # pick it up. Skip without marking sent.
+                continue
+            try:
+                text = f"⏰ {reminder.text}"
+                self._send_reply(
+                    chat,
+                    text,
+                    initiative=True,
+                    disable_notification=False,
+                )
+                self.memory.mark_reminder(reminder.id, "sent")
+                delivered += 1
+            except TelegramApiError:
+                # Leave the reminder pending for retry next tick.
+                continue
+        return delivered
+
+    def maybe_run_reflection(self) -> bool:
+        now_monotonic = time.monotonic()
+        if now_monotonic - self._last_reflection_check < _REFLECTION_INTERVAL_SECONDS:
+            return False
+        last_at = self.memory.get_kv(_REFLECTION_LAST_KV)
+        if last_at:
+            try:
+                last_dt = datetime.fromisoformat(last_at)
+                if datetime.now(timezone.utc) - last_dt < timedelta(seconds=_REFLECTION_INTERVAL_SECONDS):
+                    self._last_reflection_check = now_monotonic
+                    return False
+            except ValueError:
+                pass
+        self._last_reflection_check = now_monotonic
+        self.run_reflection_pass()
+        return True
+
+    def run_reflection_pass(self) -> dict[str, int]:
+        """Periodic memory hygiene + meta-memory write.
+
+        The pass:
+
+        1. Consolidates near-identical memories in the global + active
+           persona scopes (older items get ``superseded_by`` set).
+        2. Prunes low-value items past the 60-day grace window using a
+           conservative score threshold. Pinned and ``persona_self`` items
+           are protected by ``MemoryService.prune`` defaults.
+        3. When fictional self-memory is enabled, asks the model for one
+           or two short first-person reflection notes that are stored as
+           ``persona_self`` memories.
+        """
+
+        result = {
+            "consolidated_global": 0,
+            "consolidated_persona": 0,
+            "pruned_global": 0,
+            "pruned_persona": 0,
+            "reflections_written": 0,
+        }
+        try:
+            result["consolidated_global"] = self.memory_service.consolidate(
+                scope=SCOPE_GLOBAL, max_items=300
+            )
+        except sqlite3_error_types() as exc:  # pragma: no cover - defensive
+            print(f"reflection consolidate(global) failed: {exc}", flush=True)
+        try:
+            result["consolidated_persona"] = self.memory_service.consolidate(
+                scope=SCOPE_PERSONA, persona_key=self.persona.key, max_items=200
+            )
+        except sqlite3_error_types() as exc:  # pragma: no cover - defensive
+            print(f"reflection consolidate(persona) failed: {exc}", flush=True)
+        try:
+            result["pruned_global"] = self.memory_service.prune(
+                scope=SCOPE_GLOBAL,
+                score_threshold=0.10,
+                keep_newer_than_days=60.0,
+                max_items=500,
+            )["deleted"]
+        except sqlite3_error_types() as exc:  # pragma: no cover - defensive
+            print(f"reflection prune(global) failed: {exc}", flush=True)
+        try:
+            result["pruned_persona"] = self.memory_service.prune(
+                scope=SCOPE_PERSONA,
+                persona_key=self.persona.key,
+                score_threshold=0.10,
+                keep_newer_than_days=60.0,
+                max_items=300,
+            )["deleted"]
+        except sqlite3_error_types() as exc:  # pragma: no cover - defensive
+            print(f"reflection prune(persona) failed: {exc}", flush=True)
+        if self.telegram_config.fictional_self_enabled:
+            try:
+                result["reflections_written"] = self._write_reflection_memory()
+            except (OpenAICompatError, OSError) as exc:
+                print(f"reflection memory write failed: {exc}", flush=True)
+        self.memory.set_kv(_REFLECTION_LAST_KV, utc_now())
+        return result
+
+    def _write_reflection_memory(self) -> int:
+        """Ask the model to write up to two short self-reflection notes.
+
+        We collect recent memories the bot already knows about, give them as
+        context, and ask for terse first-person reflections. Each reflection
+        is stored as a ``persona_self`` memory.
+        """
+
+        recent_facts = self.memory_service.recent(
+            persona_key=self.persona.key,
+            limit=8,
+        )
+        recent_self = self.memory_service.recent(
+            persona_key=self.persona.key,
+            kind=KIND_PERSONA_SELF,
+            limit=8,
+        )
+        # Skip when there is essentially nothing new to reflect on.
+        if not recent_facts and not recent_self:
+            return 0
+        prompt = (
+            f"Ти — {self.persona.display_name}. Це внутрішня нічна нотатка для себе, не для користувача. "
+            "На основі останніх памʼяток коротко запиши 1-2 факти або висновки про себе у форматі першої особи "
+            "(наприклад: \"Я помітила, що мені краще даються розмови вранці\"). "
+            "Не повторюй уже відомі факти; не вигадуй контактні дані чи офлайн-події. "
+            "Поверни JSON: {\"reflections\": [string, ...]}."
+        )
+        context_payload = {
+            "recent_user_facts": [
+                {"text": item.text, "tags": item.tags}
+                for item in recent_facts
+            ],
+            "recent_self_memories": [
+                {"text": item.text, "tags": item.tags}
+                for item in recent_self
+            ],
+        }
+        schema = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "reflection",
+                "strict": False,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "reflections": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        }
+                    },
+                    "required": ["reflections"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+        response = self.llm.chat_completion(
+            [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": json.dumps(context_payload, ensure_ascii=False)},
+            ],
+            temperature=0.4,
+            top_p=0.95,
+            max_tokens=320,
+            response_format=schema,
+        )
+        content = clean_model_content(
+            response.get("choices", [{}])[0].get("message", {}).get("content", "")
+        )
+        payload = extract_json_object(content)
+        reflections = payload.get("reflections") or []
+        written = 0
+        for raw in reflections:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            self._remember_persona_self_fact(text)
+            written += 1
+        return written
 
     # ------------------------------------------------------------------
     # Update handling
@@ -265,6 +481,11 @@ class NikolaBot:
             self._remember_chat_fact(chat_state, fact, user_id=self._user_id_for(user))
         for fact in decision.self_memories:
             self._remember_persona_self_fact(fact)
+        self._persist_reminder_requests(
+            decision.reminders,
+            chat_state=chat_state,
+            user_id=self._user_id_for(user),
+        )
         self._maybe_add_reaction_sticker(chat_state, incoming_text, decision)
         if not decision.should_reply and not decision.stickers:
             self._schedule_from_minutes(chat_state.chat_id, decision.next_check_minutes)
@@ -339,6 +560,7 @@ class NikolaBot:
             temperature=self.agent_config.temperature,
             top_p=self.agent_config.top_p,
             max_tokens=self.telegram_config.decision_max_tokens,
+            response_format=DECISION_JSON_SCHEMA,
         )
         content = clean_model_content(response.get("choices", [{}])[0].get("message", {}).get("content", ""))
         payload = extract_json_object(content)
@@ -415,6 +637,7 @@ class NikolaBot:
                 self._remember_chat_fact(chat, fact)
             for fact in decision.self_memories:
                 self._remember_persona_self_fact(fact)
+            self._persist_reminder_requests(decision.reminders, chat_state=chat)
             self._schedule_from_minutes(chat.chat_id, decision.next_check_minutes)
             if not decision.send:
                 continue
@@ -471,6 +694,7 @@ class NikolaBot:
             temperature=self.agent_config.temperature,
             top_p=self.agent_config.top_p,
             max_tokens=self.telegram_config.decision_max_tokens,
+            response_format=INITIATIVE_JSON_SCHEMA,
         )
         content = clean_model_content(response.get("choices", [{}])[0].get("message", {}).get("content", ""))
         return initiative_from_payload(extract_json_object(content))
@@ -788,6 +1012,59 @@ class NikolaBot:
             persona_key=self.persona.key,
             source="telegram_chat",
         )
+
+    def _persist_reminder_requests(
+        self,
+        requests: list[dict[str, Any]],
+        *,
+        chat_state: TelegramChat,
+        user_id: str | None = None,
+    ) -> int:
+        """Turn ``decision.reminders`` entries into rows in the reminders table.
+
+        The model is allowed to phrase reminders naturally; we resolve the
+        target timestamp from either ``in_minutes`` or an ISO ``trigger_at``,
+        cap at 365 days, and bind the row to the originating chat / persona
+        so the dispatcher knows where to deliver it.
+        """
+
+        if not requests:
+            return 0
+        added = 0
+        max_minutes = 60 * 24 * 365
+        for entry in requests:
+            text = str(entry.get("text") or "").strip()
+            if not text:
+                continue
+            trigger_at = ""
+            raw_trigger = entry.get("trigger_at")
+            if isinstance(raw_trigger, str) and raw_trigger.strip():
+                try:
+                    parsed = datetime.fromisoformat(raw_trigger.strip())
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    trigger_at = parsed.isoformat(timespec="seconds")
+                except ValueError:
+                    trigger_at = ""
+            if not trigger_at:
+                in_minutes = entry.get("in_minutes")
+                try:
+                    minutes = max(1, min(int(in_minutes), max_minutes))
+                except (TypeError, ValueError):
+                    minutes = 60
+                trigger_at = (
+                    datetime.now(timezone.utc) + timedelta(minutes=minutes)
+                ).isoformat(timespec="seconds")
+            self.memory.add_reminder(
+                text=text,
+                trigger_at=trigger_at,
+                chat_id=chat_state.chat_id,
+                persona_key=self.persona.key,
+                user_id=user_id,
+                metadata={"source": "telegram_decision"},
+            )
+            added += 1
+        return added
 
     def _remember_persona_self_fact(self, text: str) -> None:
         if not self.telegram_config.fictional_self_enabled:

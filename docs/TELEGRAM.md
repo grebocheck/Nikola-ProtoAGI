@@ -210,3 +210,33 @@ if there is a good reason. A cooldown prevents spam. Defaults:
 - check interval: 300 seconds
 - initiative cooldown: 6 hours
 - proactive messages are sent silently by default
+
+## Reminders
+
+The agent has a `remind_me` tool that creates rows in the `reminders` table.
+When the Telegram bot is running, `BotRunner`'s worker thread checks for due
+reminders every minute and delivers them into the originating chat with a
+``⏰`` prefix. Reminders without a deliverable chat are marked ``cancelled``
+to avoid retry loops.
+
+## Reflection
+
+Every ~6 hours the bot runs a maintenance pass:
+
+- consolidates near-duplicate memories in the `global` and active `persona`
+  scopes (older items are marked `superseded_by` the winner);
+- when fictional self-memory is enabled, asks the model for 1-2 short
+  first-person reflection notes built from recent user facts and existing
+  self-memories. They are stored as ordinary `persona_self` memories so they
+  surface again in normal recall.
+
+The reflection cadence is tracked in the `kv` table under
+``telegram:last_reflection_at`` so a freshly restarted bot doesn't run the
+pass twice in a row.
+
+## Background workers
+
+`BotRunner` is the default runtime: it runs the long-poll on the main thread
+and a small worker thread for periodic tasks (initiative, reminders,
+reflection). Pass ``--single-thread`` to ``protoagi telegram`` to fall back
+to the legacy interleaved loop, mostly useful for step-through debugging.

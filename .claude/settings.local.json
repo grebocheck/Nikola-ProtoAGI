@@ -3,7 +3,11 @@
     "allow": [
       "Bash(PYTHONPATH=src python -m pytest tests/ -x --tb=short)",
       "Bash(PYTHONPATH=src python -m unittest discover -s tests -v)",
-      "Bash(PYTHONPATH=src python -m unittest discover -s tests)"
+      "Bash(PYTHONPATH=src python -m unittest discover -s tests)",
+      "Bash(PYTHONPATH=src python -m protoagi memory-eval)",
+      "Bash(PYTHONPATH=src python -m protoagi memory-eval --json)",
+      "Bash(powershell -ExecutionPolicy Bypass -File scripts/eval-memory.ps1)",
+      "Bash(python -c ' *)"
     ]
   }
 }

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Iterator
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -59,6 +59,91 @@ class OpenAICompatibleClient:
         temperature: float = 0.6,
         top_p: float = 1.0,
         max_tokens: int = 1536,
+        response_format: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = self._build_payload(
+            messages,
+            tools=tools,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            stream=False,
+        )
+        return self._request("POST", "/chat/completions", payload)
+
+    def chat_completion_stream(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        temperature: float = 0.6,
+        top_p: float = 1.0,
+        max_tokens: int = 1536,
+        response_format: dict[str, Any] | None = None,
+    ) -> Iterator[str]:
+        """Yield content fragments as the server streams them.
+
+        Falls back gracefully if the server does not stream — callers still
+        receive the full content as a single chunk.
+        """
+
+        payload = self._build_payload(
+            messages,
+            tools=tools,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            stream=True,
+        )
+        url = f"{self.base_url}/chat/completions"
+        body = json.dumps(payload).encode("utf-8")
+        request = Request(
+            url,
+            data=body,
+            headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
+            method="POST",
+        )
+        try:
+            response = urlopen(request, timeout=self.timeout_seconds)
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise OpenAICompatError(f"HTTP {exc.code} from {url}: {detail}") from exc
+        except URLError as exc:
+            raise OpenAICompatError(f"Cannot reach {url}: {exc}") from exc
+        try:
+            for raw_line in response:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or choices[0].get("message") or {}
+                content = delta.get("content")
+                if content:
+                    yield str(content)
+        finally:
+            response.close()
+
+    def _build_payload(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None,
+        temperature: float,
+        top_p: float,
+        max_tokens: int,
+        response_format: dict[str, Any] | None,
+        stream: bool,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model,
@@ -70,7 +155,11 @@ class OpenAICompatibleClient:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
-        return self._request("POST", "/chat/completions", payload)
+        if response_format:
+            payload["response_format"] = response_format
+        if stream:
+            payload["stream"] = True
+        return payload
 
 
 def _sanitize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

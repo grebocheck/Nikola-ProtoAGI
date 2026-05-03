@@ -10,6 +10,9 @@ param(
     [switch]$NoVision,
     [string]$VisionRepo = "",
     [string]$VisionGpuLayers = "0",
+    [switch]$NoEmbed,
+    [string]$EmbedRepo = "",
+    [string]$EmbedGpuLayers = "0",
     [switch]$KeepServers,
     [switch]$KeepExistingTelegram,
     [switch]$NoProactive,
@@ -52,6 +55,7 @@ function Read-ProtoAgiDotEnv {
 
 $DotEnv = Read-ProtoAgiDotEnv (Join-Path $Root ".env")
 $VisionPort = $null
+$EmbedPort = $null
 
 function Test-ProtoAgiServer {
     try {
@@ -148,6 +152,26 @@ if (-not $NoVision) {
     }
 }
 
+if (-not $NoEmbed) {
+    $EmbedModel = [string]($DotEnv["PROTOAGI_EMBED_MODEL"])
+    $EmbedBaseUrl = [string]($DotEnv["PROTOAGI_EMBED_BASE_URL"])
+    if (-not [string]::IsNullOrWhiteSpace($EmbedModel) -and $EmbedBaseUrl -match "^https?://(127\.0\.0\.1|localhost):(?<port>\d+)(/|$)") {
+        $EmbedPort = [int]$Matches["port"]
+        $ResolvedEmbedRepo = $EmbedRepo
+        if ([string]::IsNullOrWhiteSpace($ResolvedEmbedRepo)) {
+            $ResolvedEmbedRepo = [string]($DotEnv["PROTOAGI_EMBED_HF_REPO"])
+        }
+        if ([string]::IsNullOrWhiteSpace($ResolvedEmbedRepo)) {
+            $ResolvedEmbedRepo = "CompendiumLabs/bge-m3-gguf:Q4_K_M"
+        }
+        & (Join-Path $PSScriptRoot "start-embed-server.ps1") `
+            -HfRepo $ResolvedEmbedRepo `
+            -Alias $EmbedModel `
+            -Port $EmbedPort `
+            -GpuLayers $EmbedGpuLayers
+    }
+}
+
 if (-not $KeepExistingTelegram -and -not $Once) {
     & (Join-Path $PSScriptRoot "stop-nikola.ps1") -Quiet
 }
@@ -183,6 +207,9 @@ if ($DropPendingUpdates) {
         $PortsToStop = @($Port)
         if ($VisionPort) {
             $PortsToStop += $VisionPort
+        }
+        if ($EmbedPort) {
+            $PortsToStop += $EmbedPort
         }
         Write-Host "Stopping local llama-server processes..."
         & (Join-Path $PSScriptRoot "stop-server.ps1") -Port $PortsToStop -Quiet

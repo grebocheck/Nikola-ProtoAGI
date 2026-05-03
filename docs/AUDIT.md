@@ -2,6 +2,9 @@
 
 Last audit: 2026-05-03
 
+For the forward-looking plan and prioritized backlog, see
+[ROADMAP.md](ROADMAP.md).
+
 ## Current Shape
 
 ProtoAGI has four main layers:
@@ -14,6 +17,78 @@ ProtoAGI has four main layers:
 The repository is now arranged so source code and documentation can be pushed to
 git without committing local model files, downloaded runtimes, logs, databases,
 or secrets.
+
+## 2026-05-03 phase 4 (P0 backlog cleared)
+
+- Embedding llama-server is part of the stack:
+  [scripts/start-embed-server.ps1](../scripts/start-embed-server.ps1)
+  serves `bge-m3-Q4_K_M` in `--embedding` mode on port 8082.
+  [scripts/start-nikola-stack.ps1](../scripts/start-nikola-stack.ps1)
+  launches and tears it down alongside the chat / vision servers.
+  ``.env.example`` documents `PROTOAGI_EMBED_HF_REPO`.
+- ``NikolaBot.run_reflection_pass`` now prunes low-value items in the
+  global and active-persona scopes after consolidation. Counters
+  ``pruned_global`` / ``pruned_persona`` are surfaced.
+- Admin dashboard supports inline curation: ``set_pinned`` and
+  ``update_memory`` in [memory.py](../src/protoagi/memory.py); endpoints
+  ``POST /api/memories/<id>/pin`` and ``POST /api/memories/<id>/edit``.
+  The HTML view ships save / pin / delete buttons with a small JS shim.
+- [scripts/eval-memory.ps1](../scripts/eval-memory.ps1) runs the eval
+  harness, writes a timestamped report to ``runs/``, and compares
+  against [runs/memory-eval-baseline.json](../runs/memory-eval-baseline.json).
+  Recall@k drops > 5 pp fail the script.
+- Schema fix: FTS5 is now self-contained (no ``content='memory_items'``)
+  so ``update_memory`` can DELETE/INSERT rows with plain SQL. Existing
+  experiment DBs keep their old FTS table; fresh checkouts use the new
+  one.
+
+Test count: 99 → 107.
+
+## 2026-05-03 phase 3 (operations & evaluation)
+
+- ``MemoryService.prune`` forgets low-value items by score
+  (``0.5*importance + 0.3*recency + 0.2*access``) with a configurable
+  threshold and a default 30-day grace window. Pinned items, items in
+  ``protect_kinds`` (defaults to ``persona_self``), and superseded rows are
+  skipped.
+- Reminders are first-class in the decision payload now: ``Decision`` and
+  ``InitiativeDecision`` carry a ``reminders`` list, the JSON schemas advertise
+  it, and ``NikolaBot._persist_reminder_requests`` persists them with
+  ``trigger_at`` resolution from either ``in_minutes`` or an explicit ISO
+  timestamp. The bot's existing dispatcher delivers them at the next worker
+  tick.
+- Memory recall harness in ``protoagi.memory_eval``: a JSON corpus
+  (``config/memory_eval/golden.json``), a ``protoagi memory-eval`` CLI that
+  reports recall@k and MRR, and ``--with-embeddings`` to include the cosine
+  index. The bundled corpus surfaces the FTS-only blind spot for synonyms
+  (characters / phrases) without the embedding layer.
+- Operational CLIs: ``protoagi memory-stats``, ``memory-prune``,
+  ``memory-consolidate``, and ``admin`` (a tiny stdlib ``http.server``
+  dashboard with HTML view and JSON endpoints for stats, memories,
+  reminders, chats, plus POSTable delete / prune / consolidate actions).
+
+## 2026-05-03 phase 2 (autonomy)
+
+- Constrained JSON output: ``OpenAICompatibleClient.chat_completion`` now
+  forwards ``response_format`` to llama-server, and the Telegram decision
+  / initiative paths pass JSON schemas (``DECISION_JSON_SCHEMA``,
+  ``INITIATIVE_JSON_SCHEMA``) so the model emits well-formed JSON instead
+  of relying on best-effort regex extraction.
+- Streaming: ``OpenAICompatibleClient.chat_completion_stream`` parses
+  ``text/event-stream`` deltas. ``protoagi chat --prompt ... --stream``
+  prints chunks live for quick sanity checks.
+- Reminder dispatcher: ``NikolaBot.dispatch_due_reminders`` delivers
+  pending reminders into Telegram chats, marking unrecoverable rows as
+  ``cancelled``. The ``remind_me`` tool can now actually surface its
+  output.
+- Reflection loop: every ~6 hours ``NikolaBot.run_reflection_pass``
+  consolidates near-duplicate memories and (when ``fictional_self`` is
+  enabled) asks the model for one or two short first-person reflections
+  that are stored as ``persona_self`` memories.
+- ``BotRunner`` runs polling on the main thread and a worker thread for
+  initiative / reminders / reflection, so a just-due reminder fires within
+  ~1 s instead of blocking on the long-poll. ``--single-thread`` keeps the
+  legacy behavior for debugging.
 
 ## 2026-05-03 modernization
 

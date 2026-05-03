@@ -26,6 +26,7 @@ class Decision:
     replies: list[str] = field(default_factory=list)
     reply_to: str | int | None = None
     stickers: list[dict[str, str]] = field(default_factory=list)
+    reminders: list[dict[str, Any]] = field(default_factory=list)
     next_check_minutes: int | None = None
 
 
@@ -37,6 +38,7 @@ class InitiativeDecision:
     next_check_minutes: int
     self_memories: list[str] = field(default_factory=list)
     stickers: list[dict[str, str]] = field(default_factory=list)
+    reminders: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -56,6 +58,88 @@ class StickerAttachment:
 
 
 _MAX_PARSE_SIZE = 64_000
+
+
+_STICKER_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "pack": {"type": "string"},
+        "emoji": {"type": "string"},
+        "reason": {"type": "string"},
+    },
+    "required": ["pack"],
+    "additionalProperties": False,
+}
+
+
+_REMINDER_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "text": {"type": "string"},
+        "in_minutes": {
+            "anyOf": [{"type": "null"}, {"type": "integer", "minimum": 1}]
+        },
+        "trigger_at": {"anyOf": [{"type": "null"}, {"type": "string"}]},
+    },
+    "required": ["text"],
+    "additionalProperties": False,
+}
+
+
+DECISION_JSON_SCHEMA: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "telegram_decision",
+        "strict": False,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "should_reply": {"type": "boolean"},
+                "reply": {"type": "string"},
+                "replies": {"type": "array", "items": {"type": "string"}},
+                "reply_to": {
+                    "anyOf": [
+                        {"type": "null"},
+                        {"type": "string"},
+                        {"type": "integer"},
+                    ]
+                },
+                "stickers": {"type": "array", "items": _STICKER_ITEM_SCHEMA},
+                "memories": {"type": "array", "items": {"type": "string"}},
+                "self_memories": {"type": "array", "items": {"type": "string"}},
+                "reminders": {"type": "array", "items": _REMINDER_ITEM_SCHEMA},
+                "next_check_minutes": {
+                    "anyOf": [{"type": "null"}, {"type": "integer"}]
+                },
+            },
+            "required": ["should_reply"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+INITIATIVE_JSON_SCHEMA: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "telegram_initiative",
+        "strict": False,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "send": {"type": "boolean"},
+                "message": {"type": "string"},
+                "stickers": {"type": "array", "items": _STICKER_ITEM_SCHEMA},
+                "memories": {"type": "array", "items": {"type": "string"}},
+                "self_memories": {"type": "array", "items": {"type": "string"}},
+                "reminders": {"type": "array", "items": _REMINDER_ITEM_SCHEMA},
+                "next_check_minutes": {"type": "integer"},
+            },
+            "required": ["send"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
@@ -94,6 +178,7 @@ def decision_from_payload(payload: dict[str, Any]) -> Decision:
         replies=normalize_reply_messages(payload.get("replies", [])),
         reply_to=normalize_reply_to(payload.get("reply_to")),
         stickers=normalize_sticker_choices(payload.get("stickers", [])),
+        reminders=normalize_reminder_requests(payload.get("reminders", [])),
         next_check_minutes=_optional_int(payload.get("next_check_minutes")),
     )
 
@@ -106,7 +191,40 @@ def initiative_from_payload(payload: dict[str, Any]) -> InitiativeDecision:
         self_memories=[str(item).strip() for item in payload.get("self_memories", []) if str(item).strip()],
         next_check_minutes=max(30, _optional_int(payload.get("next_check_minutes")) or 360),
         stickers=normalize_sticker_choices(payload.get("stickers", [])),
+        reminders=normalize_reminder_requests(payload.get("reminders", [])),
     )
+
+
+def normalize_reminder_requests(value: Any) -> list[dict[str, Any]]:
+    """Coerce reminder requests from the model into well-typed dicts."""
+
+    if isinstance(value, dict):
+        items = [value]
+    elif isinstance(value, list):
+        items = value
+    else:
+        return []
+    requests: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        normalized: dict[str, Any] = {"text": text}
+        in_minutes = _optional_int(item.get("in_minutes"))
+        if in_minutes is not None and in_minutes > 0:
+            normalized["in_minutes"] = in_minutes
+        trigger_at = item.get("trigger_at")
+        if isinstance(trigger_at, str) and trigger_at.strip():
+            normalized["trigger_at"] = trigger_at.strip()
+        if "in_minutes" not in normalized and "trigger_at" not in normalized:
+            # Default to one hour ahead so the model's intent isn't lost.
+            normalized["in_minutes"] = 60
+        requests.append(normalized)
+        if len(requests) >= 5:
+            break
+    return requests
 
 
 def normalize_reply_to(value: Any) -> str | int | None:
@@ -200,7 +318,9 @@ def _optional_int(value: Any) -> int | None:
 
 
 __all__ = [
+    "DECISION_JSON_SCHEMA",
     "Decision",
+    "INITIATIVE_JSON_SCHEMA",
     "ImageAttachment",
     "InitiativeDecision",
     "StickerAttachment",
@@ -209,6 +329,7 @@ __all__ = [
     "extract_json_object",
     "image_to_payload",
     "initiative_from_payload",
+    "normalize_reminder_requests",
     "normalize_reply_messages",
     "normalize_reply_to",
     "normalize_sticker_choices",

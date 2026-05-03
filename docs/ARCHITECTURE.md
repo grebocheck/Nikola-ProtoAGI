@@ -80,9 +80,15 @@ long-lived connection. The schema is typed:
 
 `MemoryService` is the high-level facade: it scores importance heuristically,
 performs hybrid recall (FTS + cosine + recency + importance + pinned bonus),
-and exposes a heuristic consolidation pass that supersedes near-duplicate
-items. Embeddings are optional; when no embedding endpoint is configured,
-recall falls back to FTS only.
+exposes a heuristic consolidation pass that supersedes near-duplicate
+items, and a ``prune()`` pass that forgets low-value items by a blended
+``importance × recency × access`` score. Embeddings are optional; when no
+embedding endpoint is configured, recall falls back to FTS only.
+
+A small evaluation harness lives in ``protoagi.memory_eval``: it loads a
+JSON corpus (``config/memory_eval/golden.json`` by default), plays probe
+queries through ``MemoryService.recall``, and reports recall@k and MRR.
+``protoagi memory-eval [--with-embeddings]`` runs it end-to-end.
 
 ## 6. Evaluation
 
@@ -107,11 +113,17 @@ old monolith into focused units:
 
 - `api.py` — Telegram Bot API transport
 - `config.py` — env-loaded configuration
-- `text.py` / `json_io.py` — text and decision payload helpers
+- `text.py` / `json_io.py` — text and decision payload helpers (with
+  `DECISION_JSON_SCHEMA` / `INITIATIVE_JSON_SCHEMA` forwarded to the model
+  as `response_format` so decisions arrive as well-formed JSON)
 - `stickers.py` / `vision.py` / `identity.py` — narrow concerns extracted
   for testing and iteration
 - `prompts.py` — system prompt templates
-- `bot.py` — `NikolaBot` orchestration
+- `bot.py` — `NikolaBot` orchestration with `dispatch_due_reminders` and
+  `run_reflection_pass` hooks
+- `runner.py` — `BotRunner` runs the long-poll on the main thread and a
+  worker thread for initiative, reminder dispatch, and reflection so a
+  just-due reminder fires within ~1 s
 
 `protoagi.telegram_bot` remains a thin compatibility shim re-exporting the
 public surface so existing imports keep working.

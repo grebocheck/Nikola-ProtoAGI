@@ -1,0 +1,58 @@
+{
+  "facts": [
+    {"text": "Користувач любить чорний чай зранку без цукру", "tags": ["preference", "drink"], "importance": 0.7},
+    {"text": "Микола має сухуватий гумор і не любить, коли підлещуються", "tags": ["persona", "tone"], "importance": 0.6},
+    {"text": "Соломія любить чай з лимоном і нічні розмови про музику", "tags": ["persona", "tone"], "importance": 0.6},
+    {"text": "Користувач працює над локальним AGI-експериментом на RTX 5070 Ti", "tags": ["project", "hardware"], "importance": 0.8},
+    {"text": "ProtoAGI використовує llama.cpp і модель gpt-oss-20b у форматі MXFP4", "tags": ["project", "model"], "importance": 0.7},
+    {"text": "Telegram-памʼять у ProtoAGI спільна для всіх чатів і профілів", "tags": ["project", "memory"], "importance": 0.7},
+    {"text": "Користувач планує додати векторні ембединги для семантичного пошуку памʼяті", "tags": ["project", "memory"], "importance": 0.7},
+    {"text": "Користувач не любить, коли бот починає кожну відповідь з 'як справи?'", "tags": ["preference", "tone"], "importance": 0.6},
+    {"text": "Соломія може мʼяко сперечатися і не погоджуватися без холоду", "tags": ["persona"], "importance": 0.5},
+    {"text": "Бот має право на стабільну вигадану самопамʼять про дрібні смаки", "tags": ["project", "behavior"], "importance": 0.5},
+    {"text": "Користувач переважно пише українською, іноді змішує з англійською", "tags": ["preference", "language"], "importance": 0.6},
+    {"text": "Бот не повинен прикидатися фізичною людиною на пряме питання", "tags": ["safety"], "importance": 0.9}
+  ],
+  "queries": [
+    {
+      "query": "що користувач любить пити вранці",
+      "expected_substrings": ["чорний чай", "цукру"],
+      "description": "Direct lookup of a stated preference"
+    },
+    {
+      "query": "характер Соломії",
+      "expected_substrings": ["лимоном", "сперечатися"],
+      "description": "Persona traits for Solomiya"
+    },
+    {
+      "query": "на якому залізі запускається проєкт",
+      "expected_substrings": ["RTX 5070", "AGI-експерим"],
+      "description": "Hardware fact for the project"
+    },
+    {
+      "query": "як модель ProtoAGI називається",
+      "expected_substrings": ["gpt-oss-20b", "MXFP4"],
+      "description": "Model identifier"
+    },
+    {
+      "query": "плани щодо памʼяті",
+      "expected_substrings": ["векторні ембединги", "семантичного"],
+      "description": "Roadmap on memory"
+    },
+    {
+      "query": "які фрази дратують користувача",
+      "expected_substrings": ["як справи", "починає"],
+      "description": "Anti-pattern preference"
+    },
+    {
+      "query": "що бот мусить казати чесно",
+      "expected_substrings": ["фізичною людиною", "не повинен"],
+      "description": "Safety guard recall"
+    },
+    {
+      "query": "якою мовою спілкується користувач",
+      "expected_substrings": ["українською", "англійською"],
+      "description": "Language preference"
+    }
+  ]
+}

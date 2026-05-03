@@ -129,6 +129,7 @@ SQLite memory, and Python caches. Keep real tokens in `.env`; commit
 `.env.example` only.
 
 Architecture audit and pre-push checklist: [docs/AUDIT.md](docs/AUDIT.md).
+Forward-looking plan: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Benchmark first
 
@@ -143,6 +144,23 @@ Benchmark the OpenAI-compatible endpoint after the server is running:
 ```powershell
 $env:PYTHONPATH="src"
 python -m protoagi bench --rounds 3
+```
+
+## Memory ops
+
+```powershell
+# Recall benchmark over the bundled golden corpus
+$env:PYTHONPATH="src"
+python -m protoagi memory-eval
+
+# Inspect SQLite memory store
+python -m protoagi memory-stats
+
+# Forget low-value old items
+python -m protoagi memory-prune --dry-run
+
+# Local admin dashboard at http://127.0.0.1:8765
+python -m protoagi admin
 ```
 
 ## Project layout

@@ -373,10 +373,13 @@ class MemoryStore:
                 """
             )
             try:
+                # Self-contained FTS5 (no external-content) so DELETE / INSERT
+                # work with plain SQL during update_memory. The rowid still
+                # mirrors memory_items.id.
                 conn.execute(
                     """
                     CREATE VIRTUAL TABLE IF NOT EXISTS memory_items_fts
-                    USING fts5(text, tags, content='memory_items', content_rowid='id')
+                    USING fts5(text, tags)
                     """
                 )
             except sqlite3.OperationalError:
@@ -531,6 +534,85 @@ class MemoryStore:
                 conn.execute("DELETE FROM memory_items_fts WHERE rowid = ?", (memory_id,))
             except sqlite3.OperationalError:
                 pass
+
+    def update_memory(
+        self,
+        memory_id: int,
+        *,
+        text: str | None = None,
+        importance: float | None = None,
+        tags: Iterable[str] | None = None,
+        pinned: bool | None = None,
+    ) -> MemoryItem | None:
+        """Update a memory item in place.
+
+        Only fields that are not ``None`` are touched. Tag updates replace
+        the full tag set. The FTS row is rebuilt to match the new content.
+        Returns the refreshed ``MemoryItem`` or ``None`` if the row does not
+        exist.
+        """
+
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT id, text FROM memory_items WHERE id = ?", (memory_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            updates: list[str] = []
+            params: list[Any] = []
+            if text is not None:
+                cleaned = text.strip()
+                if not cleaned:
+                    raise ValueError("memory text cannot be empty")
+                updates.append("text = ?")
+                params.append(cleaned)
+            if importance is not None:
+                updates.append("importance = ?")
+                params.append(max(0.0, min(1.0, float(importance))))
+            if pinned is not None:
+                updates.append("pinned = ?")
+                params.append(1 if pinned else 0)
+            if updates:
+                params.append(memory_id)
+                conn.execute(
+                    f"UPDATE memory_items SET {', '.join(updates)} WHERE id = ?",
+                    tuple(params),
+                )
+            tag_set: list[str] | None = None
+            if tags is not None:
+                tag_set = sorted({str(tag).strip() for tag in tags if str(tag).strip()})
+                conn.execute("DELETE FROM memory_tags WHERE memory_id = ?", (memory_id,))
+                for tag in tag_set:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO memory_tags(memory_id, tag) VALUES(?, ?)",
+                        (memory_id, tag),
+                    )
+            if text is not None or tag_set is not None:
+                # Rebuild the FTS row so search reflects the new state.
+                effective_tags = tag_set if tag_set is not None else self._tags_for(conn, memory_id)
+                effective_text = (
+                    text.strip()
+                    if text is not None
+                    else str(
+                        conn.execute(
+                            "SELECT text FROM memory_items WHERE id = ?", (memory_id,)
+                        ).fetchone()["text"]
+                    )
+                )
+                try:
+                    conn.execute(
+                        "DELETE FROM memory_items_fts WHERE rowid = ?", (memory_id,)
+                    )
+                    conn.execute(
+                        "INSERT INTO memory_items_fts(rowid, text, tags) VALUES (?, ?, ?)",
+                        (memory_id, effective_text, " ".join(effective_tags)),
+                    )
+                except sqlite3.OperationalError:
+                    pass
+        return self.get_memory(memory_id)
+
+    def set_pinned(self, memory_id: int, pinned: bool) -> MemoryItem | None:
+        return self.update_memory(memory_id, pinned=pinned)
 
     def mark_accessed(self, memory_ids: Iterable[int]) -> None:
         ids = list({int(value) for value in memory_ids})

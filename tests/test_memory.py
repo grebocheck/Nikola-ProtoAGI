@@ -73,6 +73,39 @@ class MemoryStoreTests(unittest.TestCase):
                 [(10, "hello"), (11, "hi")],
             )
 
+    def test_update_memory_replaces_text_and_tags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            rowid = memory.remember("first version", ["tag-a"])
+            updated = memory.update_memory(rowid, text="second version", tags=["tag-b"])
+            assert updated is not None
+            self.assertEqual(updated.text, "second version")
+            self.assertEqual(updated.tags, ["tag-b"])
+            hits = memory.search("second", limit=3)
+            self.assertEqual([hit.id for hit in hits], [rowid])
+            stale = memory.search("first", limit=3)
+            self.assertEqual(stale, [])
+
+    def test_set_pinned_toggles_score_eligibility(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            rowid = memory.remember("anchor fact", ["pinme"])
+            memory.set_pinned(rowid, True)
+            item = memory.get_memory(rowid)
+            assert item is not None
+            self.assertTrue(item.pinned)
+            memory.set_pinned(rowid, False)
+            item = memory.get_memory(rowid)
+            assert item is not None
+            self.assertFalse(item.pinned)
+
+    def test_update_memory_rejects_empty_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            rowid = memory.remember("non-empty", [])
+            with self.assertRaises(ValueError):
+                memory.update_memory(rowid, text="   ")
+
     def test_recent_telegram_messages_can_filter_persona(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             memory = MemoryStore(Path(tmp) / "memory.sqlite3")

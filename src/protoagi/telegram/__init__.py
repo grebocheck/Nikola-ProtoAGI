@@ -9,6 +9,7 @@ changes.
 from .api import TELEGRAM_API_ROOT, TELEGRAM_MAX_MESSAGE_CHARS, TelegramApi, TelegramApiError, is_telegram_polling_conflict
 from .bot import NikolaBot, build_nikola_bot
 from .config import TelegramConfig
+from .runner import BotRunner
 from .constants import (
     OFFSET_KEY,
     TELEGRAM_CHAT_THREAD_PREFIX,
@@ -25,7 +26,9 @@ from .identity import (
     is_image_blind_reply,
 )
 from .json_io import (
+    DECISION_JSON_SCHEMA,
     Decision,
+    INITIATIVE_JSON_SCHEMA,
     ImageAttachment,
     InitiativeDecision,
     StickerAttachment,
@@ -34,6 +37,7 @@ from .json_io import (
     extract_json_object,
     image_to_payload,
     initiative_from_payload,
+    normalize_reminder_requests,
     normalize_reply_messages,
     normalize_reply_to,
     normalize_sticker_choices,
@@ -66,12 +70,15 @@ from .vision import (
 
 __all__ = [
     "ASSISTANTY_SENTENCE_RE",
+    "BotRunner",
     "DECEPTIVE_IDENTITY_REPLY_RE",
+    "DECISION_JSON_SCHEMA",
     "Decision",
     "GENERIC_CHECKIN_RE",
     "GENERIC_STICKER_FILLER_RE",
     "IDENTITY_QUESTION_RE",
     "IMAGE_BLIND_REPLY_RE",
+    "INITIATIVE_JSON_SCHEMA",
     "ImageAttachment",
     "InitiativeDecision",
     "NikolaBot",
@@ -105,6 +112,7 @@ __all__ = [
     "is_image_blind_reply",
     "is_telegram_polling_conflict",
     "looks_serious_for_sticker",
+    "normalize_reminder_requests",
     "normalize_reply_messages",
     "normalize_reply_to",
     "normalize_sticker_choices",

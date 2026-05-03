@@ -313,6 +313,84 @@ class MemoryService:
         return merges
 
     # ------------------------------------------------------------------
+    # Pruning
+
+    def prune(
+        self,
+        *,
+        scope: str | None = None,
+        persona_key: str | None = None,
+        chat_id: str | None = None,
+        max_items: int = 1000,
+        keep_newer_than_days: float = 30.0,
+        score_threshold: float = 0.12,
+        protect_kinds: tuple[str, ...] = (KIND_PERSONA_SELF,),
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        """Forget low-value memory items.
+
+        Each candidate gets a ``score = 0.5*importance + 0.3*recency +
+        0.2*access`` (recency uses the same 90-day half-life as recall;
+        access is normalized via ``log(1+count)``). Items below
+        ``score_threshold`` are deleted. Pinned items, items in
+        ``protect_kinds``, items younger than ``keep_newer_than_days``, and
+        items already superseded are skipped.
+
+        ``dry_run`` returns the same counters without touching the database.
+        """
+
+        items = self.store.list_memories(
+            scope=scope,
+            persona_key=persona_key,
+            chat_id=chat_id,
+            limit=max_items,
+            include_superseded=True,
+        )
+        deleted = 0
+        skipped_protected = 0
+        skipped_recent = 0
+        skipped_pinned = 0
+        kept = 0
+        now = datetime.now(timezone.utc)
+        for item in items:
+            if item.superseded_by is not None:
+                continue
+            if item.pinned:
+                skipped_pinned += 1
+                continue
+            if item.kind in protect_kinds:
+                skipped_protected += 1
+                continue
+            try:
+                created = datetime.fromisoformat(item.created_at)
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+            except ValueError:
+                created = now
+            age_days = max(0.0, (now - created).total_seconds() / 86400.0)
+            if age_days < keep_newer_than_days:
+                skipped_recent += 1
+                continue
+            recency = math.exp(-age_days / 90.0)
+            access = math.log(1 + item.access_count) / 4.0  # ~1.0 at 50 accesses
+            score = 0.5 * item.importance + 0.3 * recency + 0.2 * min(access, 1.0)
+            if score < score_threshold:
+                if not dry_run:
+                    self.store.delete_memory(item.id)
+                    if self.embedding_index is not None:
+                        self.embedding_index.remove(item.id)
+                deleted += 1
+            else:
+                kept += 1
+        return {
+            "deleted": deleted,
+            "kept": kept,
+            "skipped_pinned": skipped_pinned,
+            "skipped_protected": skipped_protected,
+            "skipped_recent": skipped_recent,
+        }
+
+    # ------------------------------------------------------------------
     # Importance heuristic
 
     def score_importance(self, text: str, *, kind: str = KIND_FACT) -> float:
