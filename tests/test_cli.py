@@ -2,9 +2,16 @@ import unittest
 import tempfile
 import contextlib
 import io
+import json
 from pathlib import Path
+from unittest.mock import patch
 
-from protoagi.cli import build_parser, classify_tool_response_message, main
+from protoagi.cli import (
+    _tool_canonical_hint,
+    build_parser,
+    classify_tool_response_message,
+    main,
+)
 from protoagi.memory import SCOPE_GLOBAL, SCOPE_USER, MemoryStore
 
 
@@ -47,6 +54,59 @@ class CliParserTests(unittest.TestCase):
             "both",
         )
         self.assertEqual(classify_tool_response_message({"content": "{}"}), "neither")
+
+    def test_canonical_hint_picks_dominant_path(self) -> None:
+        self.assertEqual(
+            _tool_canonical_hint({"tool_calls": 5, "tool_request": 1, "both": 0, "neither": 0}),
+            "tool_calls",
+        )
+        self.assertEqual(
+            _tool_canonical_hint({"tool_calls": 0, "tool_request": 4, "both": 1, "neither": 0}),
+            "tool_request",
+        )
+        self.assertEqual(
+            _tool_canonical_hint({"tool_calls": 0, "tool_request": 0, "both": 0, "neither": 3}),
+            "unverified",
+        )
+
+    def test_bench_tools_writes_report_to_output(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def chat_completion(self, messages, **kwargs):
+                self.calls += 1
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '{"tool_request": {"name": "recall", "arguments": {}}}',
+                            }
+                        }
+                    ]
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "bench-tools-baseline.json"
+            with patch("protoagi.cli.OpenAICompatibleClient", return_value=FakeClient()):
+                with contextlib.redirect_stdout(io.StringIO()) as buffer:
+                    self.assertEqual(
+                        main(
+                            [
+                                "bench-tools",
+                                "--rounds",
+                                "2",
+                                "--summary",
+                                "--output",
+                                str(output),
+                            ]
+                        ),
+                        0,
+                    )
+            report = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(report["counts"]["tool_request"], 2)
+            self.assertEqual(report["canonical_path_hint"], "tool_request")
+            self.assertIn("rounds=2", buffer.getvalue())
 
     def test_memory_rescope_cli_migrates_legacy_global_user_rows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

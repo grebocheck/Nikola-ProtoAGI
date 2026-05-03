@@ -101,6 +101,31 @@ Test count: 116 → 121.
 
 Test count: 107 → 116.
 
+## 2026-05-03 phase 10 (operational gates)
+
+- ``protoagi bench-tools`` learned ``--output`` and ``--summary`` so a
+  regression gate can persist the JSON report and print a one-line
+  CI-friendly summary. The CLI module also gained
+  ``_tool_canonical_hint`` unit tests.
+- New portable comparator
+  [scripts/check_baseline.py](../scripts/check_baseline.py) replaces the
+  Windows-only PowerShell gate logic. Two sub-commands:
+  ``memory-eval`` (recall@k drift) and ``bench-tools``
+  (canonical-path drift + ``neither`` rate). Pure stdlib, runs on Linux
+  CI without PowerShell.
+- [scripts/bench-tools.ps1](../scripts/bench-tools.ps1) is a Windows
+  wrapper around the new gate with ``-UpdateBaseline`` to refresh the
+  local baseline.
+- [runs/bench-tools-baseline.json](../runs/bench-tools-baseline.json)
+  ships as ``status: "unverified"``; the comparator prints a friendly
+  capture-instructions message until a real run replaces it.
+- [.github/workflows/ci.yml](../.github/workflows/ci.yml) runs unit
+  tests on ``ubuntu-latest`` + ``windows-latest``, the
+  ``memory-eval`` gate on Linux, and the bench-tools placeholder gate.
+  Reports upload as 14-day artefacts.
+
+Test count: 138 → 145.
+
 ## 2026-05-03 phase 4 (P0 backlog cleared)
 
 - Embedding llama-server is part of the stack:

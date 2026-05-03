@@ -77,6 +77,16 @@ def build_parser() -> argparse.ArgumentParser:
     bench_tools.add_argument("--max-tokens", type=int, default=512)
     bench_tools.add_argument("--base-url", default=None)
     bench_tools.add_argument("--model", default=None)
+    bench_tools.add_argument(
+        "--output",
+        default=None,
+        help="Write the full JSON report to this path (default: stdout only).",
+    )
+    bench_tools.add_argument(
+        "--summary",
+        action="store_true",
+        help="Print only a one-line summary to stdout; useful with --output.",
+    )
 
     llama_bench = sub.add_parser("bench-llama", help="Run llama-bench against the local GGUF")
     add_server_args(llama_bench)
@@ -386,18 +396,32 @@ def cmd_bench_tools(args: argparse.Namespace) -> int:
                 "content_preview": str(message.get("content") or "")[:500],
             }
         )
-    print(
-        json.dumps(
-            {
-                "rounds": rounds,
-                "counts": counts,
-                "canonical_path_hint": _tool_canonical_hint(counts),
-                "results": results,
-            },
-            ensure_ascii=False,
-            indent=2,
+    canonical = _tool_canonical_hint(counts)
+    report = {
+        "rounds": rounds,
+        "model": config.model,
+        "base_url": config.base_url,
+        "prompt": str(args.prompt),
+        "counts": counts,
+        "canonical_path_hint": canonical,
+        "results": results,
+    }
+    if args.output:
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2),
+            encoding="utf-8",
         )
-    )
+        print(f"wrote {output_path}")
+    if args.summary:
+        print(
+            f"rounds={rounds} canonical={canonical} "
+            f"tool_calls={counts['tool_calls']} tool_request={counts['tool_request']} "
+            f"both={counts['both']} neither={counts['neither']}"
+        )
+    elif not args.output:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
 
 

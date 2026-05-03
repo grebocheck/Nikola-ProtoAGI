@@ -119,6 +119,59 @@ Test count: 107 → 116.
 
 Test count: 116 → 121.
 
+### Phase 8 — A-cohort + remaining P3 finished (2026-05-03)
+
+The agent worked through the entire follow-up backlog. Nothing in the
+A1–A8 list and nothing in the original P3 list is still open.
+
+**Bug-fix cohort (A1–A8):**
+
+- **A1 — privacy rescope.** ``protoagi memory-rescope --to user`` walks
+  ``user:<id>``/``source_chat:<id>`` tags and reassigns ``scope`` /
+  ``user_id`` so legacy global rows survive a flag flip. Tested.
+- **A2 — tool-augmented latency.** ``NikolaBot._inline_tool_decision``
+  formats a single ``recall`` hit directly into the reply and skips the
+  merge LLM call. Multi-event paths still use the merge.
+- **A3 — `tools` + `response_format` measurement.**
+  ``protoagi bench-tools`` issues a recall-friendly prompt and reports
+  the tool-channel mix (``tool_calls`` vs ``tool_request`` vs no-call)
+  so we can decide whether to drop a branch.
+- **A4 — orphan media cleanup.** ``MemoryStore.prune_orphan_media`` runs
+  alongside the reflection prune step; unlinked media older than the
+  retention window is removed.
+- **A5 — DNS rebinding.** ``_prepare_public_url`` validates DNS once,
+  captures family/socktype/sockaddr, and ``_fetch_public_url`` connects
+  through a raw socket without a second resolution. ``ssl.wrap_socket``
+  honors SNI from the parsed hostname.
+- **A6 — async transient retry.** ``AsyncBotRunner.poll_once`` advances
+  the offset only past the contiguous prefix of successful update_ids
+  that precede the lowest failed id, so Telegram replays the failure on
+  the next poll.
+- **A7 — importance cache eviction.** Scores moved out of ``kv`` into a
+  dedicated ``importance_cache`` table; ``MemoryStore.importance_cache_count``
+  exposes counts; the reflection pass evicts old entries.
+- **A8 — embedding cache LRU.** ``EmbeddingClient._cache`` is now an
+  ``OrderedDict`` with ``move_to_end`` on hit; insertion-order eviction
+  was the previous semantics.
+
+**Remaining P3 items shipped:**
+
+- **#15 self-tuning style.** ``protoagi.telegram.style.ReplyStyleTuner``
+  is a UCB-style bandit over three arms (``concise / balanced /
+  expressive``) with engagement signals (reply, reaction, edit) within
+  a 6-hour feedback window. State lives in ``kv`` so existing DBs work.
+- **#16 memory federation.** ``protoagi memory-export`` /
+  ``memory-import`` exchange a signed JSON bundle (HMAC-SHA256) with
+  per-item ``federation_id`` to make repeated imports idempotent.
+- **#17 memory graph viz.** Admin dashboard renders a small
+  force-directed graph of supersession chains and tag clusters via a
+  canvas + ``/api/memory-graph`` endpoint, no external libraries.
+- **#18 voice.** ``VoiceTranscriber`` and ``VoiceSynthesizer`` wrap
+  OpenAI-compatible ``/audio/transcriptions`` and ``/audio/speech`` with
+  a hand-rolled multipart form encoder; both are opt-in via env config.
+
+Test count: 121 → 138.
+
 ### Phase 7 — follow-up audit cleanup (2026-05-03)
 Tightened a few things uncovered by re-reading P1+P2 work:
 
@@ -177,6 +230,37 @@ Closed the A1–A8 follow-up cohort:
   `importance_cache` with pruning and admin row-count stats.
 - **A8** replaced FIFO embedding cache eviction with true LRU via
   `OrderedDict`.
+
+### Phase 10 — operational gates (2026-05-03)
+Operationalized two pieces of the just-completed work so regressions stop
+being silent.
+
+- **B2 — bench-tools regression gate.** ``protoagi bench-tools`` gained
+  ``--output <path>`` (writes the full JSON report) and ``--summary``
+  (prints a one-line stdout summary). A new portable comparator
+  ``scripts/check_baseline.py`` drives both ``memory-eval`` and
+  ``bench-tools`` gates; ``scripts/bench-tools.ps1`` is a Windows-friendly
+  wrapper with ``-UpdateBaseline``. The shipped baseline at
+  [runs/bench-tools-baseline.json](../runs/bench-tools-baseline.json) is
+  ``status: "unverified"`` — the gate warns but does not fail until a
+  human captures one against the production model. Branch-drop decision
+  is therefore queued (sub-item B2a) until that capture happens.
+- **B5 — CI pipeline.** ``.github/workflows/ci.yml`` runs unit tests on
+  Linux + Windows runners, then a Linux-only ``memory-eval`` gate
+  followed by a placeholder ``bench-tools`` gate. Reports are uploaded
+  as 14-day artefacts.
+
+Test count: 138 → 145.
+
+Open follow-up (kept here intentionally because it depends on a real
+model run that CI cannot do):
+
+- **B2a — capture and pin.** After a maintainer runs
+  ``scripts/bench-tools.ps1 -UpdateBaseline -Rounds 10``, decide which
+  branch (``tool_calls`` vs ``tool_request``) wins, drop the loser from
+  ``decision_system_prompt`` and ``Decision.tool_request`` /
+  ``decision_from_payload``, and add a Decision-log entry recording the
+  chosen path.
 
 ### Phase 9 — P3 research baselines (2026-05-03)
 Turned each P3 research direction into a dependency-free first working layer:
@@ -400,6 +484,153 @@ verifies the repeated text is preserved.
 
 ---
 
+### B-cohort — forward plan after Phase 9 (2026-05-03 follow-up audit)
+
+The four phases above closed every original backlog item. A re-read of the
+P3 baselines and Phase 8 fixes surfaced a fresh set of practical follow-ups,
+mostly about **operationalizing what we built** rather than inventing new
+features. Effort scale stays the same (S/M/L/XL).
+
+#### B1. Voice path persists transcripts but not bytes — **S**
+**What:** ``VoiceTranscriber`` downloads the OGG, sends it to Whisper-style
+transcription, and discards the bytes. The episodic memory only carries
+text; re-running with a different model later is impossible without
+re-downloading from Telegram (which expires).
+
+**How:** add an optional ``store_voice=True`` flag that calls
+``MemoryStore.store_media_blob`` with the OGG bytes the same way images do
+now. Link the resulting ``media_id`` into the episodic memory item.
+
+**Acceptance:** test verifies ``media_blobs`` has the voice OGG and
+``memory_items.media_id`` points at it.
+
+---
+
+#### B2. Pin one of the two tool-call channels — **S** *(infrastructure shipped Phase 10; B2a still open)*
+**What:** A3 shipped ``protoagi bench-tools``; nobody has run it against
+the production model yet. Until we do, both ``tool_calls`` and
+``tool_request`` paths cost test maintenance and prompt complexity.
+
+**Shipped:** regression gate (``scripts/check_baseline.py``,
+``scripts/bench-tools.ps1``), placeholder
+``runs/bench-tools-baseline.json``, ``--output`` + ``--summary`` flags
+on the CLI command, unit tests on the comparator. CI runs the gate
+against the placeholder.
+
+**Open follow-up (B2a):** capture a real baseline with
+``scripts/bench-tools.ps1 -UpdateBaseline -Rounds 10``, then drop the
+losing branch from prompts + parser.
+
+---
+
+#### B3. Style tuner: per-arm aggregate dashboard — **S**
+**What:** ``ReplyStyleTuner`` keeps stats per chat in ``kv``. The admin
+UI shows none of it; you have to dump JSON manually to see if the bandit
+is converging.
+
+**How:** add a "Style" tab to the admin dashboard that lists chats,
+their active arm, trial counts, and engagement signals. Surface aggregate
+arm trends so we can decide if the bandit ever picks ``concise`` /
+``expressive`` over the default ``balanced``.
+
+**Acceptance:** opening ``/`` shows a Style table with at least one row
+after a few processed messages.
+
+---
+
+#### B4. Federation deltas instead of full bundles — **M**
+**What:** ``memory-export`` writes every active item every time. Real
+federation needs incremental sync (only items changed since the last
+push) and a way to express deletions.
+
+**How:** add ``--since <iso>`` to ``memory-export`` and a ``deletions``
+list to the bundle keyed by ``federation_id``. Track ``last_export_at``
+in ``kv``. Optional: signed Merkle root over per-day item buckets to
+detect tampering.
+
+**Acceptance:** end-to-end test does an initial export, a later
+incremental export after a delete, and verifies the target store
+matches.
+
+---
+
+#### B5. CI pipeline — **S** *(shipped Phase 10)*
+**Shipped:** ``.github/workflows/ci.yml`` runs the unit suite on
+``ubuntu-latest`` and ``windows-latest`` matrix, then a Linux-only
+``memory-eval`` regression gate and a ``bench-tools`` placeholder gate.
+Reports upload as 14-day artefacts.
+
+---
+
+#### B6. Lint + type-check baseline — **S**
+**What:** zero lint, no mypy/pyright. Code style is consistent by hand
+but a fresh contributor has nothing to lean on.
+
+**How:** add ``ruff`` + ``mypy --strict`` config to ``pyproject.toml``
+(both are dev-only deps; the project itself stays zero-runtime-deps).
+Fix the few violations exposed; bake into CI.
+
+**Acceptance:** ``python -m ruff check src/`` and
+``python -m mypy --strict src/protoagi/`` both pass.
+
+---
+
+#### B7. Multimodal recall (image embeddings) — **L**
+**What:** ``media_blobs`` stores image bytes and a caption. Recall
+uses only the caption text. A user asking "що було на тій фотці тиждень
+тому?" hits caption FTS, not image content.
+
+**How:** add an embedding entry per media blob using a CLIP-style joint
+encoder (e.g. ``siglip``) accessed through a llama-server in embedding
+mode. Mix CLIP scores into the recall blend when the query is image-ish
+or when the candidate carries a media_id.
+
+**Acceptance:** eval corpus extended with image-caption probes; recall@5
+improves measurably over caption-only.
+
+---
+
+#### B8. Memory graph: scope filters + pagination — **S**
+**What:** the admin canvas dumps every memory and tag. With > 200 items
+the layout becomes unreadable.
+
+**How:** add ``?scope=&persona=&limit=`` query params to
+``/api/memory-graph`` and matching dropdowns in the dashboard.
+
+**Acceptance:** changing the filter re-renders without page reload and
+respects the limit.
+
+---
+
+#### B9. Adversarial eval probes — **M**
+**What:** the golden corpus is 12 facts and 8 friendly probes. It
+doesn't catch contradiction handling, negations, multi-hop, or cross-
+language paraphrase.
+
+**How:** extend ``config/memory_eval/golden.json`` with adversarial
+sections: contradicting facts that must be superseded, negative facts
+("користувач *не* любить каву"), paraphrase pairs (uk ↔ en). Track
+sub-scores per section.
+
+**Acceptance:** ``protoagi memory-eval`` reports per-section recall;
+baseline updated.
+
+---
+
+#### B10. End-to-end smoke test — **M**
+**What:** unit tests mock the model. We have no automated proof the
+full Telegram + llama-server + embed-server + vision-server stack
+boots and answers a pinged update.
+
+**How:** ``scripts/smoke-test.ps1``: starts the stack with a tiny model,
+seeds a Telegram chat through ``--once``, asserts the response shape,
+tears the stack down. CI runs nightly only.
+
+**Acceptance:** running locally and in nightly CI yields green for two
+weeks straight.
+
+---
+
 ### P3 — shipped research baselines
 
 These are no longer blank research items; each now has a working baseline.
@@ -493,6 +724,32 @@ context.
   so the launcher captures it, never re-raise unless the failure should
   abort the loop. A small `protoagi.log` shim with rotation could
   centralize this — currently out of scope.
+- **Why a UCB-style bandit instead of Thompson sampling for `ReplyStyleTuner`?**
+  Determinism in tests + reproducible local debugging. UCB's exploration
+  bonus also degrades gracefully when one chat has very few trials,
+  which matches the expected per-chat usage.
+- **Why HMAC-SHA256 federation bundles instead of public-key signatures?**
+  No external crypto deps; everyone already shares the bot's setup, so a
+  symmetric secret in `.env` is enough for the experiment. Public-key
+  upgrade path is straightforward when needed (just swap `_signature`).
+- **Why a hand-rolled SSRF socket path instead of `requests` / `httpx`
+  with a TOCTOU-aware connector?** Adding a dependency just to fix one
+  hardening issue felt heavy; the bespoke socket path is ~80 LOC, fully
+  testable through the new `test_web_get_uses_validated_ip_without_second_dns_lookup`,
+  and fits the project's zero-runtime-deps invariant.
+- **Why a Python comparator (`scripts/check_baseline.py`) instead of
+  expanding the existing PowerShell `eval-memory.ps1`?** CI runs
+  Linux-first; PowerShell-only gates would force `windows-latest`
+  everywhere or duplicate the logic. The Python comparator is portable,
+  testable through unit tests, and the PowerShell wrappers stay as
+  Windows-friendly UX shells around it.
+- **Why ship `runs/bench-tools-baseline.json` as `status: "unverified"`
+  instead of skipping the gate entirely?** Keeping the gate wired up in
+  CI lets us catch obviously-broken `bench-tools` changes (parsing,
+  output schema) immediately. The `unverified` sentinel makes the
+  comparator print a friendly "capture one with …" message rather than
+  fail, so the gate flips on automatically the moment a real baseline
+  lands.
 
 ---
 
