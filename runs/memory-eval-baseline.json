@@ -1,0 +1,251 @@
+{
+  "summary": {
+    "queries": 12,
+    "mrr": 0.75,
+    "recall_at_k": {
+      "1": 0.6667,
+      "3": 0.8333,
+      "5": 0.8333
+    }
+  },
+  "sections": {
+    "contradictions": {
+      "queries": 1,
+      "mrr": 1.0,
+      "recall_at_k": {
+        "1": 1.0,
+        "3": 1.0,
+        "5": 1.0
+      }
+    },
+    "friendly": {
+      "queries": 8,
+      "mrr": 0.625,
+      "recall_at_k": {
+        "1": 0.5,
+        "3": 0.75,
+        "5": 0.75
+      }
+    },
+    "multimodal_caption": {
+      "queries": 1,
+      "mrr": 1.0,
+      "recall_at_k": {
+        "1": 1.0,
+        "3": 1.0,
+        "5": 1.0
+      }
+    },
+    "negative": {
+      "queries": 1,
+      "mrr": 1.0,
+      "recall_at_k": {
+        "1": 1.0,
+        "3": 1.0,
+        "5": 1.0
+      }
+    },
+    "paraphrase_uk_en": {
+      "queries": 1,
+      "mrr": 1.0,
+      "recall_at_k": {
+        "1": 1.0,
+        "3": 1.0,
+        "5": 1.0
+      }
+    }
+  },
+  "queries": [
+    {
+      "query": "що користувач любить пити вранці",
+      "description": "Direct lookup of a stated preference",
+      "section": "friendly",
+      "rank": 1,
+      "hit_at_k": {
+        "1": true,
+        "3": true,
+        "5": true
+      },
+      "retrieved": [
+        "Користувач любить чорний чай зранку без цукру",
+        "Користувач не любить, коли бот починає кожну відповідь з 'як справи?'",
+        "Микола має сухуватий гумор і не любить, коли підлещуються",
+        "Соломія любить чай з лимоном і нічні розмови про музику",
+        "Користувач працює над локальним AGI-експериментом на RTX 5070 Ti"
+      ]
+    },
+    {
+      "query": "характер Соломії",
+      "description": "Persona traits for Solomiya",
+      "section": "friendly",
+      "rank": null,
+      "hit_at_k": {
+        "1": false,
+        "3": false,
+        "5": false
+      },
+      "retrieved": []
+    },
+    {
+      "query": "на якому залізі запускається проєкт",
+      "description": "Hardware fact for the project",
+      "section": "friendly",
+      "rank": 2,
+      "hit_at_k": {
+        "1": false,
+        "3": true,
+        "5": true
+      },
+      "retrieved": [
+        "Бот не повинен прикидатися фізичною людиною на пряме питання",
+        "Користувач працює над локальним AGI-експериментом на RTX 5070 Ti",
+        "Бот має право на стабільну вигадану самопамʼять про дрібні смаки"
+      ]
+    },
+    {
+      "query": "як модель ProtoAGI називається",
+      "description": "Model identifier",
+      "section": "friendly",
+      "rank": 1,
+      "hit_at_k": {
+        "1": true,
+        "3": true,
+        "5": true
+      },
+      "retrieved": [
+        "ProtoAGI використовує llama.cpp і модель gpt-oss-20b у форматі MXFP4",
+        "Користувач не любить, коли бот починає кожну відповідь з 'як справи?'",
+        "Telegram-памʼять у ProtoAGI спільна для всіх чатів і профілів"
+      ]
+    },
+    {
+      "query": "плани щодо памʼяті",
+      "description": "Roadmap on memory",
+      "section": "friendly",
+      "rank": 1,
+      "hit_at_k": {
+        "1": true,
+        "3": true,
+        "5": true
+      },
+      "retrieved": [
+        "Користувач планує додати векторні ембединги для семантичного пошуку памʼяті"
+      ]
+    },
+    {
+      "query": "які фрази дратують користувача",
+      "description": "Anti-pattern preference",
+      "section": "friendly",
+      "rank": null,
+      "hit_at_k": {
+        "1": false,
+        "3": false,
+        "5": false
+      },
+      "retrieved": []
+    },
+    {
+      "query": "що бот мусить казати чесно",
+      "description": "Safety guard recall",
+      "section": "friendly",
+      "rank": 1,
+      "hit_at_k": {
+        "1": true,
+        "3": true,
+        "5": true
+      },
+      "retrieved": [
+        "Бот не повинен прикидатися фізичною людиною на пряме питання",
+        "Бот має право на стабільну вигадану самопамʼять про дрібні смаки",
+        "Користувач не любить, коли бот починає кожну відповідь з 'як справи?'"
+      ]
+    },
+    {
+      "query": "якою мовою спілкується користувач",
+      "description": "Language preference",
+      "section": "friendly",
+      "rank": 2,
+      "hit_at_k": {
+        "1": false,
+        "3": true,
+        "5": true
+      },
+      "retrieved": [
+        "Користувач любить чорний чай зранку без цукру",
+        "Користувач переважно пише українською, іноді змішує з англійською",
+        "Користувач планує додати векторні ембединги для семантичного пошуку памʼяті",
+        "Користувач працює над локальним AGI-експериментом на RTX 5070 Ti",
+        "Користувач не любить, коли бот починає кожну відповідь з 'як справи?'"
+      ]
+    },
+    {
+      "query": "what drink does user prefer at night mint tea",
+      "description": "Contradiction probe should retrieve the superseding fact",
+      "section": "contradictions",
+      "rank": 1,
+      "hit_at_k": {
+        "1": true,
+        "3": true,
+        "5": true
+      },
+      "retrieved": [
+        "User now prefers mint tea at night",
+        "User does not like coffee after 18:00",
+        "Користувач любить чорний чай зранку без цукру",
+        "User tracks project roadmap notes in docs/ROADMAP.md"
+      ]
+    },
+    {
+      "query": "does user like coffee after 18:00",
+      "description": "Negative preference probe",
+      "section": "negative",
+      "rank": 1,
+      "hit_at_k": {
+        "1": true,
+        "3": true,
+        "5": true
+      },
+      "retrieved": [
+        "User does not like coffee after 18:00",
+        "User now prefers mint tea at night",
+        "User tracks project roadmap notes in docs/ROADMAP.md"
+      ]
+    },
+    {
+      "query": "де project roadmap notes",
+      "description": "Mixed Ukrainian-English paraphrase probe",
+      "section": "paraphrase_uk_en",
+      "rank": 1,
+      "hit_at_k": {
+        "1": true,
+        "3": true,
+        "5": true
+      },
+      "retrieved": [
+        "User tracks project roadmap notes in docs/ROADMAP.md",
+        "Користувач планує додати векторні ембединги для семантичного пошуку памʼяті",
+        "Користувач працює над локальним AGI-експериментом на RTX 5070 Ti",
+        "Telegram-памʼять у ProtoAGI спільна для всіх чатів і профілів",
+        "ProtoAGI використовує llama.cpp і модель gpt-oss-20b у форматі MXFP4"
+      ]
+    },
+    {
+      "query": "що було на photo з gamepad",
+      "description": "Image-caption probe for media-linked memory",
+      "section": "multimodal_caption",
+      "rank": 1,
+      "hit_at_k": {
+        "1": true,
+        "3": true,
+        "5": true
+      },
+      "retrieved": [
+        "Telegram image memory: black gamepad on a desk",
+        "Користувач переважно пише українською, іноді змішує з англійською",
+        "Бот не повинен прикидатися фізичною людиною на пряме питання",
+        "Користувач працює над локальним AGI-експериментом на RTX 5070 Ti",
+        "Соломія любить чай з лимоном і нічні розмови про музику"
+      ]
+    }
+  ]
+}

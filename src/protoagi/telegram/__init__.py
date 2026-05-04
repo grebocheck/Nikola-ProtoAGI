@@ -68,7 +68,7 @@ from .vision import (
     VISION_PROMPT_LEAK_RE,
     clean_vision_description,
 )
-from .voice import VoiceAttachment, VoiceSynthesisConfig, VoiceTranscriptionConfig
+from .voice import VoiceAttachment, VoiceSynthesisConfig, VoiceTranscriptionConfig, VoiceTranscriptionResult
 
 
 __all__ = [
@@ -104,6 +104,7 @@ __all__ = [
     "VoiceAttachment",
     "VoiceSynthesisConfig",
     "VoiceTranscriptionConfig",
+    "VoiceTranscriptionResult",
     "auto_sticker_choice",
     "build_nikola_bot",
     "clean_vision_description",

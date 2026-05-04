@@ -141,7 +141,9 @@ Optional Telegram image recognition is available through
 configured for localhost, `run-nikola.bat` starts a separate lightweight
 `llama-server` on port `8081` and downloads the GGUF on first launch.
 Incoming image bytes and captions are persisted in SQLite media memory so later
-recall can refer back to old photos.
+recall can refer back to old photos. When the embedding endpoint supports a
+joint image/text model, media-linked memories can use image embeddings for
+photo-oriented recall; otherwise they fall back to caption/text recall.
 
 More details: [docs/TELEGRAM.md](docs/TELEGRAM.md).
 
@@ -194,6 +196,10 @@ Get-ChildItem data/backups/*.sqlite3 | Where-Object LastWriteTime -lt (Get-Date)
 
 # Local admin dashboard at http://127.0.0.1:8765
 python -m protoagi admin
+
+# Signed federation bundle; --since emits only deltas plus deletions
+python -m protoagi memory-export --to runs/memory-bundle.json --secret "dev-secret"
+python -m protoagi memory-export --to runs/memory-delta.json --secret "dev-secret" --since 2026-05-03T00:00:00+00:00
 ```
 
 Set `PROTOAGI_LLM_IMPORTANCE=1` to let the chat model score new memory writes
@@ -202,6 +208,20 @@ the default.
 
 Embedding recall uses exact flat cosine by default. For larger stores, set
 `PROTOAGI_EMBED_BACKEND=lsh` to use the dependency-free approximate backend.
+
+Developer checks:
+
+```powershell
+python -m pip install -e ".[dev]"
+python -m ruff check src/
+python -m mypy --strict src/protoagi/
+```
+
+Live smoke testing is optional and expects a local GGUF model:
+
+```powershell
+.\scripts\smoke-test.ps1 -ModelPath C:\models\tiny.gguf -Port 8090
+```
 
 ## Project layout
 

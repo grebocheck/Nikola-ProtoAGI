@@ -1,0 +1,7 @@
+{
+  "_comment": "Placeholder bench-tools baseline. Replace by running: protoagi bench-tools --output runs/bench-tools-baseline.json against the production llama-server. Until then the regression gate prints a warning instead of failing CI.",
+  "status": "unverified",
+  "rounds": 0,
+  "counts": {"tool_calls": 0, "tool_request": 0, "both": 0, "neither": 0},
+  "canonical_path_hint": "unverified"
+}

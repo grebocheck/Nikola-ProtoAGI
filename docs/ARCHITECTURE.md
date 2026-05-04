@@ -31,7 +31,10 @@ embedding server is configured.
 - OpenAI-style tool definitions
 
 `protoagi.embedding` is a small dependency-free embedding client over
-`/v1/embeddings`, with a tiny LRU cache and pure-Python exact/LSH indexes.
+`/v1/embeddings`, with a tiny LRU cache and pure-Python exact/LSH indexes. It
+can also ask a joint image/text embedding endpoint for media vectors by sending
+stored image bytes as base64; unsupported endpoints simply fall back to text
+embeddings.
 
 ## 3. Agent loop
 
@@ -73,7 +76,7 @@ operations use short-lived per-call connections. The schema is typed:
 - `memory_tags`: normalized tag table indexed for exact matching (no more
   `LIKE '%tag%'` substring confusion).
 - `memory_embeddings`: optional float32 BLOBs for semantic recall.
-- `media_blobs`: Telegram image bytes linked from `memory_items.media_id`.
+- `media_blobs`: Telegram image/voice bytes linked from `memory_items.media_id`.
 - `importance_cache`: bounded cache for optional LLM importance scoring.
 - `memory_items_fts`: FTS5 over text+tags.
 - `messages` / `tool_events` / `kv`: agent loop logs and small KV state.
@@ -81,20 +84,25 @@ operations use short-lived per-call connections. The schema is typed:
 - `reminders`: scheduled prompts the bot should surface later.
 
 `MemoryService` is the high-level facade: it scores importance heuristically,
-performs hybrid recall (FTS + cosine + recency + importance + pinned bonus),
-exposes a heuristic consolidation pass that supersedes near-duplicate
-items, and a ``prune()`` pass that forgets low-value items by a blended
+performs hybrid recall (FTS + cosine + recency + importance + pinned bonus,
+plus a small media-aware cosine boost for image-linked items), exposes a
+heuristic consolidation pass that supersedes near-duplicate items, and a
+``prune()`` pass that forgets low-value items by a blended
 ``importance × recency × access`` score. Embeddings are optional; when no
 embedding endpoint is configured, recall falls back to FTS only.
 
 A small evaluation harness lives in ``protoagi.memory_eval``: it loads a
 JSON corpus (``config/memory_eval/golden.json`` by default), plays probe
-queries through ``MemoryService.recall``, and reports recall@k and MRR.
-``protoagi memory-eval [--with-embeddings]`` runs it end-to-end.
+queries through ``MemoryService.recall``, and reports recall@k, MRR, and
+per-section subscores for friendly, contradiction, negative, paraphrase, and
+media-caption probes. ``protoagi memory-eval [--with-embeddings]`` runs it
+end-to-end.
 
 `protoagi.memory_federation` exports curated active memories as HMAC-signed
 JSON bundles and imports them idempotently on another machine with
-`protoagi memory-export` / `protoagi memory-import`.
+`protoagi memory-export` / `protoagi memory-import`. Full exports store a
+source/filter manifest in `kv`; `memory-export --since <iso>` emits only
+new/changed rows plus deletion tombstones keyed by `federation_id`.
 
 ## 6. Evaluation
 
@@ -153,6 +161,7 @@ The bot deliberately uses a narrower surface than the workspace agent:
 - sticker set discovery with `getStickerSet`
 - sticker sending with `sendSticker`
 - optional voice/audio transcription and optional TTS voice replies
+- optional persistence of incoming voice/audio bytes alongside transcripts
 - shared Telegram long-term facts in SQLite, recalled through `MemoryService`
 - per-chat recent thread history for local dialogue context
 - Telegram message ID history for intentional replies

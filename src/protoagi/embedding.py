@@ -9,6 +9,7 @@ write attaches a vector and recall combines BM25 with cosine similarity.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import time
@@ -18,7 +19,7 @@ from typing import Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .memory import MemoryStore, cosine_similarity, pack_embedding, unpack_embedding
+from .memory import MemoryStore, cosine_similarity
 
 
 class EmbeddingError(RuntimeError):
@@ -63,9 +64,40 @@ class EmbeddingClient:
     def embed_many(self, texts: Sequence[str]) -> list[list[float] | None]:
         return [self.embed(text) for text in texts]
 
+    def embed_media(self, data: bytes, *, mime: str, caption: str = "") -> list[float] | None:
+        if not data or not self.config.enabled:
+            return None
+        digest = hashlib.sha256(data).hexdigest()
+        cache_key = f"media:{mime}:{digest}:{caption.strip()}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            self._cache.move_to_end(cache_key)
+            return list(cached)
+        try:
+            vector = self._request_media(data, mime=mime, caption=caption)
+        except EmbeddingError:
+            return None
+        self._cache_set(cache_key, vector)
+        return vector
+
     def _request(self, text: str) -> list[float]:
         url = self.config.base_url.rstrip("/") + "/embeddings"
         payload = {"model": self.config.model, "input": text}
+        return self._request_payload(url, payload)
+
+    def _request_media(self, data: bytes, *, mime: str, caption: str = "") -> list[float]:
+        url = self.config.base_url.rstrip("/") + "/embeddings"
+        image_payload = {
+            "type": "image",
+            "mime_type": mime or "application/octet-stream",
+            "data": base64.b64encode(data).decode("ascii"),
+        }
+        if caption.strip():
+            image_payload["caption"] = caption.strip()
+        payload = {"model": self.config.model, "input": [image_payload]}
+        return self._request_payload(url, payload)
+
+    def _request_payload(self, url: str, payload: dict[str, object]) -> list[float]:
         if self.config.request_dimensions:
             payload["dimensions"] = self.config.request_dimensions
         body = json.dumps(payload).encode("utf-8")

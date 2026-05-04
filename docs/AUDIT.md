@@ -18,6 +18,30 @@ The repository is now arranged so source code and documentation can be pushed to
 git without committing local model files, downloaded runtimes, logs, databases,
 or secrets.
 
+## 2026-05-03 phase 11 (B-cohort implementation)
+
+- Voice/audio transcripts can now keep the original Telegram bytes in
+  `media_blobs` when `PROTOAGI_STORE_VOICE=1`; episodic voice memories link
+  those bytes through `memory_items.media_id`.
+- Telegram tool use is pinned to schema-native `tool_request` in production
+  decisions. The bot no longer passes native `tools=` beside
+  `response_format` and no longer parses `message.tool_calls` in
+  `decide_incoming`; `bench-tools` remains for measuring real model behavior.
+- Admin gained `/api/style`, a rendered Style section, and memory-graph
+  filters for `scope`, `persona`, and `limit`.
+- Federation exports support `--since <iso>` deltas plus deletion tombstones;
+  export manifests and `last_export_at` cursors live in `kv`.
+- Dev-only `ruff` + `mypy` tooling is configured in `pyproject.toml` and CI
+  runs a lint/type job.
+- Image-linked memory can use joint image/text embeddings when the embedding
+  endpoint accepts media payloads, with text fallback when it does not.
+- `memory-eval` now reports per-section subscores and the golden corpus
+  includes contradiction, negative, paraphrase, and media-caption probes.
+- Added `scripts/smoke-test.ps1` for local/nightly endpoint smoke runs, with
+  optional live Telegram `--once` coverage.
+
+Test count: 145 -> 152.
+
 ## 2026-05-03 phase 9 (P3 research baselines)
 
 - Self-tuning reply style: `ReplyStyleTuner` records per-chat engagement

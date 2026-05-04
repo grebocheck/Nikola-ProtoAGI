@@ -19,12 +19,19 @@ class StubEmbeddingClient:
     def __init__(self, model: str = "stub") -> None:
         self.config = EmbeddingConfig(base_url="http://stub", model=model)
         self._lookup: dict[str, list[float]] = {}
+        self._media_lookup: dict[tuple[bytes, str], list[float]] = {}
 
     def define(self, text: str, vector: list[float]) -> None:
         self._lookup[text] = vector
 
     def embed(self, text: str) -> list[float] | None:
         return self._lookup.get(text)
+
+    def define_media(self, data: bytes, mime: str, vector: list[float]) -> None:
+        self._media_lookup[(data, mime)] = vector
+
+    def embed_media(self, data: bytes, *, mime: str, caption: str = "") -> list[float] | None:
+        return self._media_lookup.get((data, mime))
 
 
 class StubImportanceClient:
@@ -93,6 +100,29 @@ class MemoryServiceTests(unittest.TestCase):
         results = service.recall(RecallQuery(text="чай", limit=2))
         self.assertGreater(len(results), 0)
         self.assertIn("chamomile", results[0].item.text)
+        self.assertGreater(results[0].cosine, 0.0)
+
+    def test_image_media_embedding_can_drive_recall(self) -> None:
+        store, service = self._make(with_embeddings=True)
+        client = service.embedding_client
+        assert isinstance(client, StubEmbeddingClient)
+        image_bytes = b"gamepad-image"
+        store.store_media_blob(
+            file_id="photo-1",
+            mime="image/jpeg",
+            data=image_bytes,
+            caption="black gamepad on a desk",
+        )
+        client.define_media(image_bytes, "image/jpeg", [1.0, 0.0, 0.0])
+        client.define("controller picture", [1.0, 0.0, 0.0])
+        stored = service.remember(
+            "Telegram image in chat 1: black gamepad on a desk",
+            media_id="photo-1",
+            tags=["media", "image"],
+        )
+        self.assertIsNotNone(stored)
+        results = service.recall(RecallQuery(text="controller picture", limit=1))
+        self.assertEqual(results[0].item.media_id, "photo-1")
         self.assertGreater(results[0].cosine, 0.0)
 
     def test_persona_scope_blocks_other_personas(self) -> None:

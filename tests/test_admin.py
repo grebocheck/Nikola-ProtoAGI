@@ -57,10 +57,23 @@ class AdminServerTests(unittest.TestCase):
             return json.loads(resp.read().decode("utf-8"))
 
     def test_dashboard_renders(self) -> None:
+        self.memory.set_kv(
+            "telegram:style:123",
+            json.dumps(
+                {
+                    "last_choice": "concise",
+                    "arms": {"concise": {"trials": 2, "successes": 1.0}},
+                    "signals": {"reply": 1},
+                    "updated_at": "2026-05-03T00:00:00+00:00",
+                }
+            ),
+        )
         with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/", timeout=2) as resp:
             body = resp.read().decode("utf-8")
         self.assertIn("ProtoAGI", body)
         self.assertIn("alpha fact", body)
+        self.assertIn("Style", body)
+        self.assertIn("concise", body)
 
     def test_stats_endpoint(self) -> None:
         data = self._get_json("/api/stats")
@@ -84,6 +97,45 @@ class AdminServerTests(unittest.TestCase):
         self.assertTrue(any(node_id.startswith("memory:") for node_id in node_ids))
         self.assertTrue(any(node_id == "tag:preference" for node_id in node_ids))
         self.assertTrue(any(edge["kind"] == "tagged" for edge in data["edges"]))
+
+    def test_memory_graph_filters_scope_and_persona(self) -> None:
+        self.memory.store_memory(
+            "solomiya graph memory",
+            scope="persona",
+            persona_key="solomiya",
+            tags=["persona-graph"],
+        )
+        data = self._get_json("/api/memory-graph?scope=persona&persona=solomiya&limit=20")
+        self.assertEqual(data["filters"]["scope"], "persona")
+        self.assertEqual(data["filters"]["persona_key"], "solomiya")
+        memory_nodes = [node for node in data["nodes"] if node["kind"] == "memory"]
+        self.assertTrue(memory_nodes)
+        self.assertTrue(all(node["scope"] == "persona" for node in memory_nodes))
+
+    def test_style_endpoint_reports_chat_and_aggregate(self) -> None:
+        self.memory.upsert_telegram_chat(
+            {"id": 123, "type": "private", "first_name": "Vadim"},
+            {"id": 123, "first_name": "Vadim"},
+        )
+        self.memory.set_kv(
+            "telegram:style:123",
+            json.dumps(
+                {
+                    "last_choice": "expressive",
+                    "arms": {
+                        "balanced": {"trials": 1, "successes": 0.0},
+                        "expressive": {"trials": 3, "successes": 2.0},
+                    },
+                    "signals": {"reply": 2, "reaction": 1},
+                    "updated_at": "2026-05-03T00:00:00+00:00",
+                }
+            ),
+        )
+        data = self._get_json("/api/style")
+        self.assertEqual(data["chats"][0]["chat_id"], "123")
+        self.assertEqual(data["chats"][0]["active_arm"], "expressive")
+        self.assertEqual(data["aggregate"]["expressive"]["trials"], 3)
+        self.assertEqual(data["signals"]["reply"], 2)
 
     def test_media_endpoint_returns_blob_bytes(self) -> None:
         self.memory.store_media_blob(

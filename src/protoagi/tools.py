@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.error import URLError
 from urllib.parse import ParseResult, urlparse
-from urllib.request import Request, urlopen
 
 from .config import PROJECT_ROOT, ToolPolicy
 from .memory import MemoryStore

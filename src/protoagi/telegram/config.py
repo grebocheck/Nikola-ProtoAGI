@@ -38,6 +38,7 @@ class TelegramConfig:
     voice_model: str = ""
     voice_max_bytes: int = 16 * 1024 * 1024
     voice_timeout_seconds: int = 120
+    store_voice: bool = True
     tts_enabled: bool = False
     tts_base_url: str = ""
     tts_model: str = ""
@@ -84,6 +85,7 @@ class TelegramConfig:
             voice_model=os.environ.get("PROTOAGI_VOICE_MODEL", "").strip(),
             voice_max_bytes=env_int("PROTOAGI_VOICE_MAX_BYTES", 16 * 1024 * 1024),
             voice_timeout_seconds=env_int("PROTOAGI_VOICE_TIMEOUT_SECONDS", 120),
+            store_voice=env_bool("PROTOAGI_STORE_VOICE", True),
             tts_enabled=env_bool("PROTOAGI_TTS_ENABLED", False),
             tts_base_url=os.environ.get("PROTOAGI_TTS_BASE_URL", "").strip(),
             tts_model=os.environ.get("PROTOAGI_TTS_MODEL", "").strip(),

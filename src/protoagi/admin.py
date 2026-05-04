@@ -28,6 +28,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .memory import MemoryStore
 from .memory_service import MemoryService
+from .telegram.style import STYLE_ARM_ORDER, STYLE_LAST_SENT_PREFIX, STYLE_STATE_PREFIX
 
 
 class _ThreadingServer(ThreadingMixIn, HTTPServer):
@@ -170,13 +171,124 @@ def _serialize_memory(item: Any) -> dict[str, Any]:
         "persona_key": item.persona_key,
         "media_id": item.media_id,
         "created_at": item.created_at,
+        "updated_at": item.updated_at,
         "access_count": item.access_count,
         "pinned": item.pinned,
     }
 
 
-def _memory_graph(memory: MemoryStore, *, limit: int = 120) -> dict[str, Any]:
-    items = memory.list_memories(limit=max(1, min(limit, 500)), include_superseded=True)
+def _style_report(memory: MemoryStore) -> dict[str, Any]:
+    chats_by_id: dict[str, dict[str, Any]] = {}
+    with memory.connect() as conn:
+        chat_rows = conn.execute(
+            "SELECT chat_id, display_name, chat_type FROM telegram_chats"
+        ).fetchall()
+        for row in chat_rows:
+            chats_by_id[str(row["chat_id"])] = {
+                "display_name": row["display_name"],
+                "chat_type": row["chat_type"],
+            }
+        state_rows = conn.execute(
+            """
+            SELECT key, value, updated_at
+            FROM kv
+            WHERE key LIKE ?
+              AND key NOT LIKE ?
+            ORDER BY updated_at DESC
+            """,
+            (f"{STYLE_STATE_PREFIX}%", f"{STYLE_LAST_SENT_PREFIX}%"),
+        ).fetchall()
+
+    aggregate = {
+        arm: {"trials": 0, "successes": 0.0, "success_rate": 0.0}
+        for arm in STYLE_ARM_ORDER
+    }
+    signal_totals: dict[str, int] = {}
+    chats: list[dict[str, Any]] = []
+    for row in state_rows:
+        chat_id = str(row["key"])[len(STYLE_STATE_PREFIX) :]
+        try:
+            state = json.loads(str(row["value"] or "{}"))
+        except json.JSONDecodeError:
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
+        arms_raw = state.get("arms")
+        arms = arms_raw if isinstance(arms_raw, dict) else {}
+        arm_payload: dict[str, dict[str, Any]] = {}
+        for arm in STYLE_ARM_ORDER:
+            stats = arms.get(arm)
+            if not isinstance(stats, dict):
+                stats = {}
+            trials = max(0, int(stats.get("trials", 0)))
+            successes = max(0.0, float(stats.get("successes", 0.0)))
+            aggregate[arm]["trials"] += trials
+            aggregate[arm]["successes"] += successes
+            arm_payload[arm] = {
+                "trials": trials,
+                "successes": round(successes, 3),
+                "success_rate": round(successes / trials, 3) if trials else 0.0,
+            }
+        signals_raw = state.get("signals")
+        signals = signals_raw if isinstance(signals_raw, dict) else {}
+        signal_payload = {str(key): int(value) for key, value in signals.items()}
+        for key, value in signal_payload.items():
+            signal_totals[key] = signal_totals.get(key, 0) + value
+        chat = chats_by_id.get(chat_id, {})
+        chats.append(
+            {
+                "chat_id": chat_id,
+                "display_name": chat.get("display_name", ""),
+                "chat_type": chat.get("chat_type", ""),
+                "active_arm": str(state.get("last_choice") or "balanced"),
+                "arms": arm_payload,
+                "signals": signal_payload,
+                "updated_at": state.get("updated_at") or row["updated_at"],
+            }
+        )
+    for stats in aggregate.values():
+        trials = int(stats["trials"])
+        successes = float(stats["successes"])
+        stats["successes"] = round(successes, 3)
+        stats["success_rate"] = round(successes / trials, 3) if trials else 0.0
+    return {
+        "chats": chats,
+        "aggregate": aggregate,
+        "signals": signal_totals,
+    }
+
+
+def _style_trials_cell(arms: Any) -> str:
+    if not isinstance(arms, dict):
+        return ""
+    parts = []
+    for arm in STYLE_ARM_ORDER:
+        stats = arms.get(arm)
+        if not isinstance(stats, dict):
+            continue
+        parts.append(f"{arm}:{int(stats.get('trials', 0))}")
+    return " ".join(parts)
+
+
+def _style_signals_cell(signals: Any) -> str:
+    if not isinstance(signals, dict):
+        return ""
+    return " ".join(f"{key}:{int(value)}" for key, value in sorted(signals.items()))
+
+
+def _memory_graph(
+    memory: MemoryStore,
+    *,
+    limit: int = 120,
+    scope: str | None = None,
+    persona_key: str | None = None,
+) -> dict[str, Any]:
+    items = memory.list_memories(
+        scope=scope or None,
+        persona_key=persona_key or None,
+        limit=max(1, min(limit, 500)),
+        include_superseded=True,
+    )
     nodes: dict[str, dict[str, Any]] = {}
     edges: list[dict[str, Any]] = []
     for item in items:
@@ -212,11 +324,20 @@ def _memory_graph(memory: MemoryStore, *, limit: int = 120) -> dict[str, Any]:
                     "kind": "superseded_by",
                 }
             )
-    return {"nodes": list(nodes.values()), "edges": edges}
+    return {
+        "nodes": list(nodes.values()),
+        "edges": edges,
+        "filters": {
+            "scope": scope or "",
+            "persona_key": persona_key or "",
+            "limit": max(1, min(limit, 500)),
+        },
+    }
 
 
 def _dashboard_html(memory: MemoryStore) -> str:
     stats = _stats(memory)
+    style = _style_report(memory)
     items = memory.list_memories(limit=20)
     chats = []
     with memory.connect() as conn:
@@ -266,6 +387,26 @@ def _dashboard_html(memory: MemoryStore) -> str:
         f"<td>{html.escape(rem.persona_key or '')}</td></tr>"
         for rem in reminders
     )
+    style_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(row['chat_id'])}</td>"
+        f"<td>{html.escape(str(row.get('display_name') or ''))}</td>"
+        f"<td>{html.escape(str(row.get('active_arm') or 'balanced'))}</td>"
+        f"<td>{html.escape(_style_trials_cell(row.get('arms', {})))}</td>"
+        f"<td>{html.escape(_style_signals_cell(row.get('signals', {})))}</td>"
+        f"<td>{html.escape(str(row.get('updated_at') or ''))}</td>"
+        "</tr>"
+        for row in style["chats"]
+    )
+    aggregate_rows = "".join(
+        "<tr>"
+        f"<td>{html.escape(arm)}</td>"
+        f"<td>{stats['trials']}</td>"
+        f"<td>{stats['successes']}</td>"
+        f"<td>{stats['success_rate']}</td>"
+        "</tr>"
+        for arm, stats in style["aggregate"].items()
+    )
     stats_html = "".join(
         f"<dt>{html.escape(str(key))}</dt><dd>{html.escape(str(value))}</dd>"
         for key, value in stats.items()
@@ -296,6 +437,9 @@ def _dashboard_html(memory: MemoryStore) -> str:
           opacity: 0; transition: opacity .2s; }}
  .flash.show {{ opacity: 1; }}
  .flash.error {{ background: #b00020; }}
+ .controls {{ display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 8px 0 12px; }}
+ .controls label {{ color: #555; font-size: 13px; }}
+ .controls select, .controls input {{ margin-left: 4px; padding: 3px 6px; }}
 </style>
 </head>
 <body>
@@ -304,6 +448,7 @@ def _dashboard_html(memory: MemoryStore) -> str:
 <a href=\"/api/memories\">/api/memories</a>,
 <a href=\"/api/reminders\">/api/reminders</a>,
 <a href=\"/api/chats\">/api/chats</a>,
+<a href=\"/api/style\">/api/style</a>,
 <a href=\"/api/memory-graph\">/api/memory-graph</a>.</p>
 <h2>Stats</h2>
 <dl>{stats_html}</dl>
@@ -316,7 +461,33 @@ def _dashboard_html(memory: MemoryStore) -> str:
 <h2>Telegram chats</h2>
 <table><thead><tr><th>chat_id</th><th>name</th><th>type</th><th>last user msg</th><th>last bot msg</th></tr></thead>
 <tbody>{chat_rows or '<tr><td colspan=5>—</td></tr>'}</tbody></table>
+<h2>Style</h2>
+<table><thead><tr><th>arm</th><th>trials</th><th>successes</th><th>rate</th></tr></thead>
+<tbody>{aggregate_rows}</tbody></table>
+<table><thead><tr><th>chat_id</th><th>name</th><th>active arm</th><th>trials</th><th>signals</th><th>updated</th></tr></thead>
+<tbody id=\"style-tbody\">{style_rows or '<tr><td colspan=6>—</td></tr>'}</tbody></table>
 <h2>Memory graph</h2>
+<div class=\"controls\">
+  <label>scope
+    <select id=\"graph-scope\">
+      <option value=\"\">all</option>
+      <option value=\"global\">global</option>
+      <option value=\"user\">user</option>
+      <option value=\"chat\">chat</option>
+      <option value=\"persona\">persona</option>
+    </select>
+  </label>
+  <label>persona <input id=\"graph-persona\" type=\"text\" placeholder=\"mykola\"></label>
+  <label>limit
+    <select id=\"graph-limit\">
+      <option>50</option>
+      <option selected>80</option>
+      <option>120</option>
+      <option>200</option>
+      <option>500</option>
+    </select>
+  </label>
+</div>
 <canvas id=\"memory-graph\" width=\"1040\" height=\"420\" style=\"width:100%;height:420px;border:1px solid #eee;background:#fff\"></canvas>
 <div id=\"flash\" class=\"flash\"></div>
 <script>
@@ -365,7 +536,14 @@ document.getElementById('memory-tbody').addEventListener('click', async (event) 
 const drawGraph = async () => {{
   const canvas = document.getElementById('memory-graph');
   const ctx = canvas.getContext('2d');
-  const graph = await fetch('/api/memory-graph?limit=80').then(r => r.json());
+  const params = new URLSearchParams();
+  const scope = document.getElementById('graph-scope').value;
+  const persona = document.getElementById('graph-persona').value.trim();
+  const limit = document.getElementById('graph-limit').value;
+  if (scope) params.set('scope', scope);
+  if (persona) params.set('persona', persona);
+  params.set('limit', limit || '80');
+  const graph = await fetch(`/api/memory-graph?${{params.toString()}}`).then(r => r.json());
   const nodes = graph.nodes.map((node, index) => ({{
     ...node,
     x: canvas.width / 2 + Math.cos(index) * 160,
@@ -375,6 +553,13 @@ const drawGraph = async () => {{
   }}));
   const byId = Object.fromEntries(nodes.map(node => [node.id, node]));
   const edges = graph.edges.filter(edge => byId[edge.source] && byId[edge.target]);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!nodes.length) {{
+    ctx.fillStyle = '#666';
+    ctx.font = '13px ui-sans-serif, system-ui, sans-serif';
+    ctx.fillText('no graph data for current filters', 20, 32);
+    return;
+  }}
   for (let step = 0; step < 160; step++) {{
     for (let i = 0; i < nodes.length; i++) {{
       for (let j = i + 1; j < nodes.length; j++) {{
@@ -398,7 +583,6 @@ const drawGraph = async () => {{
       node.y = Math.max(18, Math.min(canvas.height - 18, node.y + node.vy));
     }}
   }}
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.font = '12px ui-sans-serif, system-ui, sans-serif';
   for (const edge of edges) {{
     const a = byId[edge.source], b = byId[edge.target];
@@ -414,6 +598,10 @@ const drawGraph = async () => {{
     ctx.fillText(String(node.label).slice(0, 24), node.x + 14, node.y + 4);
   }}
 }};
+for (const id of ['graph-scope', 'graph-persona', 'graph-limit']) {{
+  document.getElementById(id).addEventListener('change', () => drawGraph().catch(() => {{}}));
+}}
+document.getElementById('graph-persona').addEventListener('input', () => drawGraph().catch(() => {{}}));
 drawGraph().catch(() => {{}});
 </script>
 </body></html>
@@ -436,6 +624,9 @@ def make_handler(memory: MemoryStore, service: MemoryService) -> type[BaseHTTPRe
             if parsed.path == "/api/stats":
                 _json_response(self, _stats(memory))
                 return
+            if parsed.path == "/api/style":
+                _json_response(self, _style_report(memory))
+                return
             if parsed.path == "/api/memories":
                 params = parse_qs(parsed.query)
                 limit = int(params.get("limit", ["50"])[0])
@@ -445,7 +636,17 @@ def make_handler(memory: MemoryStore, service: MemoryService) -> type[BaseHTTPRe
             if parsed.path == "/api/memory-graph":
                 params = parse_qs(parsed.query)
                 limit = int(params.get("limit", ["120"])[0])
-                _json_response(self, _memory_graph(memory, limit=limit))
+                scope = str(params.get("scope", [""])[0]).strip() or None
+                persona = str(params.get("persona", [""])[0]).strip() or None
+                _json_response(
+                    self,
+                    _memory_graph(
+                        memory,
+                        limit=limit,
+                        scope=scope,
+                        persona_key=persona,
+                    ),
+                )
                 return
             if parsed.path.startswith("/api/media/"):
                 media_id = parsed.path.split("/api/media/", 1)[1]

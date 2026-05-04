@@ -256,11 +256,45 @@ Open follow-up (kept here intentionally because it depends on a real
 model run that CI cannot do):
 
 - **B2a — capture and pin.** After a maintainer runs
-  ``scripts/bench-tools.ps1 -UpdateBaseline -Rounds 10``, decide which
-  branch (``tool_calls`` vs ``tool_request``) wins, drop the loser from
-  ``decision_system_prompt`` and ``Decision.tool_request`` /
-  ``decision_from_payload``, and add a Decision-log entry recording the
-  chosen path.
+  ``scripts/bench-tools.ps1 -UpdateBaseline -Rounds 10``, replace the
+  placeholder baseline with a measured one. Phase 11 already pinned the
+  Telegram production path to schema-native ``tool_request`` and stopped
+  passing native ``tools=`` in the decision call; the remaining work is a
+  real production capture, not another parser branch change.
+
+### Phase 11 — B-cohort implementation (2026-05-03)
+
+Closed the practical B follow-ups that do not require a live production
+Telegram/model run:
+
+- **B1** Incoming voice/audio bytes can be persisted with
+  ``PROTOAGI_STORE_VOICE=1`` and linked from episodic voice memories via
+  ``memory_items.media_id``.
+- **B2a partial** Telegram production decisions now pin ``tool_request``:
+  ``decide_incoming`` no longer passes native ``tools=`` beside
+  ``response_format`` and no longer parses ``message.tool_calls``. The
+  bench-tools baseline remains ``status: "unverified"`` until a maintainer
+  captures it against the real local model.
+- **B3** Admin exposes ``GET /api/style`` plus a rendered Style section with
+  per-chat active arms, trials, signals, and aggregate arm trends.
+- **B4** ``memory-export --since <iso>`` emits incremental items plus
+  deletion tombstones keyed by ``federation_id``. Export manifests and
+  ``last_export_at`` cursors are stored in ``kv``; imports apply tombstones.
+- **B6** Added dev-only ``ruff`` and ``mypy`` tooling, config in
+  ``pyproject.toml``, and a CI lint/type job.
+- **B7** Media-linked image memories can use joint image/text embeddings when
+  the embedding endpoint supports media payloads; unsupported endpoints fall
+  back to caption/text embeddings. The eval corpus now includes a
+  media-caption section.
+- **B8** ``/api/memory-graph`` supports ``scope``, ``persona``, and ``limit``
+  filters; the dashboard re-renders the graph without a page reload.
+- **B9** ``memory-eval`` reports per-section subscores and the golden corpus
+  now includes contradiction, negative, paraphrase, and media-caption probes.
+- **B10** Added ``scripts/smoke-test.ps1`` for local/nightly smoke runs
+  against a small GGUF endpoint, with optional ``telegram --once`` coverage
+  when a live token and pending user update are available.
+
+Test count: 145 → 152.
 
 ### Phase 9 — P3 research baselines (2026-05-03)
 Turned each P3 research direction into a dependency-free first working layer:
@@ -491,6 +525,12 @@ P3 baselines and Phase 8 fixes surfaced a fresh set of practical follow-ups,
 mostly about **operationalizing what we built** rather than inventing new
 features. Effort scale stays the same (S/M/L/XL).
 
+Status after Phase 11: B1, B3, B4, B6, B7, B8, B9, and B10 have working
+baselines; B5 shipped in Phase 10. B2's runtime path is pinned to
+``tool_request``, but the real ``bench-tools`` production baseline capture is
+still intentionally unverified until the local model server is run by a
+maintainer.
+
 #### B1. Voice path persists transcripts but not bytes — **S**
 **What:** ``VoiceTranscriber`` downloads the OGG, sends it to Whisper-style
 transcription, and discards the bytes. The episodic memory only carries
@@ -704,19 +744,14 @@ context.
   storage but lets DELETE/INSERT work normally. Schema is recreated on
   fresh checkouts; existing experiment DBs keep their old FTS but the
   `try/except` in `_init_db` is a no-op for them.
-- **Why keep two parallel tool-call paths in `decide_incoming` instead of
-  picking one?** The model emits either `tool_calls` (OpenAI-style) or
-  `tool_request` inside the JSON body, depending on whether llama.cpp
-  honored `tools=` or only `response_format=`. We don't yet know which
-  path fires in production with gpt-oss-20b. Phase 8 added
-  `protoagi bench-tools` so the branch split can be measured before
-  dropping either path.
-- **After `bench-tools`, which tool path is canonical?** Keep
-  `tool_request` as the production-compatible path for now because it works
-  inside the schema content even when llama.cpp ignores native
-  OpenAI-style tool calls. `protoagi bench-tools` now reports the real
-  split for the current local model; if `tool_calls` dominates in a
-  measured run, revisit the branch choice with data.
+- **Why pin Telegram tool use to `tool_request`?** The production Telegram
+  decision call already requires constrained JSON via `response_format`, and
+  local llama.cpp deployments reliably honor schema content even when native
+  OpenAI-style `tool_calls` support varies by model/server build. Phase 11
+  stopped passing native `tools=` in `decide_incoming` and removed
+  `message.tool_calls` parsing from that path. `protoagi bench-tools` remains
+  as a measurement harness; its shipped baseline stays `status: "unverified"`
+  until a maintainer captures a real run against the production model.
 - **Why log via `print` from the async runner / vision module instead of
   using the runs/telegram-errors.log file?** Those modules are imported
   from places without easy access to `NikolaBot.error_log_path`. The

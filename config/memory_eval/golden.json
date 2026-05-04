@@ -54,5 +54,87 @@
       "expected_substrings": ["українською", "англійською"],
       "description": "Language preference"
     }
+  ],
+  "sections": [
+    {
+      "name": "contradictions",
+      "facts": [
+        {
+          "text": "User used to prefer espresso at night",
+          "tags": ["preference", "drink", "adversarial"],
+          "importance": 0.3
+        },
+        {
+          "text": "User now prefers mint tea at night",
+          "tags": ["preference", "drink", "adversarial"],
+          "importance": 0.8,
+          "supersedes": ["used to prefer espresso"]
+        }
+      ],
+      "queries": [
+        {
+          "query": "what drink does user prefer at night mint tea",
+          "expected_substrings": ["mint tea"],
+          "description": "Contradiction probe should retrieve the superseding fact"
+        }
+      ]
+    },
+    {
+      "name": "negative",
+      "facts": [
+        {
+          "text": "User does not like coffee after 18:00",
+          "tags": ["preference", "negative", "adversarial"],
+          "importance": 0.7
+        }
+      ],
+      "queries": [
+        {
+          "query": "does user like coffee after 18:00",
+          "expected_substrings": ["does not like coffee"],
+          "description": "Negative preference probe"
+        }
+      ]
+    },
+    {
+      "name": "paraphrase_uk_en",
+      "facts": [
+        {
+          "text": "User tracks project roadmap notes in docs/ROADMAP.md",
+          "tags": ["project", "docs", "adversarial"],
+          "importance": 0.6
+        }
+      ],
+      "queries": [
+        {
+          "query": "де project roadmap notes",
+          "expected_substrings": ["docs/ROADMAP.md"],
+          "description": "Mixed Ukrainian-English paraphrase probe"
+        }
+      ]
+    },
+    {
+      "name": "multimodal_caption",
+      "facts": [
+        {
+          "text": "Telegram image memory: black gamepad on a desk",
+          "tags": ["media", "image", "adversarial"],
+          "importance": 0.6,
+          "media": {
+            "file_id": "eval-gamepad-photo",
+            "mime": "image/jpeg",
+            "caption": "black gamepad on a desk",
+            "bytes_b64": "Z2FtZXBhZC1waG90bw=="
+          }
+        }
+      ],
+      "queries": [
+        {
+          "query": "що було на photo з gamepad",
+          "expected_substrings": ["black gamepad"],
+          "description": "Image-caption probe for media-linked memory"
+        }
+      ]
+    }
   ]
 }

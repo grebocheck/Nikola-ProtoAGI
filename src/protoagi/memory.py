@@ -86,6 +86,7 @@ class MemoryItem:
     superseded_by: int | None
     pinned: bool
     created_at: str
+    updated_at: str | None
     last_accessed_at: str | None
     access_count: int
     tags: list[str] = field(default_factory=list)
@@ -312,6 +313,7 @@ class MemoryStore:
                     superseded_by INTEGER,
                     pinned INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
+                    updated_at TEXT,
                     last_accessed_at TEXT,
                     access_count INTEGER NOT NULL DEFAULT 0,
                     metadata TEXT NOT NULL DEFAULT '{}'
@@ -420,6 +422,7 @@ class MemoryStore:
                 """
             )
             self._ensure_column(conn, "memory_items", "media_id", "TEXT")
+            self._ensure_column(conn, "memory_items", "updated_at", "TEXT")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memory_items_media ON memory_items(media_id)"
             )
@@ -475,15 +478,16 @@ class MemoryStore:
         confidence = max(0.0, min(1.0, float(confidence)))
         tag_set = sorted({tag.strip() for tag in (tags or []) if tag and tag.strip()})
 
+        now = utc_now()
         with self.connect() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO memory_items(
                     kind, text, scope, user_id, chat_id, persona_key, media_id,
                     importance, confidence, source, supersedes_id,
-                    pinned, created_at, metadata
+                    pinned, created_at, updated_at, metadata
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     kind,
@@ -498,7 +502,8 @@ class MemoryStore:
                     source,
                     supersedes_id,
                     1 if pinned else 0,
-                    utc_now(),
+                    now,
+                    now,
                     json.dumps(metadata or {}, ensure_ascii=False),
                 ),
             )
@@ -752,12 +757,12 @@ class MemoryStore:
     def supersede(self, old_id: int, new_id: int) -> None:
         with self.connect() as conn:
             conn.execute(
-                "UPDATE memory_items SET superseded_by = ? WHERE id = ?",
-                (new_id, old_id),
+                "UPDATE memory_items SET superseded_by = ?, updated_at = ? WHERE id = ?",
+                (new_id, utc_now(), old_id),
             )
             conn.execute(
-                "UPDATE memory_items SET supersedes_id = ? WHERE id = ?",
-                (old_id, new_id),
+                "UPDATE memory_items SET supersedes_id = ?, updated_at = ? WHERE id = ?",
+                (old_id, utc_now(), new_id),
             )
 
     def delete_memory(self, memory_id: int) -> None:
@@ -806,6 +811,8 @@ class MemoryStore:
                 updates.append("pinned = ?")
                 params.append(1 if pinned else 0)
             if updates:
+                updates.append("updated_at = ?")
+                params.append(utc_now())
                 params.append(memory_id)
                 conn.execute(
                     f"UPDATE memory_items SET {', '.join(updates)} WHERE id = ?",
@@ -819,6 +826,11 @@ class MemoryStore:
                     conn.execute(
                         "INSERT OR IGNORE INTO memory_tags(memory_id, tag) VALUES(?, ?)",
                         (memory_id, tag),
+                    )
+                if not updates:
+                    conn.execute(
+                        "UPDATE memory_items SET updated_at = ? WHERE id = ?",
+                        (utc_now(), memory_id),
                     )
             if text is not None or tag_set is not None:
                 # Rebuild the FTS row so search reflects the new state.
@@ -944,10 +956,16 @@ class MemoryStore:
                 conn.execute(
                     """
                     UPDATE memory_items
-                    SET scope = ?, user_id = ?, chat_id = COALESCE(chat_id, ?)
+                    SET scope = ?, user_id = ?, chat_id = COALESCE(chat_id, ?), updated_at = ?
                     WHERE id = ?
                     """,
-                    (SCOPE_USER, user_id, None if chat_id is None else str(chat_id), int(row["id"])),
+                    (
+                        SCOPE_USER,
+                        user_id,
+                        None if chat_id is None else str(chat_id),
+                        utc_now(),
+                        int(row["id"]),
+                    ),
                 )
                 updated += 1
         return {
@@ -1625,6 +1643,7 @@ class MemoryStore:
             superseded_by=row["superseded_by"],
             pinned=bool(row["pinned"]),
             created_at=str(row["created_at"]),
+            updated_at=row["updated_at"],
             last_accessed_at=row["last_accessed_at"],
             access_count=int(row["access_count"]),
             tags=tags,

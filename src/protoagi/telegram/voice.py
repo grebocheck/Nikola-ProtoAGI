@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass
-from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -16,6 +15,14 @@ class VoiceAttachment:
     mime_type: str
     duration: int
     label: str = "voice"
+
+
+@dataclass(slots=True)
+class VoiceTranscriptionResult:
+    text: str = ""
+    data: bytes = b""
+    mime_type: str = "audio/ogg"
+    file_id: str = ""
 
 
 @dataclass(slots=True)
@@ -50,17 +57,34 @@ class VoiceTranscriber:
         self.config = config
 
     def transcribe(self, attachment: VoiceAttachment | None) -> str:
+        return self.transcribe_with_bytes(attachment).text
+
+    def transcribe_with_bytes(
+        self,
+        attachment: VoiceAttachment | None,
+    ) -> VoiceTranscriptionResult:
         if attachment is None or not attachment.file_id or not self.config.enabled:
-            return ""
+            return VoiceTranscriptionResult()
         try:
             file_info = self.telegram.get_file(attachment.file_id)
             file_path = str(file_info.get("file_path") or "")
             if not file_path:
-                return ""
+                return VoiceTranscriptionResult(
+                    mime_type=attachment.mime_type or "audio/ogg",
+                    file_id=attachment.file_id,
+                )
             data = self.telegram.download_file(file_path, max_bytes=self.config.max_bytes)
-            return self._transcribe_bytes(data, filename=f"{attachment.file_id}.ogg").strip()
+            return VoiceTranscriptionResult(
+                text=self._transcribe_bytes(data, filename=f"{attachment.file_id}.ogg").strip(),
+                data=data,
+                mime_type=attachment.mime_type or "audio/ogg",
+                file_id=attachment.file_id,
+            )
         except (TelegramApiError, OSError, ValueError):
-            return ""
+            return VoiceTranscriptionResult(
+                mime_type=attachment.mime_type or "audio/ogg",
+                file_id=attachment.file_id if attachment is not None else "",
+            )
 
     def _transcribe_bytes(self, data: bytes, *, filename: str) -> str:
         if not data:
@@ -136,6 +160,7 @@ def _multipart_body(
 
 __all__ = [
     "VoiceAttachment",
+    "VoiceTranscriptionResult",
     "VoiceSynthesisConfig",
     "VoiceSynthesizer",
     "VoiceTranscriptionConfig",

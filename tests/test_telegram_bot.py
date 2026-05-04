@@ -10,6 +10,7 @@ from protoagi.telegram_bot import (
     TELEGRAM_GLOBAL_MEMORY_TAG,
     TELEGRAM_PERSONA_SELF_MEMORY_TAG,
     TelegramConfig,
+    VoiceTranscriptionResult,
     auto_sticker_choice,
     clean_vision_description,
     decision_from_payload,
@@ -101,9 +102,11 @@ class FakeLLM:
         self.content = content[-1] if isinstance(content, list) and content else content
         self._queue = list(content) if isinstance(content, list) else None
         self.messages = []
+        self.kwargs = []
 
     def chat_completion(self, messages, **kwargs):
         self.messages.append(messages)
+        self.kwargs.append(kwargs)
         content = self._queue.pop(0) if self._queue is not None and self._queue else self.content
         return {"choices": [{"message": {"content": content}}]}
 
@@ -119,6 +122,20 @@ class FakeVoiceTranscriber:
 
     def transcribe(self, attachment):
         return self.text
+
+
+class FakeVoiceTranscriberWithBytes(FakeVoiceTranscriber):
+    def __init__(self, text: str, data: bytes) -> None:
+        super().__init__(text)
+        self.data = data
+
+    def transcribe_with_bytes(self, attachment):
+        return VoiceTranscriptionResult(
+            text=self.text,
+            data=self.data,
+            mime_type=attachment.mime_type,
+            file_id=attachment.file_id,
+        )
 
 
 class FakeTTS:
@@ -365,6 +382,7 @@ class TelegramBotTests(unittest.TestCase):
             self.assertTrue(processed)
             self.assertIn("nut allergy", telegram.sent[0]["text"])
             self.assertEqual(len(llm.messages), 1)
+            self.assertNotIn("tools", llm.kwargs[0])
             metrics = json.loads(memory.get_kv("telegram:decision_metrics") or "{}")
             self.assertEqual(metrics["llm_call_histogram"], {"1": 1})
             self.assertEqual(metrics["tool_decisions"], 1)
@@ -783,7 +801,7 @@ class TelegramBotTests(unittest.TestCase):
                 telegram_config=TelegramConfig(token="token", voice_model="whisper-stub"),
                 agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
             )
-            bot._voice = FakeVoiceTranscriber("тестовий голосовий текст")
+            bot._voice = FakeVoiceTranscriberWithBytes("тестовий голосовий текст", b"voice-ogg")
             bot.bootstrap()
             processed = bot.process_update(
                 {
@@ -802,6 +820,12 @@ class TelegramBotTests(unittest.TestCase):
             voice_items = [item for item in memory.list_memories(limit=10) if "voice" in item.tags]
             self.assertTrue(voice_items)
             self.assertIn("тестовий голосовий текст", voice_items[0].text)
+            self.assertEqual(voice_items[0].media_id, "voice-file")
+            blob = memory.get_media_blob("voice-file")
+            self.assertIsNotNone(blob)
+            assert blob is not None
+            self.assertEqual(blob.bytes, b"voice-ogg")
+            self.assertEqual(blob.mime, "audio/ogg")
 
     def test_tts_sends_voice_reply_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

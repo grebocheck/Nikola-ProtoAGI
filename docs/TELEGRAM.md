@@ -256,11 +256,16 @@ Voice messages and Telegram audio messages are accepted. If
 `PROTOAGI_VOICE_MODEL` is configured, the bot downloads the Telegram audio file,
 sends it to an OpenAI-compatible `/audio/transcriptions` endpoint, and includes
 the transcript in the conversation context. Successful transcripts are stored
-as episodic voice memory.
+as episodic voice memory. By default the original OGG/audio bytes are also
+stored in `media_blobs` and linked from the voice memory via `media_id`, so a
+future transcription model can reprocess the same audio without depending on
+Telegram file retention. Set `PROTOAGI_STORE_VOICE=0` to keep transcript-only
+behavior.
 
 ```env
 PROTOAGI_VOICE_BASE_URL=http://127.0.0.1:8083/v1
 PROTOAGI_VOICE_MODEL=whisper-large-v3
+PROTOAGI_STORE_VOICE=1
 ```
 
 Outgoing TTS is opt-in. When enabled, the bot still sends the normal text reply
@@ -292,8 +297,11 @@ to avoid retry loops.
 
 The Telegram decision loop can also request bounded tools directly. The first
 wired tools are `recall` and `remind_me`: if the model returns a
-`tool_request` or OpenAI-style `tool_calls`, the bot executes up to four tool
-steps and asks the profile to revise the final decision with the tool results.
+`tool_request` inside the constrained decision JSON, the bot executes up to
+four tool steps and asks the profile to revise the final decision with the tool
+results. Native OpenAI-style `tool_calls` are still measurable through
+`protoagi bench-tools`, but Telegram production decisions pin the schema-native
+`tool_request` path for local llama.cpp compatibility.
 This lets questions like "what do you remember about me?" quote real memory
 instead of guessing from the current prompt.
 

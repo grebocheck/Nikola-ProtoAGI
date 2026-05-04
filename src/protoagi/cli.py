@@ -179,6 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
     memory_export.add_argument("--scope", default=None)
     memory_export.add_argument("--tag", action="append", default=[])
     memory_export.add_argument("--limit", type=int, default=1000)
+    memory_export.add_argument("--since", default=None, help="Only export items changed since this ISO timestamp; includes deletion tombstones.")
 
     memory_import = sub.add_parser(
         "memory-import",
@@ -614,6 +615,18 @@ def cmd_memory_eval(args: argparse.Namespace) -> int:
         for k, value in sorted(report.recall_at_k.items()):
             print(f"recall@{k}: {value:.3f}")
         print(f"MRR: {report.mrr:.3f}")
+        if report.section_metrics:
+            print("\nSections:")
+            for name, metrics in report.section_metrics.items():
+                recall = metrics.get("recall_at_k", {})
+                recall_bits = " ".join(
+                    f"recall@{k}:{float(value):.3f}"
+                    for k, value in sorted(recall.items(), key=lambda item: int(item[0]))
+                )
+                print(
+                    f"  - {name}: queries={metrics.get('queries', 0)} "
+                    f"mrr={float(metrics.get('mrr', 0.0)):.3f} {recall_bits}"
+                )
         misses = [item for item in report.queries if item.rank is None]
         if misses:
             print("\nMisses:")
@@ -704,12 +717,16 @@ def cmd_memory_export(args: argparse.Namespace) -> int:
         scope=args.scope,
         require_tags=args.tag,
         limit=args.limit,
+        since=args.since,
     )
     print(
         json.dumps(
             {
                 "path": str(result.path),
                 "exported": result.exported,
+                "deleted": result.deleted,
+                "since": result.since,
+                "created_at": result.created_at,
                 "signature": result.signature,
             },
             ensure_ascii=False,
@@ -730,6 +747,7 @@ def cmd_memory_import(args: argparse.Namespace) -> int:
                 "source": result.source,
                 "imported": result.imported,
                 "skipped": result.skipped,
+                "deleted": result.deleted,
             },
             ensure_ascii=False,
             indent=2,

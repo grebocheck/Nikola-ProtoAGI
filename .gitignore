@@ -36,6 +36,7 @@ data/*
 !data/.gitkeep
 runs/*
 !runs/.gitkeep
+!runs/*-baseline.json
 
 # Logs and OS/editor files
 *.log

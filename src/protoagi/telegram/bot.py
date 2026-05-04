@@ -84,6 +84,7 @@ from .voice import (
     VoiceSynthesisConfig,
     VoiceSynthesizer,
     VoiceTranscriptionConfig,
+    VoiceTranscriptionResult,
     VoiceTranscriber,
 )
 
@@ -503,7 +504,8 @@ class NikolaBot:
         thread_id = self.thread_id(chat_id)
         display = display_sender(user)
         image_description = self._vision.describe(image, caption=text) if image is not None else ""
-        voice_transcript = self._voice.transcribe(voice) if voice is not None else ""
+        voice_result = self._transcribe_voice(voice) if voice is not None else VoiceTranscriptionResult()
+        voice_transcript = voice_result.text
         incoming_text = self._incoming_text_with_media(
             text,
             image,
@@ -527,6 +529,7 @@ class NikolaBot:
                 voice,
                 voice_transcript,
                 user_id=user_id,
+                media_bytes=voice_result.data if self.telegram_config.store_voice else b"",
             )
         if current_message_id:
             self.memory.log_telegram_message(
@@ -687,7 +690,6 @@ class NikolaBot:
         ]
         response = self.llm.chat_completion(
             messages,
-            tools=TelegramToolRunner.schemas(),
             temperature=self.agent_config.temperature,
             top_p=self.agent_config.top_p,
             max_tokens=self.telegram_config.decision_max_tokens,
@@ -698,10 +700,7 @@ class NikolaBot:
         content = clean_model_content(message.get("content", ""))
         payload = extract_json_object(content)
         decision = decision_from_payload(payload)
-        tool_calls = message.get("tool_calls") or []
-        if tool_calls and not decision.should_reply:
-            decision.should_reply = True
-        if tool_calls or decision.tool_request:
+        if decision.tool_request:
             used_tools = True
             decision, merge_llm_calls = self._merge_decision_tool_results(
                 chat,
@@ -711,7 +710,6 @@ class NikolaBot:
                 user_id=user_id,
                 context_payload=context_payload,
                 initial_decision=decision,
-                tool_calls=tool_calls,
             )
             llm_calls += merge_llm_calls
         if self.telegram_config.reply_mode == "always":
@@ -754,7 +752,6 @@ class NikolaBot:
         user_id: str | None,
         context_payload: dict[str, Any],
         initial_decision: Decision,
-        tool_calls: list[dict[str, Any]],
     ) -> tuple[Decision, int]:
         runner = TelegramToolRunner(
             memory_service=self.memory_service,
@@ -766,7 +763,6 @@ class NikolaBot:
         )
         events = runner.run(
             tool_request=initial_decision.tool_request,
-            tool_calls=tool_calls,
         )
         if not events:
             return initial_decision, 0
@@ -1423,8 +1419,20 @@ class NikolaBot:
         transcript: str,
         *,
         user_id: str | None = None,
+        media_bytes: bytes | None = None,
     ) -> None:
         transcript = str(transcript or "").strip()
+        media_id: str | None = None
+        if media_bytes:
+            try:
+                media_id = self.memory.store_media_blob(
+                    file_id=voice.file_id,
+                    mime=voice.mime_type or "audio/ogg",
+                    data=media_bytes,
+                    caption=transcript,
+                ).file_id
+            except ((OSError, ValueError) + sqlite3_error_types()) as exc:
+                print(f"voice media persistence failed: {exc}", flush=True)
         if not transcript:
             return
         text = f"Telegram voice in chat {chat.chat_id}: {transcript}"
@@ -1447,6 +1455,7 @@ class NikolaBot:
             user_id=user_id,
             chat_id=chat.chat_id,
             persona_key=self.persona.key,
+            media_id=media_id,
             importance=0.5,
             source="telegram_voice",
             metadata={
@@ -1456,6 +1465,30 @@ class NikolaBot:
                 "label": voice.label,
                 "transcript": transcript,
             },
+        )
+
+    def _transcribe_voice(self, voice: VoiceAttachment | None) -> VoiceTranscriptionResult:
+        if voice is None:
+            return VoiceTranscriptionResult()
+        with_bytes = getattr(self._voice, "transcribe_with_bytes", None)
+        if callable(with_bytes):
+            result = with_bytes(voice)
+            if isinstance(result, VoiceTranscriptionResult):
+                return result
+            if isinstance(result, tuple):
+                text = str(result[0] if len(result) > 0 else "").strip()
+                data = result[1] if len(result) > 1 and isinstance(result[1], bytes) else b""
+                return VoiceTranscriptionResult(
+                    text=text,
+                    data=data,
+                    mime_type=voice.mime_type or "audio/ogg",
+                    file_id=voice.file_id,
+                )
+        text = self._voice.transcribe(voice)
+        return VoiceTranscriptionResult(
+            text=str(text or "").strip(),
+            mime_type=voice.mime_type or "audio/ogg",
+            file_id=voice.file_id,
         )
 
     def _persist_reminder_requests(

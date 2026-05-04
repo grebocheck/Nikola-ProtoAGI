@@ -21,7 +21,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable
 
 from .embedding import EmbeddingClient, EmbeddingIndex
 from .memory import (
@@ -168,7 +168,7 @@ class MemoryService:
         vector = None
         embed_model: str | None = None
         if embed and self.embedding_client and self.embedding_client.config.enabled:
-            vector = self.embedding_client.embed(text)
+            vector = self._embed_memory_text_or_media(text, media_id=media_id)
             if vector is not None:
                 embed_model = self.embedding_client.config.model
 
@@ -195,6 +195,26 @@ class MemoryService:
         if item is None:
             return None
         return StoredMemory(memory_id=memory_id, item=item)
+
+    def _embed_memory_text_or_media(
+        self,
+        text: str,
+        *,
+        media_id: str | None,
+    ) -> list[float] | None:
+        if not self.embedding_client or not self.embedding_client.config.enabled:
+            return None
+        if media_id:
+            blob = self.store.get_media_blob(media_id)
+            if blob is not None and blob.mime.lower().startswith("image/"):
+                vector = self.embedding_client.embed_media(
+                    blob.bytes,
+                    mime=blob.mime,
+                    caption=blob.caption or text,
+                )
+                if vector is not None:
+                    return vector
+        return self.embedding_client.embed(text)
 
     # ------------------------------------------------------------------
     # Reads
@@ -244,12 +264,14 @@ class MemoryService:
             recency = self._recency_score(item.created_at, now)
             importance = item.importance
             pinned_bonus = 0.2 if item.pinned else 0.0
+            media_bonus = 0.10 * cosine if item.media_id and (cosine > 0.0 or _looks_media_query(text)) else 0.0
             blended = (
                 0.45 * cosine
                 + 0.30 * bm25
                 + 0.15 * importance
                 + 0.10 * recency
                 + pinned_bonus
+                + media_bonus
             )
             scored.append(
                 RecallResult(item=item, score=blended, bm25=bm25, cosine=cosine)
@@ -298,7 +320,7 @@ class MemoryService:
         added = 0
         model = self.embedding_client.config.model
         for memory_id, item in items.items():
-            vector = self.embedding_client.embed(item.text)
+            vector = self._embed_memory_text_or_media(item.text, media_id=item.media_id)
             if vector is None:
                 continue
             self.store.attach_embedding(memory_id, vector, model=model)
@@ -707,6 +729,16 @@ class MemoryService:
 
 _WHITESPACE_RE = re.compile(r"\s+")
 _PUNCT_RE = re.compile(r"[\"'`.,!?:;()\[\]\{\}]")
+_MEDIA_QUERY_TOKENS = (
+    "photo",
+    "image",
+    "picture",
+    "pic",
+    "screenshot",
+    "фото",
+    "зображ",
+    "світлин",
+)
 
 
 def _normalize_text(text: str) -> str:
@@ -714,6 +746,11 @@ def _normalize_text(text: str) -> str:
     text = _PUNCT_RE.sub(" ", text)
     text = _WHITESPACE_RE.sub(" ", text)
     return text.strip()
+
+
+def _looks_media_query(text: str) -> bool:
+    lowered = text.lower()
+    return any(token in lowered for token in _MEDIA_QUERY_TOKENS)
 
 
 def _signature_match(left: str, right: str) -> bool:
@@ -744,6 +781,7 @@ def _memory_plan_view(item: MemoryItem) -> dict[str, Any]:
         "persona_key": item.persona_key,
         "media_id": item.media_id,
         "created_at": item.created_at,
+        "updated_at": item.updated_at,
         "access_count": item.access_count,
         "pinned": item.pinned,
         "tags": list(item.tags),

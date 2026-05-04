@@ -15,7 +15,6 @@ multiple threads can read while a single writer commits — see
 from __future__ import annotations
 
 import threading
-import time
 from typing import TYPE_CHECKING
 
 from ..openai_compat import OpenAICompatError

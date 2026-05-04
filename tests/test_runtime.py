@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 from protoagi.config import LlamaServerProfile
 
@@ -13,6 +14,13 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("--skip-chat-parsing", cmd)
         self.assertIn("-fa on", joined)
         self.assertIn("--n-cpu-moe 4", joined)
+
+    def test_smoke_script_exists_and_has_live_flags(self) -> None:
+        script = Path("scripts") / "smoke-test.ps1"
+        text = script.read_text(encoding="utf-8")
+        self.assertIn("TelegramOnce", text)
+        self.assertIn("PROTOAGI_SMOKE_MODEL_PATH", text)
+        self.assertIn("python -m protoagi chat", text)
 
 
 if __name__ == "__main__":
