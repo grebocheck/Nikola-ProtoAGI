@@ -89,7 +89,13 @@ if (-not $NeedsServerStart) {
 
 if ($NeedsServerStart) {
     $Server = Join-Path $Root "tools\llama.cpp\llama-server.exe"
-    $Model = Join-Path $Root "gpt-oss-20b-MXFP4.gguf"
+    $Model = Join-Path $Root "models\gpt-oss-20b-MXFP4.gguf"
+    if (!(Test-Path $Model)) {
+        $LegacyModel = Join-Path $Root "gpt-oss-20b-MXFP4.gguf"
+        if (Test-Path $LegacyModel) {
+            $Model = $LegacyModel
+        }
+    }
     $StdOut = Join-Path $Root "runs\llama-server.stdout.log"
     $StdErr = Join-Path $Root "runs\llama-server.stderr.log"
     $ServerArgs = @(

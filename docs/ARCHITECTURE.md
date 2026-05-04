@@ -4,7 +4,7 @@ ProtoAGI is a local agent harness with explicit layers.
 
 ## 1. Inference layer
 
-`llama-server.exe` serves `gpt-oss-20b-MXFP4.gguf` through an
+`llama-server.exe` serves `models/gpt-oss-20b-MXFP4.gguf` through an
 OpenAI-compatible API at `http://127.0.0.1:8080/v1`.
 
 The default runtime profile uses:
@@ -64,6 +64,9 @@ The shell tool is policy-gated, blocks common destructive patterns by default,
 and refuses any URL that resolves to loopback / private / link-local /
 multicast / reserved IP space.
 
+The registry implementation lives in `protoagi.tools_core`; `protoagi.tools`
+is kept as a small compatibility facade for existing imports and tests.
+
 ## 5. Memory
 
 SQLite is used for durable memory. WAL mode is enabled once at init, then
@@ -82,6 +85,10 @@ operations use short-lived per-call connections. The schema is typed:
 - `messages` / `tool_events` / `kv`: agent loop logs and small KV state.
 - `telegram_chats` / `telegram_messages`: Telegram-specific state.
 - `reminders`: scheduled prompts the bot should surface later.
+
+Storage types and vector helpers live in `protoagi.storage.models`; the SQLite
+store implementation lives in `protoagi.storage.memory`. `protoagi.memory`
+remains a compatibility facade.
 
 `MemoryService` is the high-level facade: it scores importance heuristically,
 performs hybrid recall (FTS + cosine + recency + importance + pinned bonus,
@@ -135,15 +142,22 @@ old monolith into focused units:
 - `voice.py` — optional Telegram voice transcription and TTS helpers
 - `style.py` — per-chat reply-style tuning from lightweight engagement
   signals
+- `attachments.py` / `sticker_ops.py` - incoming media extraction and sticker
+  pack caching/selection
 - `prompts.py` — system prompt templates
-- `bot.py` — `NikolaBot` orchestration with `dispatch_due_reminders` and
-  `run_reflection_pass` hooks
+- `orchestrator.py` — `NikolaBot` orchestration with `dispatch_due_reminders`
+  and `run_reflection_pass` hooks
+- `bot.py` — compatibility facade for the historical import path
 - `runner.py` — `BotRunner` runs the long-poll on the main thread and a
   worker thread for initiative, reminder dispatch, and reflection so a
   just-due reminder fires within ~1 s
 
 `protoagi.telegram_bot` remains a thin compatibility shim re-exporting the
 public surface so existing imports keep working.
+
+`NikolaBot` now lives in `protoagi.telegram.orchestrator`; `protoagi.telegram.bot`
+is a compatibility facade. Incoming attachment extraction and sticker-pack
+selection/caching are split into `attachments.py` and `sticker_ops.py`.
 
 The bot uses a profile selected through `.env`:
 
@@ -177,3 +191,16 @@ changes the system prompt, aliases, self-model, user model, relationship stance,
 and memory policy. Telegram facts are shared through the global Telegram memory,
 while compact dialogue history and Telegram message IDs stay per chat so style
 and reply targeting do not bleed between conversations.
+
+## 8. Admin and source organization
+
+The local admin dashboard is split between `protoagi.admin_server` for HTTP
+handling and HTML, and `protoagi.admin_data` for stats, style reports, memory
+serialization, and graph payloads. `protoagi.admin` remains a compatibility
+facade.
+
+Model weights are stored under `models/` and ignored by git except for
+`models/.gitkeep`. Source modules that moved during cleanup keep lightweight
+facades (`protoagi.memory`, `protoagi.tools`, `protoagi.admin`,
+`protoagi.telegram.bot`) so external callers do not need an immediate import
+migration.

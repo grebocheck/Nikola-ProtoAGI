@@ -35,7 +35,10 @@ function Resolve-SmokeModelPath {
     if (-not [string]::IsNullOrWhiteSpace($env:PROTOAGI_SMOKE_MODEL_PATH)) {
         return (Resolve-Path $env:PROTOAGI_SMOKE_MODEL_PATH).Path
     }
-    $Default = Join-Path $Root "gpt-oss-20b-MXFP4.gguf"
+    $Default = Join-Path $Root "models\gpt-oss-20b-MXFP4.gguf"
+    if (!(Test-Path $Default)) {
+        $Default = Join-Path $Root "gpt-oss-20b-MXFP4.gguf"
+    }
     if (Test-Path $Default) {
         return $Default
     }

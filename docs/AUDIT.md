@@ -1,6 +1,6 @@
 # Architecture Audit
 
-Last audit: 2026-05-03
+Last audit: 2026-05-04
 
 For the forward-looking plan and prioritized backlog, see
 [ROADMAP.md](ROADMAP.md).
@@ -17,6 +17,26 @@ ProtoAGI has four main layers:
 The repository is now arranged so source code and documentation can be pushed to
 git without committing local model files, downloaded runtimes, logs, databases,
 or secrets.
+
+## 2026-05-04 cleanup and modularization
+
+- Moved local GGUF weights into `models/` and updated config defaults plus
+  launcher/smoke-test scripts to prefer `models/gpt-oss-20b-MXFP4.gguf`.
+- Split storage types and vector helpers into `protoagi.storage.models`; the
+  SQLite implementation now lives under `protoagi.storage.memory`, with
+  `protoagi.memory` preserved as a compatibility facade.
+- Moved implementation-heavy modules behind stable facades:
+  `protoagi.tools_core`, `protoagi.admin_server`, and
+  `protoagi.telegram.orchestrator`.
+- Extracted admin stats/serialization/style/graph helpers into
+  `protoagi.admin_data`.
+- Extracted Telegram attachment parsing and sticker-pack operations into
+  `protoagi.telegram.attachments` and `protoagi.telegram.sticker_ops`.
+- Removed the duplicated `examples/first_tasks.md` quick-start note and cleaned
+  generated Python/tooling caches.
+
+Verification: 152 unit tests, `ruff`, `mypy --strict`, `memory-eval` baseline
+comparison, `protoagi status`, and `git diff --check`.
 
 ## 2026-05-03 phase 11 (B-cohort implementation)
 
@@ -162,7 +182,8 @@ Test count: 138 → 145.
   global and active-persona scopes after consolidation. Counters
   ``pruned_global`` / ``pruned_persona`` are surfaced.
 - Admin dashboard supports inline curation: ``set_pinned`` and
-  ``update_memory`` in [memory.py](../src/protoagi/memory.py); endpoints
+  ``update_memory`` in [storage/memory.py](../src/protoagi/storage/memory.py);
+  endpoints
   ``POST /api/memories/<id>/pin`` and ``POST /api/memories/<id>/edit``.
   The HTML view ships save / pin / delete buttons with a small JS shim.
 - [scripts/eval-memory.ps1](../scripts/eval-memory.ps1) runs the eval
@@ -283,8 +304,8 @@ Test count: 99 → 107.
 - Telegram remembered facts are global by default for the single-owner bot.
   Multi-user deployments should set `PROTOAGI_TELEGRAM_GLOBAL_MEMORY=0` and
   still define an explicit privacy policy before broad access.
-- The model file is ignored. Document or script model acquisition before sharing
-  the repo with another machine.
+- Model weights under `models/` are ignored. Document or script model
+  acquisition before sharing the repo with another machine.
 - The agent has a safe shell policy, but enabling `--allow-unsafe-shell` remains
   inherently risky.
 
@@ -293,14 +314,14 @@ Test count: 99 → 107.
 ```powershell
 .\run-tests.bat
 git status --short
-git add .gitignore .gitattributes .env.example README.md pyproject.toml docs examples scripts src tests run-nikola.bat run-nikola.sh run-tests.bat run-tests.sh data/.gitkeep runs/.gitkeep tools/.gitkeep
+git add .gitignore .gitattributes .env.example README.md pyproject.toml docs scripts src tests run-nikola.bat run-nikola.sh run-tests.bat run-tests.sh data/.gitkeep runs/.gitkeep tools/.gitkeep models/.gitkeep
 git status --short
 ```
 
 Before committing, confirm that these do not appear in `git status`:
 
 - `.env`
-- `gpt-oss-20b-MXFP4.gguf`
+- `models/gpt-oss-20b-MXFP4.gguf`
 - `tools/llama.cpp/*`
 - `tools/downloads/*`
 - `data/protoagi.sqlite3`

@@ -59,7 +59,7 @@ Test count grew 53 → 99.
   `pruned_persona`.
 - **P0-3** Admin dashboard supports inline editing: `set_pinned`,
   `update_memory(text/importance/tags)` in
-  [memory.py](../src/protoagi/memory.py); endpoints
+  [storage/memory.py](../src/protoagi/storage/memory.py); endpoints
   `POST /api/memories/<id>/pin` (toggle or explicit) and
   `POST /api/memories/<id>/edit`. The HTML view ships save / pin /
   delete buttons + a tiny JS shim with toast feedback.
@@ -295,6 +295,22 @@ Telegram/model run:
   when a live token and pending user update are available.
 
 Test count: 145 → 152.
+
+### Phase 12 - codebase cleanup and modularization (2026-05-04)
+
+- Local GGUF weights moved under `models/`, with launch/smoke scripts and
+  `AgentConfig` defaults updated to prefer that path while keeping a legacy
+  root-path fallback.
+- Storage types/vector helpers moved to `protoagi.storage.models`; the SQLite
+  store lives in `protoagi.storage.memory`; `protoagi.memory` remains a facade.
+- Tool, admin, and Telegram implementation modules moved to
+  `tools_core.py`, `admin_server.py`, and `telegram/orchestrator.py` behind
+  compatibility facades.
+- Admin data shaping split into `admin_data.py`; Telegram attachment parsing
+  and sticker operations split into `telegram/attachments.py` and
+  `telegram/sticker_ops.py`.
+- Removed duplicated quick-start markdown under `examples/` and cleaned local
+  Python/tooling caches.
 
 ### Phase 9 — P3 research baselines (2026-05-03)
 Turned each P3 research direction into a dependency-free first working layer:

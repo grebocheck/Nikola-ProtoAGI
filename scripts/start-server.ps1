@@ -14,7 +14,13 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $Server = Join-Path $Root "tools\llama.cpp\llama-server.exe"
 if ($ModelPath -eq "") {
-    $ModelPath = Join-Path $Root "gpt-oss-20b-MXFP4.gguf"
+    $ModelPath = Join-Path $Root "models\gpt-oss-20b-MXFP4.gguf"
+    if (!(Test-Path $ModelPath)) {
+        $LegacyModelPath = Join-Path $Root "gpt-oss-20b-MXFP4.gguf"
+        if (Test-Path $LegacyModelPath) {
+            $ModelPath = $LegacyModelPath
+        }
+    }
 }
 
 if (!(Test-Path $Server)) {

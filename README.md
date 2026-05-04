@@ -1,6 +1,6 @@
 # ProtoAGI
 
-ProtoAGI is a local agentic research harness for `gpt-oss-20b-MXFP4.gguf`.
+ProtoAGI is a local agentic research harness for `models/gpt-oss-20b-MXFP4.gguf`.
 It is not a claim of artificial general intelligence. It is a practical system
 for iterating toward stronger autonomy on limited local hardware:
 
@@ -20,7 +20,7 @@ This workspace was prepared for:
 - 32 GB system RAM
 - Ryzen 7 7800X3D
 - Windows + CUDA 13.1
-- model file: `gpt-oss-20b-MXFP4.gguf`
+- model file: `models/gpt-oss-20b-MXFP4.gguf`
 
 The model is close to the VRAM limit. Start with 8k context and partial MoE CPU
 offload, then increase context only after benchmarking.
@@ -225,9 +225,14 @@ Live smoke testing is optional and expects a local GGUF model:
 
 ## Project layout
 
+- `models/` - local GGUF/model weights, ignored except `.gitkeep`
 - `tools/llama.cpp/` - downloaded llama.cpp CUDA runtime
 - `scripts/` - launch and benchmark helpers
-- `src/protoagi/` - agent, memory, tools, runtime, CLI
+- `src/protoagi/` - agent, runtime, CLI, and compatibility import paths
+- `src/protoagi/tools_core.py` - tool registry implementation (`tools.py` keeps the old import path)
+- `src/protoagi/admin_server.py` / `admin_data.py` - admin HTTP UI and dashboard data shaping
+- `src/protoagi/storage/` - SQLite storage, typed storage models, and vector helpers
+- `src/protoagi/telegram/` - Telegram transport, prompts, style, media, stickers, and orchestration
 - `data/` - SQLite memory database
 - `runs/` - benchmark output
 - `docs/` - architecture and runtime notes

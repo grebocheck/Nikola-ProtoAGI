@@ -28,6 +28,8 @@ env/
 *.bin
 *.pt
 *.pth
+models/*
+!models/.gitkeep
 tools/*
 !tools/.gitkeep
 

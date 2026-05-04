@@ -10,7 +10,8 @@ from .env import env_bool, env_int, load_project_env
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MODEL_PATH = PROJECT_ROOT / "gpt-oss-20b-MXFP4.gguf"
+MODELS_DIR = PROJECT_ROOT / "models"
+DEFAULT_MODEL_PATH = MODELS_DIR / "gpt-oss-20b-MXFP4.gguf"
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "protoagi.sqlite3"
 DEFAULT_LLAMA_DIR = PROJECT_ROOT / "tools" / "llama.cpp"
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "protoagi.json"
