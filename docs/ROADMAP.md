@@ -119,6 +119,32 @@ Test count: 107 → 116.
 
 Test count: 116 → 121.
 
+### Phase 12 — sticker policy rebalance (2026-05-04)
+
+The bot was over-stickerizing. Three intertwined causes shipped together
+in one pass:
+
+- **Prompt:** the decision prompt asked the model to "use stickers
+  noticeably more often" — flipped to "default to text, only sticker when
+  it materially replaces words; never two in a row". Initiative prompt
+  similarly tightened.
+- **Trigger narrowing:** ``auto_sticker_choice`` fired on bare nouns
+  like ``чай``/``кава``/``грати``. Hidden bug: ``[хa]`` mixed Cyrillic
+  «х» with Latin «a», breaking Ukrainian laughter detection. Replaced
+  with explicit laughter (``ахах``, ``lol``, ``🤣``), warmth
+  (``❤``, ``🤗``, ``обнімаю``, ``дякую тобі``), or unambiguous gameplay
+  context — and a long-reply guard.
+- **Defaults + post-filter:** ``sticker_frequency`` default lowered
+  ``normal → low``, cooldown ``3 → 6`` user messages, new
+  ``sticker_max_reply_chars=180`` and ``sticker_initiative_enabled=False``.
+  ``_filter_decision_stickers`` runs after every decision (and before
+  every initiative send) to clear stickers when topic is serious,
+  reply is long, the cooldown hasn't elapsed, the chat sits in the
+  ``concise`` style-tuner arm, or the source is initiative without
+  opt-in.
+
+Test count: 152 → 161 (new ``tests/test_sticker_policy.py``).
+
 ### Phase 8 — A-cohort + remaining P3 finished (2026-05-03)
 
 The agent worked through the entire follow-up backlog. Nothing in the

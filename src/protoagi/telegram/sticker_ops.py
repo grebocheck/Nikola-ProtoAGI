@@ -18,6 +18,42 @@ class TelegramStickerMixin:
     memory: MemoryStore
     _sticker_cache: dict[str, list[dict[str, str]]]
 
+    def _filter_decision_stickers(
+        self,
+        chat: TelegramChat,
+        incoming_text: str,
+        decision: Decision,
+        *,
+        is_initiative: bool = False,
+    ) -> None:
+        """Trim stickers the model already proposed when context says no.
+
+        The LLM is asked (in the prompt) to default to text-only replies,
+        but it still occasionally over-stickerizes. We post-filter:
+
+        - drop *all* stickers on serious topics, regardless of source;
+        - drop stickers in initiative messages unless the operator opted in
+          via ``sticker_initiative_enabled``;
+        - drop stickers when the reply text is paragraph-length;
+        - drop stickers when the cooldown window has not elapsed since the
+          last sticker we sent in this chat.
+        """
+
+        if not decision.stickers:
+            return
+        if looks_serious_for_sticker(incoming_text):
+            decision.stickers = []
+            return
+        if is_initiative and not self.telegram_config.sticker_initiative_enabled:
+            decision.stickers = []
+            return
+        reply_text = " ".join(decision_reply_texts(decision)).strip()
+        if reply_text and len(reply_text) > self.telegram_config.sticker_max_reply_chars:
+            decision.stickers = []
+            return
+        if self._recent_sticker_count(chat.chat_id) >= 1:
+            decision.stickers = []
+
     def _maybe_add_reaction_sticker(self, chat: TelegramChat, incoming_text: str, decision: Decision) -> None:
         if decision.stickers or chat.chat_type != "private":
             return
@@ -26,18 +62,42 @@ class TelegramStickerMixin:
         frequency = self.telegram_config.sticker_frequency
         if frequency == "off" or looks_serious_for_sticker(incoming_text):
             return
-        choice = auto_sticker_choice(incoming_text, " ".join(decision_reply_texts(decision)))
+        if self._adaptive_style_arm(chat.chat_id) == "concise":
+            # Bandit picked a quieter style for this chat; honour it.
+            return
+        choice = auto_sticker_choice(
+            incoming_text,
+            " ".join(decision_reply_texts(decision)),
+            max_reply_chars=self.telegram_config.sticker_max_reply_chars,
+        )
         if not choice:
             return
         if self._recent_sticker_count(chat.chat_id) >= 1:
             return
         thresholds = {"low": 12, "normal": 25, "high": 40, "always": 100}
-        threshold = thresholds.get(frequency, 25)
+        threshold = thresholds.get(frequency, 12)
         seed = f"{chat.chat_id}|{incoming_text}|{decision.reply}|{'|'.join(decision.replies)}"
         bucket = int(hashlib.sha1(seed.encode("utf-8")).hexdigest()[:8], 16) % 100
         if bucket >= threshold:
             return
         decision.stickers.append(choice)
+
+    def _adaptive_style_arm(self, chat_id: str | int) -> str:
+        """Best-effort lookup of the current style-tuner arm for ``chat_id``.
+
+        Returns ``"balanced"`` when the tuner is not wired in (older test
+        fixtures) or when its state is unreadable, so callers can treat
+        ``concise`` as the only special case worth silencing on.
+        """
+
+        tuner = getattr(self, "_style_tuner", None)
+        if tuner is None:
+            return "balanced"
+        try:
+            payload = tuner.state_payload(chat_id)
+        except Exception:  # noqa: BLE001 - best effort hint
+            return "balanced"
+        return str(payload.get("last_choice") or "balanced")
 
     def _recent_sticker_count(self, chat_id: str | int) -> int:
         limit = max(6, self.telegram_config.sticker_cooldown_messages * 3)

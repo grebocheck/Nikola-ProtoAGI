@@ -47,3 +47,5 @@ runs/*
 Thumbs.db
 .idea/
 .vscode/
+.claude/
+

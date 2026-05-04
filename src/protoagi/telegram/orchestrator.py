@@ -578,6 +578,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             chat_state=chat_state,
             user_id=user_id,
         )
+        self._filter_decision_stickers(chat_state, incoming_text, decision)
         self._maybe_add_reaction_sticker(chat_state, incoming_text, decision)
         if not decision.should_reply and not decision.stickers:
             self._schedule_from_minutes(chat_state.chat_id, decision.next_check_minutes)
@@ -938,6 +939,18 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             self._schedule_from_minutes(chat.chat_id, decision.next_check_minutes)
             if not decision.send:
                 continue
+            # Initiative messages should default to text-only. The filter
+            # respects ``sticker_initiative_enabled`` for operators who
+            # explicitly opt in.
+            shadow = Decision(
+                should_reply=True,
+                reply=decision.message,
+                memories=[],
+                replies=[decision.message] if decision.message else [],
+                stickers=list(decision.stickers),
+            )
+            self._filter_decision_stickers(chat, chat.display_name, shadow, is_initiative=True)
+            decision.stickers = shadow.stickers
             if not decision.message.strip() and not decision.stickers:
                 continue
             try:

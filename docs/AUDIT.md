@@ -18,6 +18,44 @@ The repository is now arranged so source code and documentation can be pushed to
 git without committing local model files, downloaded runtimes, logs, databases,
 or secrets.
 
+## 2026-05-04 phase 12 (sticker policy rebalance)
+
+The default Telegram persona was sending stickers far too often. Three
+mutually-reinforcing causes:
+
+1. The decision prompt explicitly told the model to "use stickers
+   noticeably more often". Replaced with a strict opposite — text-only
+   by default, stickers only when they materially replace words, never
+   two stickers in a row.
+2. Auto-reaction triggers fired on bare nouns (``чай``, ``кава``,
+   ``грати``) and treated Cyrillic «а» as Latin «a», which broke the
+   Ukrainian laughter pattern and silently overcompensated through
+   warm-pack triggers. Tightened to explicit laughter / warmth / gameplay
+   markers; the regex bug is documented inline.
+3. Defaults were too permissive: ``sticker_frequency=normal`` (25%
+   bucket) and ``sticker_cooldown_messages=3``. Lowered to ``low`` (12%)
+   and ``6`` user messages, plus a new
+   ``sticker_max_reply_chars=180`` filter that drops stickers paired
+   with paragraph-shaped replies.
+
+A new ``_filter_decision_stickers`` helper post-processes both LLM-emitted
+and auto-reaction stickers and respects:
+
+- serious topics (cleared regardless of source);
+- proactive initiative messages (cleared by default; opt-in via
+  ``NIKOLA_STICKER_INITIATIVE=1``);
+- long replies (paragraph threshold);
+- the cooldown window since the bot's last sticker;
+- the per-chat style tuner — when the bandit picks ``concise`` we keep
+  stickers off entirely.
+
+Initiative messages now have a dedicated ``Decision`` shadow that runs
+through the same filter so the model can no longer push a "soft hello +
+sticker" past the policy.
+
+Verification: 152 → 161 unit tests; ``memory-eval`` regression gate
+clean.
+
 ## 2026-05-04 cleanup and modularization
 
 - Moved local GGUF weights into `models/` and updated config defaults plus

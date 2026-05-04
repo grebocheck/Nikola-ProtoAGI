@@ -192,8 +192,8 @@ The bot can send one to three short Telegram messages for a single turn when
 that feels more natural than one polished paragraph. The decision JSON supports
 both a legacy `reply` string and a `replies` array.
 
-The bot can also pair text with stickers more often in light private chats. The
-current sticker sets are:
+The bot uses stickers sparingly: most replies are text-only. The current
+sticker sets are:
 
 - `Bocchi_the_Rock_sticker_pack2`
 - `SenkoSan`
@@ -206,14 +206,32 @@ Short generic sticker captions such as "hope this lifted your mood" are
 suppressed when a sticker is already being sent.
 
 ```env
-NIKOLA_STICKER_FREQUENCY=normal
-NIKOLA_STICKER_COOLDOWN_MESSAGES=3
+NIKOLA_STICKER_FREQUENCY=low
+NIKOLA_STICKER_COOLDOWN_MESSAGES=6
+NIKOLA_STICKER_MAX_REPLY_CHARS=180
+NIKOLA_STICKER_INITIATIVE=0
 TELEGRAM_MAX_REPLY_MESSAGES=3
 ```
 
-`NIKOLA_STICKER_FREQUENCY` accepts `off`, `low`, `normal`, `high`, or `always`.
-The automatic sticker nudge is skipped for serious or heavy topics and only
-fires on clear emotional triggers, with a small per-chat cooldown.
+`NIKOLA_STICKER_FREQUENCY` accepts `off`, `low`, `normal`, `high`, or
+`always`. The default is `low`. Beyond the percentage cap, stickers are
+filtered out — for both LLM-emitted and auto-reaction paths — when:
+
+- the topic is serious / heavy (legal, medical, conflict, anxiety);
+- the reply text is longer than `NIKOLA_STICKER_MAX_REPLY_CHARS`
+  (a sticker rarely fits a paragraph-shaped human thought);
+- the bot already sent a sticker within the last
+  `NIKOLA_STICKER_COOLDOWN_MESSAGES` user messages
+  (no two stickers in a row);
+- the message is a proactive *initiative*, unless
+  `NIKOLA_STICKER_INITIATIVE=1` is set;
+- the per-chat style tuner currently leans toward the `concise` arm.
+
+The auto-reaction trigger words are intentionally narrow: explicit
+laughter (`ахах`, `lol`, `🤣`/`😂`), explicit warmth (`❤`, `🤗`,
+`обнімаю`, `дякую тобі`), or unambiguous gameplay context. Single
+neutral nouns like `чай`, `кава`, or `грати` no longer fire on their
+own.
 
 The bot also keeps a small per-chat style tuner in SQLite. Replies, reaction
 updates, and edited messages are treated as lightweight engagement signals; the

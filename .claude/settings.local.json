@@ -9,7 +9,11 @@
       "Bash(powershell -ExecutionPolicy Bypass -File scripts/eval-memory.ps1)",
       "Bash(python -c ' *)",
       "Bash(python scripts/check_baseline.py memory-eval --report runs/memory-eval-ci.json)",
-      "Bash(python scripts/check_baseline.py bench-tools --report runs/bench-tools-baseline.json)"
+      "Bash(python scripts/check_baseline.py bench-tools --report runs/bench-tools-baseline.json)",
+      "Bash(PYTHONPATH=src python -m unittest tests.test_telegram_bot.TelegramBotTests.test_private_reply_can_get_auto_reaction_sticker)",
+      "Bash(PYTHONPATH=src python -m unittest tests.test_telegram_bot.TelegramBotTests.test_private_reply_can_get_auto_reaction_sticker tests.test_telegram_bot.TelegramBotTests.test_auto_reaction_sticker_requires_emotional_trigger tests.test_telegram_bot.TelegramBotTests.test_auto_reaction_sticker_respects_recent_sticker_cooldown)",
+      "Bash(grep -n \"import re$\\\\|from protoagi.telegram.stickers\\\\|from protoagi.telegram.sticker_ops\" tests/test_telegram_bot.py)",
+      "Bash(PYTHONPATH=src python -m unittest tests.test_sticker_policy)"
     ]
   }
 }

@@ -22,8 +22,14 @@ class TelegramConfig:
     max_memory_facts: int = 6
     decision_max_tokens: int = 768
     max_reply_messages: int = 3
-    sticker_frequency: str = "normal"
-    sticker_cooldown_messages: int = 3
+    # Default policy is "low": stickers feel like a punctuation mark, not a
+    # filler. Cooldown is measured in user messages between stickers.
+    # Replies longer than ``sticker_max_reply_chars`` are also kept text-only
+    # because a sticker rarely fits a long human thought.
+    sticker_frequency: str = "low"
+    sticker_cooldown_messages: int = 6
+    sticker_max_reply_chars: int = 180
+    sticker_initiative_enabled: bool = False
     fictional_self_enabled: bool = True
     global_memory: bool = True
     proactive_enabled: bool = True
@@ -60,9 +66,9 @@ class TelegramConfig:
         reply_mode = os.environ.get("NIKOLA_REPLY_MODE", "smart").strip() or "smart"
         if reply_mode not in {"smart", "always", "mention", "silent"}:
             reply_mode = "smart"
-        sticker_frequency = os.environ.get("NIKOLA_STICKER_FREQUENCY", "normal").strip().lower() or "normal"
+        sticker_frequency = os.environ.get("NIKOLA_STICKER_FREQUENCY", "low").strip().lower() or "low"
         if sticker_frequency not in {"off", "low", "normal", "high", "always"}:
-            sticker_frequency = "normal"
+            sticker_frequency = "low"
         return cls(
             token=token,
             persona_key=persona_key,
@@ -71,7 +77,9 @@ class TelegramConfig:
             poll_timeout_seconds=env_int("TELEGRAM_POLL_TIMEOUT", 25),
             max_reply_messages=env_int("TELEGRAM_MAX_REPLY_MESSAGES", 3),
             sticker_frequency=sticker_frequency,
-            sticker_cooldown_messages=env_int("NIKOLA_STICKER_COOLDOWN_MESSAGES", 3),
+            sticker_cooldown_messages=env_int("NIKOLA_STICKER_COOLDOWN_MESSAGES", 6),
+            sticker_max_reply_chars=env_int("NIKOLA_STICKER_MAX_REPLY_CHARS", 180),
+            sticker_initiative_enabled=env_bool("NIKOLA_STICKER_INITIATIVE", False),
             fictional_self_enabled=env_bool("NIKOLA_FICTIONAL_SELF", True),
             global_memory=env_bool("PROTOAGI_TELEGRAM_GLOBAL_MEMORY", True),
             proactive_enabled=env_bool("NIKOLA_PROACTIVE", True),
