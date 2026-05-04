@@ -7,26 +7,26 @@ from pathlib import Path
 import sys
 from typing import Any
 
-from .admin import serve as serve_admin
+from .admin_panel.server import serve as serve_admin
+from .agent_tools.core import default_registry
 from .agent import ProtoAgent
-from .backup import BackupError, backup_database, default_backup_path, restore_database
-from .bench import bench_endpoint, endpoint_results_to_json, run_llama_bench
 from .config import AgentConfig, DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PATH, LlamaServerProfile, PROJECT_ROOT
+from .evals.bench import bench_endpoint, endpoint_results_to_json, run_llama_bench
+from .evals.memory import DEFAULT_CORPUS_PATH, run_eval
 from .embedding import EmbeddingClient, EmbeddingConfig
-from .memory import MemoryStore
-from .memory_eval import DEFAULT_CORPUS_PATH, run_eval
-from .memory_federation import (
+from .storage.backup import BackupError, backup_database, default_backup_path, restore_database
+from .storage.federation import (
     MemoryFederationError,
     export_memory_bundle,
     import_memory_bundle,
 )
-from .memory_service import MemoryService
+from .storage.memory import MemoryStore
+from .storage.service import MemoryService
 from .openai_compat import OpenAICompatibleClient, OpenAICompatError
 from .runtime import run_server_foreground, status_report
 from .telegram.json_io import DECISION_JSON_SCHEMA, extract_json_object
 from .telegram.tool_runner import TelegramToolRunner
-from .telegram_bot import AsyncBotRunner, BotRunner, TelegramApiError, TelegramConfig, build_nikola_bot, is_telegram_polling_conflict
-from .tools import default_registry
+from .telegram import AsyncBotRunner, BotRunner, TelegramApiError, TelegramConfig, build_nikola_bot, is_telegram_polling_conflict
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -641,7 +641,7 @@ def cmd_memory_stats(args: argparse.Namespace) -> int:
         print(f"no database at {db_path}", file=sys.stderr)
         return 2
     store, _ = _build_memory_service(db_path)
-    from .admin import _stats
+    from .admin_panel.server import _stats
 
     print(json.dumps(_stats(store), ensure_ascii=False, indent=2))
     return 0

@@ -6,8 +6,8 @@ import json
 import math
 from typing import Any
 
-from .memory import MemoryStore
-from .telegram.style import STYLE_ARM_ORDER, STYLE_LAST_SENT_PREFIX, STYLE_STATE_PREFIX
+from ..storage.memory import MemoryStore
+from ..telegram.style import STYLE_ARM_ORDER, STYLE_LAST_SENT_PREFIX, STYLE_STATE_PREFIX
 
 
 def stats(memory: MemoryStore) -> dict[str, Any]:

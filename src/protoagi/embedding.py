@@ -19,7 +19,7 @@ from typing import Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .memory import MemoryStore, cosine_similarity
+from .storage.memory import MemoryStore, cosine_similarity
 
 
 class EmbeddingError(RuntimeError):

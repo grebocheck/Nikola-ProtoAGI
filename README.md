@@ -228,10 +228,11 @@ Live smoke testing is optional and expects a local GGUF model:
 - `models/` - local GGUF/model weights, ignored except `.gitkeep`
 - `tools/llama.cpp/` - downloaded llama.cpp CUDA runtime
 - `scripts/` - launch and benchmark helpers
-- `src/protoagi/` - agent, runtime, CLI, and compatibility import paths
-- `src/protoagi/tools_core.py` - tool registry implementation (`tools.py` keeps the old import path)
-- `src/protoagi/admin_server.py` / `admin_data.py` - admin HTTP UI and dashboard data shaping
-- `src/protoagi/storage/` - SQLite storage, typed storage models, and vector helpers
+- `src/protoagi/` - agent, runtime, CLI, and domain packages
+- `src/protoagi/agent_tools/` - tool registry implementation
+- `src/protoagi/admin_panel/` - admin HTTP UI and dashboard data shaping
+- `src/protoagi/evals/` - endpoint benchmarks and memory recall evaluation
+- `src/protoagi/storage/` - SQLite storage, typed models, backups, federation, and recall service
 - `src/protoagi/telegram/` - Telegram transport, prompts, style, media, stickers, and orchestration
 - `data/` - SQLite memory database
 - `runs/` - benchmark output

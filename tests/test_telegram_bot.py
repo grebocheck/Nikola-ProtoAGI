@@ -4,14 +4,13 @@ import tempfile
 import unittest
 
 from protoagi.config import AgentConfig
-from protoagi.memory import MemoryStore
-from protoagi.telegram_bot import (
+from protoagi.storage.memory import MemoryStore
+from protoagi.telegram import (
     NikolaBot,
     TELEGRAM_GLOBAL_MEMORY_TAG,
     TELEGRAM_PERSONA_SELF_MEMORY_TAG,
     TelegramConfig,
     VoiceTranscriptionResult,
-    auto_sticker_choice,
     clean_vision_description,
     decision_from_payload,
     decision_reply_texts,

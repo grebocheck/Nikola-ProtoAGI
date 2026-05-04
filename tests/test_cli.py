@@ -12,7 +12,7 @@ from protoagi.cli import (
     classify_tool_response_message,
     main,
 )
-from protoagi.memory import SCOPE_GLOBAL, SCOPE_USER, MemoryStore
+from protoagi.storage.memory import SCOPE_GLOBAL, SCOPE_USER, MemoryStore
 
 
 class CliParserTests(unittest.TestCase):

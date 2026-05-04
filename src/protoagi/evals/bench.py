@@ -7,9 +7,9 @@ from pathlib import Path
 import subprocess
 import time
 
-from .config import LlamaServerProfile
-from .harmony import clean_model_content
-from .openai_compat import OpenAICompatibleClient
+from ..config import LlamaServerProfile
+from ..harmony import clean_model_content
+from ..openai_compat import OpenAICompatibleClient
 
 
 @dataclass(slots=True)

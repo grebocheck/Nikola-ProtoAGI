@@ -9,10 +9,10 @@ from typing import Any
 from .config import AgentConfig
 from .embedding import EmbeddingClient, EmbeddingConfig
 from .harmony import clean_model_content
-from .memory import MemoryStore
-from .memory_service import MemoryService, RecallQuery
 from .openai_compat import OpenAICompatibleClient
-from .tools import ToolRegistry, result_to_tool_content
+from .agent_tools.core import ToolRegistry, result_to_tool_content
+from .storage.memory import MemoryStore
+from .storage.service import MemoryService, RecallQuery
 
 
 SYSTEM_PROMPT = """You are ProtoAGI, a local experimental agent running on the user's machine.

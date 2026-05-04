@@ -2,7 +2,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from protoagi.memory import MemoryStore
+from protoagi.storage.memory import MemoryStore
 from protoagi.telegram.style import ReplyStyleTuner
 
 

@@ -1,4 +1,4 @@
-"""High-level memory facade used by the agent and Telegram bot.
+"""High-level memory service used by the agent and Telegram bot.
 
 The service owns three responsibilities that the raw ``MemoryStore`` should
 not care about:
@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
-from .embedding import EmbeddingClient, EmbeddingIndex
+from ..embedding import EmbeddingClient, EmbeddingIndex
 from .memory import (
     ALL_KINDS,
     ALL_SCOPES,
@@ -37,7 +37,7 @@ from .memory import (
     SCOPE_PERSONA,
     SCOPE_USER,
 )
-from .openai_compat import OpenAICompatibleClient
+from ..openai_compat import OpenAICompatibleClient
 
 
 PRONOUN_TOKENS = {

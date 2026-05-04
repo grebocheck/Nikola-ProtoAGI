@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
-from ..memory import TelegramChat
-from ..memory_service import MemoryService, RecallQuery
+from ..storage.memory import TelegramChat
+from ..storage.service import MemoryService, RecallQuery
 from .constants import TELEGRAM_GLOBAL_MEMORY_TAG
 
 

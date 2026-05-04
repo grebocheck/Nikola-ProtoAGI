@@ -64,8 +64,7 @@ The shell tool is policy-gated, blocks common destructive patterns by default,
 and refuses any URL that resolves to loopback / private / link-local /
 multicast / reserved IP space.
 
-The registry implementation lives in `protoagi.tools_core`; `protoagi.tools`
-is kept as a small compatibility facade for existing imports and tests.
+The registry implementation lives in `protoagi.agent_tools.core`.
 
 ## 5. Memory
 
@@ -87,25 +86,24 @@ operations use short-lived per-call connections. The schema is typed:
 - `reminders`: scheduled prompts the bot should surface later.
 
 Storage types and vector helpers live in `protoagi.storage.models`; the SQLite
-store implementation lives in `protoagi.storage.memory`. `protoagi.memory`
-remains a compatibility facade.
+store implementation lives in `protoagi.storage.memory`; hybrid recall and
+importance scoring live in `protoagi.storage.service`.
 
-`MemoryService` is the high-level facade: it scores importance heuristically,
+`MemoryService` is the high-level memory service: it scores importance heuristically,
 performs hybrid recall (FTS + cosine + recency + importance + pinned bonus,
 plus a small media-aware cosine boost for image-linked items), exposes a
 heuristic consolidation pass that supersedes near-duplicate items, and a
 ``prune()`` pass that forgets low-value items by a blended
-``importance × recency × access`` score. Embeddings are optional; when no
+``importance Г— recency Г— access`` score. Embeddings are optional; when no
 embedding endpoint is configured, recall falls back to FTS only.
 
-A small evaluation harness lives in ``protoagi.memory_eval``: it loads a
-JSON corpus (``config/memory_eval/golden.json`` by default), plays probe
-queries through ``MemoryService.recall``, and reports recall@k, MRR, and
-per-section subscores for friendly, contradiction, negative, paraphrase, and
-media-caption probes. ``protoagi memory-eval [--with-embeddings]`` runs it
-end-to-end.
+A small evaluation harness lives in `protoagi.evals.memory`: it loads a JSON
+corpus (`config/memory_eval/golden.json` by default), plays probe queries
+through `MemoryService.recall`, and reports recall@k, MRR, and per-section
+subscores for friendly, contradiction, negative, paraphrase, and media-caption
+probes. `protoagi memory-eval [--with-embeddings]` runs it end-to-end.
 
-`protoagi.memory_federation` exports curated active memories as HMAC-signed
+`protoagi.storage.federation` exports curated active memories as HMAC-signed
 JSON bundles and imports them idempotently on another machine with
 `protoagi memory-export` / `protoagi memory-import`. Full exports store a
 source/filter manifest in `kv`; `memory-export --since <iso>` emits only
@@ -113,7 +111,7 @@ new/changed rows plus deletion tombstones keyed by `federation_id`.
 
 ## 6. Evaluation
 
-The system includes two benchmark paths:
+The system includes two benchmark paths, implemented under `protoagi.evals`:
 
 - `llama-bench` for raw runtime profiles
 - endpoint benchmark for real chat latency
@@ -132,37 +130,32 @@ Future evals should add task suites for:
 The Telegram bot lives in the `protoagi.telegram` package and decomposes the
 old monolith into focused units:
 
-- `api.py` — Telegram Bot API transport
-- `config.py` — env-loaded configuration
-- `text.py` / `json_io.py` — text and decision payload helpers (with
+- `api.py` вЂ” Telegram Bot API transport
+- `config.py` вЂ” env-loaded configuration
+- `text.py` / `json_io.py` вЂ” text and decision payload helpers (with
   `DECISION_JSON_SCHEMA` / `INITIATIVE_JSON_SCHEMA` forwarded to the model
   as `response_format` so decisions arrive as well-formed JSON)
-- `stickers.py` / `vision.py` / `identity.py` — narrow concerns extracted
+- `stickers.py` / `vision.py` / `identity.py` вЂ” narrow concerns extracted
   for testing and iteration
-- `voice.py` — optional Telegram voice transcription and TTS helpers
-- `style.py` — per-chat reply-style tuning from lightweight engagement
+- `voice.py` вЂ” optional Telegram voice transcription and TTS helpers
+- `style.py` вЂ” per-chat reply-style tuning from lightweight engagement
   signals
 - `attachments.py` / `sticker_ops.py` - incoming media extraction and sticker
   pack caching/selection
-- `prompts.py` — system prompt templates
-- `orchestrator.py` — `NikolaBot` orchestration with `dispatch_due_reminders`
+- `prompts.py` вЂ” system prompt templates
+- `orchestrator.py` вЂ” `NikolaBot` orchestration with `dispatch_due_reminders`
   and `run_reflection_pass` hooks
-- `bot.py` — compatibility facade for the historical import path
-- `runner.py` — `BotRunner` runs the long-poll on the main thread and a
+- `runner.py` вЂ” `BotRunner` runs the long-poll on the main thread and a
   worker thread for initiative, reminder dispatch, and reflection so a
   just-due reminder fires within ~1 s
 
-`protoagi.telegram_bot` remains a thin compatibility shim re-exporting the
-public surface so existing imports keep working.
-
-`NikolaBot` now lives in `protoagi.telegram.orchestrator`; `protoagi.telegram.bot`
-is a compatibility facade. Incoming attachment extraction and sticker-pack
-selection/caching are split into `attachments.py` and `sticker_ops.py`.
+Incoming attachment extraction and sticker-pack selection/caching are split
+into `attachments.py` and `sticker_ops.py`.
 
 The bot uses a profile selected through `.env`:
 
-- `mykola` — calm, grounded, practical
-- `solomiya` — warmer, self-possessed, more relational
+- `mykola` вЂ” calm, grounded, practical
+- `solomiya` вЂ” warmer, self-possessed, more relational
 
 Profiles are loaded from `config/personas/*.json` (with hard-coded fallbacks)
 so new identities can be added without touching Python.
@@ -194,13 +187,9 @@ and reply targeting do not bleed between conversations.
 
 ## 8. Admin and source organization
 
-The local admin dashboard is split between `protoagi.admin_server` for HTTP
-handling and HTML, and `protoagi.admin_data` for stats, style reports, memory
-serialization, and graph payloads. `protoagi.admin` remains a compatibility
-facade.
+The local admin dashboard is split between `protoagi.admin_panel.server` for
+HTTP handling and HTML, and `protoagi.admin_panel.data` for stats, style
+reports, memory serialization, and graph payloads.
 
 Model weights are stored under `models/` and ignored by git except for
-`models/.gitkeep`. Source modules that moved during cleanup keep lightweight
-facades (`protoagi.memory`, `protoagi.tools`, `protoagi.admin`,
-`protoagi.telegram.bot`) so external callers do not need an immediate import
-migration.
+`models/.gitkeep`.

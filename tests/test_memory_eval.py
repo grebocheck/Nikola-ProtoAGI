@@ -1,6 +1,6 @@
 import unittest
 
-from protoagi.memory_eval import EvalFact, EvalQuery, build_eval_service, evaluate, load_corpus
+from protoagi.evals.memory import EvalFact, EvalQuery, build_eval_service, evaluate, load_corpus
 
 
 class MemoryEvalTests(unittest.TestCase):

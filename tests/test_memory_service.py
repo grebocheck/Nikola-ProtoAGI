@@ -2,8 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from protoagi.embedding import EmbeddingClient, EmbeddingConfig
-from protoagi.memory import (
+from protoagi.embedding import EmbeddingConfig
+from protoagi.storage.memory import (
     KIND_PERSONA_SELF,
     KIND_SEMANTIC,
     SCOPE_CHAT,
@@ -12,7 +12,7 @@ from protoagi.memory import (
     SCOPE_USER,
     MemoryStore,
 )
-from protoagi.memory_service import MemoryService, RecallQuery
+from protoagi.storage.service import MemoryService, RecallQuery
 
 
 class StubEmbeddingClient:

@@ -16,10 +16,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from .config import PROJECT_ROOT
-from .embedding import EmbeddingClient
-from .memory import MemoryStore
-from .memory_service import MemoryService, RecallQuery, StoredMemory
+from ..config import PROJECT_ROOT
+from ..embedding import EmbeddingClient
+from ..storage.memory import MemoryStore
+from ..storage.service import MemoryService, RecallQuery, StoredMemory
 
 
 DEFAULT_CORPUS_PATH = PROJECT_ROOT / "config" / "memory_eval" / "golden.json"

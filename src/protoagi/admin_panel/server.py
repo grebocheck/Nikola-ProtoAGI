@@ -25,7 +25,7 @@ from socketserver import ThreadingMixIn
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from .admin_data import (
+from .data import (
     memory_graph,
     serialize_memory,
     stats,
@@ -33,8 +33,8 @@ from .admin_data import (
     style_signals_cell,
     style_trials_cell,
 )
-from .memory import MemoryStore
-from .memory_service import MemoryService
+from ..storage.memory import MemoryStore
+from ..storage.service import MemoryService
 
 
 _stats = stats

@@ -5,8 +5,8 @@ from unittest import mock
 from pathlib import Path
 
 from protoagi.config import ToolPolicy
-from protoagi.memory import MemoryStore
-from protoagi.tools import ToolContext, ToolRegistry, _validate_public_url
+from protoagi.agent_tools.core import ToolContext, ToolRegistry, _validate_public_url
+from protoagi.storage.memory import MemoryStore
 
 
 class SsrfTests(unittest.TestCase):
@@ -62,8 +62,8 @@ class SsrfTests(unittest.TestCase):
             registry = ToolRegistry(
                 ToolContext(root=Path(tmp), memory=memory, policy=ToolPolicy())
             )
-            with mock.patch("protoagi.tools.socket.getaddrinfo", side_effect=fake_getaddrinfo):
-                with mock.patch("protoagi.tools.socket.socket", return_value=FakeSocket()):
+            with mock.patch("protoagi.agent_tools.core.socket.getaddrinfo", side_effect=fake_getaddrinfo):
+                with mock.patch("protoagi.agent_tools.core.socket.socket", return_value=FakeSocket()):
                     result = registry.execute("web_get", {"url": "http://example.com/", "max_chars": 100})
 
         self.assertTrue(result["ok"])

@@ -14,8 +14,8 @@ from typing import Any, Callable
 from urllib.error import URLError
 from urllib.parse import ParseResult, urlparse
 
-from .config import PROJECT_ROOT, ToolPolicy
-from .memory import MemoryStore
+from ..config import PROJECT_ROOT, ToolPolicy
+from ..storage.memory import MemoryStore
 
 
 TEXT_EXTENSIONS = {

@@ -6,12 +6,12 @@ import tempfile
 import unittest
 
 from protoagi.cli import main
-from protoagi.memory import MemoryStore
-from protoagi.memory_federation import (
+from protoagi.storage.federation import (
     MemoryFederationError,
     export_memory_bundle,
     import_memory_bundle,
 )
+from protoagi.storage.memory import MemoryStore
 
 
 class MemoryFederationTests(unittest.TestCase):
@@ -42,7 +42,7 @@ class MemoryFederationTests(unittest.TestCase):
             source = MemoryStore(root / "source.sqlite3")
             old_id = source.remember("federated old coffee fact", ["share"])
             first_bundle = root / "bundle-full.json"
-            first = export_memory_bundle(
+            export_memory_bundle(
                 source,
                 first_bundle,
                 secret="shared-secret",

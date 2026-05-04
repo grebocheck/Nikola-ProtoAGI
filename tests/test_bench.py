@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from protoagi.bench import EndpointBenchResult, endpoint_results_to_json
+from protoagi.evals.bench import EndpointBenchResult, endpoint_results_to_json
 
 
 class BenchTests(unittest.TestCase):

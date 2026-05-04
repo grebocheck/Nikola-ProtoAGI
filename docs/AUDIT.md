@@ -22,14 +22,16 @@ or secrets.
 
 - Moved local GGUF weights into `models/` and updated config defaults plus
   launcher/smoke-test scripts to prefer `models/gpt-oss-20b-MXFP4.gguf`.
-- Split storage types and vector helpers into `protoagi.storage.models`; the
-  SQLite implementation now lives under `protoagi.storage.memory`, with
-  `protoagi.memory` preserved as a compatibility facade.
-- Moved implementation-heavy modules behind stable facades:
-  `protoagi.tools_core`, `protoagi.admin_server`, and
+- Split storage types/vector helpers into `protoagi.storage.models`; the
+  SQLite implementation, backup helpers, federation, and recall service now
+  live under `protoagi.storage`.
+- Moved implementation-heavy modules into domain packages:
+  `protoagi.agent_tools.core`, `protoagi.admin_panel.server`, and
   `protoagi.telegram.orchestrator`.
 - Extracted admin stats/serialization/style/graph helpers into
-  `protoagi.admin_data`.
+  `protoagi.admin_panel.data`.
+- Moved endpoint benchmarks and memory recall evaluation into
+  `protoagi.evals`.
 - Extracted Telegram attachment parsing and sticker-pack operations into
   `protoagi.telegram.attachments` and `protoagi.telegram.sticker_ops`.
 - Removed the duplicated `examples/first_tasks.md` quick-start note and cleaned
@@ -210,7 +212,7 @@ Test count: 99 → 107.
   ``trigger_at`` resolution from either ``in_minutes`` or an explicit ISO
   timestamp. The bot's existing dispatcher delivers them at the next worker
   tick.
-- Memory recall harness in ``protoagi.memory_eval``: a JSON corpus
+- Memory recall harness in ``protoagi.evals.memory``: a JSON corpus
   (``config/memory_eval/golden.json``), a ``protoagi memory-eval`` CLI that
   reports recall@k and MRR, and ``--with-embeddings`` to include the cosine
   index. The bundled corpus surfaces the FTS-only blind spot for synonyms
@@ -253,15 +255,15 @@ Test count: 99 → 107.
   `search_tagged`.
 - Added an optional embedding pipeline (`/v1/embeddings`) plus a pure-Python
   cosine index in `protoagi.embedding`.
-- Added `protoagi.memory_service` as the canonical recall facade with a
+- Added `protoagi.storage.service` as the canonical recall service with a
   blended FTS + cosine + recency + importance score and a heuristic
   consolidation pass.
 - Added a `users` table and a `reminders` table; the agent gained
   `remind_me` / `list_reminders` tools.
-- Refactored the 1.5k-line `telegram_bot.py` monolith into the
+- Refactored the 1.5k-line Telegram monolith into the
   `protoagi.telegram` package (`api`, `config`, `text`, `json_io`,
   `stickers`, `vision`, `identity`, `prompts`, `bot`). The legacy module is
-  preserved as a compatibility shim.
+  exposed through the `protoagi.telegram` package.
 - Personas moved out of Python into `config/personas/*.json` with built-in
   fallbacks for fresh checkouts.
 - Hardened `web_get` against SSRF (loopback / private / link-local /

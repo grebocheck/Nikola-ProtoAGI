@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 
 from protoagi.config import AgentConfig
-from protoagi.memory import MemoryStore
-from protoagi.telegram_bot import (
+from protoagi.storage.memory import MemoryStore
+from protoagi.telegram import (
     NikolaBot,
     TelegramConfig,
     normalize_reminder_requests,

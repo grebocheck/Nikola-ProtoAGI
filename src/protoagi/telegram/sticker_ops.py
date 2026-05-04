@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-from ..memory import MemoryStore, TelegramChat
+from ..storage.memory import MemoryStore, TelegramChat
 from .api import TelegramApi, TelegramApiError
 from .config import TelegramConfig
 from .json_io import Decision, decision_reply_texts

@@ -2,8 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from protoagi.backup import backup_database, restore_database
-from protoagi.memory import MemoryStore
+from protoagi.storage.backup import backup_database, restore_database
+from protoagi.storage.memory import MemoryStore
 
 
 class BackupRestoreTests(unittest.TestCase):

@@ -16,8 +16,8 @@ import re
 import sqlite3
 
 from ..harmony import clean_model_content
-from ..memory import MemoryStore
 from ..openai_compat import OpenAICompatError, OpenAICompatibleClient
+from ..storage.memory import MemoryStore
 from .api import TelegramApi, TelegramApiError
 from .json_io import ImageAttachment
 

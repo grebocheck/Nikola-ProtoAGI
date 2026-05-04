@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 
 from protoagi.config import AgentConfig
-from protoagi.memory import KIND_PERSONA_SELF, SCOPE_PERSONA, MemoryStore
-from protoagi.telegram_bot import (
+from protoagi.storage.memory import KIND_PERSONA_SELF, SCOPE_PERSONA, MemoryStore
+from protoagi.telegram import (
     NikolaBot,
     TELEGRAM_GLOBAL_MEMORY_TAG,
     TELEGRAM_PERSONA_SELF_MEMORY_TAG,

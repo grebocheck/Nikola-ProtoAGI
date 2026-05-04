@@ -3,8 +3,8 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from protoagi.memory import KIND_PERSONA_SELF, SCOPE_GLOBAL, SCOPE_PERSONA, MemoryStore, utc_now
-from protoagi.memory_service import MemoryService
+from protoagi.storage.memory import KIND_PERSONA_SELF, SCOPE_GLOBAL, SCOPE_PERSONA, MemoryStore
+from protoagi.storage.service import MemoryService
 
 
 def _shift_created(memory: MemoryStore, memory_id: int, days_ago: float) -> None:

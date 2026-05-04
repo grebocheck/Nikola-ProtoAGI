@@ -2,7 +2,7 @@ import os
 import unittest
 
 from protoagi.persona import get_persona, resolve_persona_key
-from protoagi.telegram_bot import TelegramConfig
+from protoagi.telegram import TelegramConfig
 
 
 class PersonaTests(unittest.TestCase):

@@ -3,8 +3,7 @@ import tempfile
 import unittest
 
 from protoagi.embedding import EmbeddingClient, EmbeddingConfig, EmbeddingIndex
-from protoagi.memory import cosine_similarity, pack_embedding, unpack_embedding
-from protoagi.memory import MemoryStore
+from protoagi.storage.memory import MemoryStore, cosine_similarity, pack_embedding, unpack_embedding
 
 
 class EmbeddingPackTests(unittest.TestCase):

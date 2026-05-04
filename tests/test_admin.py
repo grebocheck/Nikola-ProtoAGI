@@ -7,9 +7,9 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from protoagi.admin import serve
-from protoagi.memory import MemoryStore
-from protoagi.memory_service import MemoryService
+from protoagi.admin_panel.server import serve
+from protoagi.storage.memory import MemoryStore
+from protoagi.storage.service import MemoryService
 
 
 def _free_port() -> int:

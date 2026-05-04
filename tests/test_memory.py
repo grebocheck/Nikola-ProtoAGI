@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from protoagi.memory import SCOPE_GLOBAL, SCOPE_USER, MemoryStore
+from protoagi.storage.memory import SCOPE_GLOBAL, SCOPE_USER, MemoryStore
 
 
 class MemoryStoreTests(unittest.TestCase):

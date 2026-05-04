@@ -11,7 +11,7 @@ from typing import Any, Iterable
 from .memory import MemoryItem, MemoryStore, utc_now
 
 
-FEDERATION_FORMAT = "protoagi.memory_federation.v1"
+FEDERATION_FORMAT = "protoagi.storage.federation.v1"
 
 
 class MemoryFederationError(RuntimeError):

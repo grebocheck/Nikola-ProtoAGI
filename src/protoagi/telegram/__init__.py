@@ -1,14 +1,8 @@
-"""Telegram persona package.
-
-The package decomposes the previously monolithic ``telegram_bot.py`` module
-into focused units. The legacy module path ``protoagi.telegram_bot`` keeps
-re-exporting the same public symbols so existing callers and tests need no
-changes.
-"""
+"""Telegram persona package."""
 
 from .api import TELEGRAM_API_ROOT, TELEGRAM_MAX_MESSAGE_CHARS, TelegramApi, TelegramApiError, is_telegram_polling_conflict
 from .async_runner import AsyncBotRunner
-from .bot import NikolaBot, build_nikola_bot
+from .orchestrator import NikolaBot, build_nikola_bot
 from .config import TelegramConfig
 from .runner import BotRunner
 from .constants import (

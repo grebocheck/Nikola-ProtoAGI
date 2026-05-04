@@ -3,8 +3,8 @@ import tempfile
 import unittest
 
 from protoagi.config import ToolPolicy
-from protoagi.memory import MemoryStore
-from protoagi.tools import ToolContext, ToolRegistry
+from protoagi.agent_tools.core import ToolContext, ToolRegistry
+from protoagi.storage.memory import MemoryStore
 
 
 class ToolTests(unittest.TestCase):

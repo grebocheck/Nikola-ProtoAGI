@@ -1,7 +1,6 @@
 import threading
 import time
 import unittest
-from unittest.mock import MagicMock
 
 from protoagi.telegram.runner import BotRunner
 

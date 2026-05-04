@@ -16,7 +16,7 @@ from typing import Any
 from ..config import AgentConfig, PROJECT_ROOT
 from ..embedding import EmbeddingClient, EmbeddingConfig
 from ..harmony import clean_model_content
-from ..memory import (
+from ..storage.memory import (
     KIND_EPISODIC,
     KIND_FACT,
     KIND_PERSONA_SELF,
@@ -28,9 +28,9 @@ from ..memory import (
     TelegramChat,
     utc_now,
 )
-from ..memory_service import MemoryService, RecallQuery
 from ..openai_compat import OpenAICompatError, OpenAICompatibleClient
 from ..persona import PersonaProfile, get_persona
+from ..storage.service import MemoryService, RecallQuery
 
 from .api import TelegramApi, TelegramApiError, is_telegram_polling_conflict
 from .attachments import TelegramAttachmentMixin
@@ -1531,7 +1531,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
 
     @staticmethod
     def _fact_view(item):
-        from ..memory import MemoryFact
+        from ..storage.memory import MemoryFact
 
         return MemoryFact(
             id=item.id,

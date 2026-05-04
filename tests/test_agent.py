@@ -4,8 +4,8 @@ import unittest
 
 from protoagi.agent import ProtoAgent
 from protoagi.config import AgentConfig, ToolPolicy
-from protoagi.memory import MemoryStore
-from protoagi.tools import default_registry
+from protoagi.agent_tools.core import default_registry
+from protoagi.storage.memory import MemoryStore
 
 
 class FakeAgentClient:

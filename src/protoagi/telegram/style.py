@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from ..memory import MemoryStore, utc_now
+from ..storage.memory import MemoryStore, utc_now
 
 
 STYLE_ARMS = {

@@ -1,6 +1,6 @@
 # ProtoAGI Roadmap
 
-Living plan of what to build next. Last updated: 2026-05-03.
+Living plan of what to build next. Last updated: 2026-05-04.
 
 This document is the source of truth for "what's queued and why". When a
 work item lands, move it from **Backlog** to **Done** and link the relevant
@@ -17,8 +17,8 @@ Effort scale: **S** = under a day, **M** = 1-3 days, **L** = a week,
 ### Phase 1 — modernization (2026-05-03)
 - Memory v2 schema with `kind`, `scope`, `importance`, supersession,
   normalized `memory_tags`, optional embeddings BLOB.
-- `MemoryService` facade with hybrid recall.
-- `protoagi.telegram/` package; `telegram_bot.py` is a thin compat shim.
+- `MemoryService` with hybrid recall.
+- `protoagi.telegram/` package.
 - Personas in `config/personas/*.json` with built-in fallbacks.
 - SSRF guard in `web_get`; tightened PowerShell blocklist; prompt-injection
   isolation via `<user_input>` markers; size-based log rotation.
@@ -38,7 +38,7 @@ Effort scale: **S** = under a day, **M** = 1-3 days, **L** = a week,
 ### Phase 3 — operations & evaluation (2026-05-03)
 - `MemoryService.prune()` with importance × recency × access decay.
 - Reminders as first-class part of decision JSON; bot persists them.
-- `protoagi.memory_eval` harness + `config/memory_eval/golden.json` corpus.
+- `protoagi.evals.memory` harness + `config/memory_eval/golden.json` corpus.
 - CLIs: `memory-eval`, `memory-stats`, `memory-prune`, `memory-consolidate`.
 - Local admin web dashboard (`protoagi admin`) — stdlib `http.server`,
   HTML view + JSON API for memory / reminders / chats.
@@ -301,13 +301,14 @@ Test count: 145 → 152.
 - Local GGUF weights moved under `models/`, with launch/smoke scripts and
   `AgentConfig` defaults updated to prefer that path while keeping a legacy
   root-path fallback.
-- Storage types/vector helpers moved to `protoagi.storage.models`; the SQLite
-  store lives in `protoagi.storage.memory`; `protoagi.memory` remains a facade.
-- Tool, admin, and Telegram implementation modules moved to
-  `tools_core.py`, `admin_server.py`, and `telegram/orchestrator.py` behind
-  compatibility facades.
-- Admin data shaping split into `admin_data.py`; Telegram attachment parsing
-  and sticker operations split into `telegram/attachments.py` and
+- Storage types/vector helpers moved to `protoagi.storage.models`; SQLite
+  storage, backups, federation, and recall service now live under
+  `protoagi.storage`.
+- Tool, admin, benchmark/eval, and Telegram implementation modules moved to
+  `agent_tools/core.py`, `admin_panel/`, `evals/`, and
+  `telegram/orchestrator.py`.
+- Admin data shaping split into `admin_panel/data.py`; Telegram attachment
+  parsing and sticker operations split into `telegram/attachments.py` and
   `telegram/sticker_ops.py`.
 - Removed duplicated quick-start markdown under `examples/` and cleaned local
   Python/tooling caches.
