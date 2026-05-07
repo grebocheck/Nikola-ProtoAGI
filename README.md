@@ -1,16 +1,23 @@
 # ProtoAGI
 
-ProtoAGI is a local agentic research harness for `models/gpt-oss-20b-MXFP4.gguf`.
-It is not a claim of artificial general intelligence. It is a practical system
-for iterating toward stronger autonomy on limited local hardware:
+ProtoAGI is a local agentic research harness for a self-hosted
+OpenAI-compatible model endpoint, currently tuned around
+`models/gpt-oss-20b-MXFP4.gguf`. It is not a claim of artificial general
+intelligence. It is a practical system for iterating toward stronger autonomy on
+limited local hardware:
 
 - llama.cpp CUDA runtime for the local model
 - OpenAI-compatible chat client
 - tool-using agent loop
 - SQLite long-term memory with FTS search
 - workspace, shell, web, and GPU inspection tools
-- Telegram conversation mode with deep profiles for Микола or Соломія
+- Telegram conversation mode with deep profiles for `mykola` or `solomiya`
 - benchmark scripts and repeatable launch profiles
+
+The public repository contains code, scripts, tests, configuration examples, and
+documentation. Model weights, Hugging Face caches, downloaded llama.cpp
+runtimes, local databases, Telegram media, logs, and real secrets are kept out
+of git.
 
 ## Hardware target
 
@@ -24,6 +31,10 @@ This workspace was prepared for:
 
 The model is close to the VRAM limit. Start with 8k context and partial MoE CPU
 offload, then increase context only after benchmarking.
+
+Download or place model weights yourself under `models/` according to their
+upstream licenses. The default vision and embedding launchers also redirect
+Hugging Face cache files into `models/hf-cache/`, which remains local-only.
 
 ## Quick start
 
@@ -136,6 +147,7 @@ The active profile can also use stickers from `Bocchi_the_Rock_sticker_pack2`,
 `SenkoSan`, and `M1ku_Hatsune`. It can send a short burst of up to three
 messages plus stickers for natural Telegram pacing, while Telegram reply is
 reserved for group/current replies or explicit recent message IDs.
+
 Optional Telegram image recognition is available through
 `PROTOAGI_VISION_BASE_URL` and `PROTOAGI_VISION_MODEL`. When the vision model is
 configured for localhost, `run-nikola.bat` starts a separate lightweight
@@ -145,13 +157,33 @@ recall can refer back to old photos. When the embedding endpoint supports a
 joint image/text model, media-linked memories can use image embeddings for
 photo-oriented recall; otherwise they fall back to caption/text recall.
 
+Optional voice transcription and TTS are configured through `.env` with
+OpenAI-compatible `/audio/transcriptions` and `/audio/speech` endpoints. The
+project does not bundle voice or TTS model weights.
+
 More details: [docs/TELEGRAM.md](docs/TELEGRAM.md).
+
+## License and model weights
+
+The project source code, scripts, tests, and documentation are licensed under
+the Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+Third-party model weights are not distributed by this repository and are not
+relicensed by ProtoAGI. Keep them local under `models/` and follow each
+upstream license and usage policy before downloading, modifying, hosting, or
+redistributing them. The default model references are tracked in
+[THIRD_PARTY_MODELS.md](THIRD_PARTY_MODELS.md).
 
 ## Git Hygiene
 
 The repository ignores local secrets, model files, downloaded runtimes, logs,
-SQLite memory, and Python caches. Keep real tokens in `.env`; commit
-`.env.example` only.
+SQLite memory, Hugging Face caches, and Python caches. Keep real tokens in
+`.env`; commit `.env.example` only. Before publishing or tagging, check:
+
+```powershell
+git status --short
+git check-ignore -v .env models/gpt-oss-20b-MXFP4.gguf tools/llama.cpp/llama-server.exe data/protoagi.sqlite3
+```
 
 Architecture audit and pre-push checklist: [docs/AUDIT.md](docs/AUDIT.md).
 Forward-looking plan: [docs/ROADMAP.md](docs/ROADMAP.md).
@@ -225,7 +257,7 @@ Live smoke testing is optional and expects a local GGUF model:
 
 ## Project layout
 
-- `models/` - local GGUF/model weights, ignored except `.gitkeep`
+- `models/` - local GGUF/model weights and HF caches, ignored except `.gitkeep`
 - `tools/llama.cpp/` - downloaded llama.cpp CUDA runtime
 - `scripts/` - launch and benchmark helpers
 - `src/protoagi/` - agent, runtime, CLI, and domain packages

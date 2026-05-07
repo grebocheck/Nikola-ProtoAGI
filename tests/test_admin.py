@@ -215,6 +215,26 @@ class AdminServerTests(unittest.TestCase):
         self.assertEqual(result["plan"][0]["dropped"]["id"], stored.memory_id)
         self.assertIsNotNone(self.memory.get_memory(stored.memory_id))
 
+    def test_reasoning_endpoint_returns_overview_and_entries(self) -> None:
+        from protoagi.telegram.reasoning_log import ReasoningLog, ReasoningLogConfig
+
+        log = ReasoningLog(self.memory, ReasoningLogConfig(enabled=True))
+        log.record(
+            chat_id="555",
+            message_id=42,
+            captured_at="2026-05-07T10:00:00+00:00",
+            decision_kind="decision",
+            incoming_text="привіт",
+            reasoning="step one\nstep two",
+            reply_excerpt="ага",
+        )
+        overview = self._get_json("/api/reasoning")
+        self.assertTrue(any(row["chat_id"] == "555" for row in overview))
+        entries = self._get_json("/api/reasoning/555")
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["message_id"], 42)
+        self.assertIn("step one", entries[0]["reasoning"])
+
     def test_consolidate_preview_returns_supersession_plan(self) -> None:
         first = self.service.remember("duplicate admin preview", importance=0.3)
         second = self.service.remember("duplicate admin preview", importance=0.8)

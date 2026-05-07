@@ -1,6 +1,7 @@
 # ProtoAGI Roadmap
 
-Living plan of what to build next. Last updated: 2026-05-04.
+Living plan of what to build next. Last updated: 2026-05-07 (Phase 13 first
+landing).
 
 This document is the source of truth for "what's queued and why". When a
 work item lands, move it from **Backlog** to **Done** and link the relevant
@@ -339,6 +340,99 @@ Test count: 145 → 152.
 - Removed duplicated quick-start markdown under `examples/` and cleaned local
   Python/tooling caches.
 
+### Phase 13 — group readiness, web search, thinking budget (2026-05-07)
+
+The first cohort of Phase 13 landed: token budgets are env-driven, the
+group reactivity gate short-circuits ambient group chatter without the
+LLM, the web-search tool is wired through `tool_request`, and the
+decision prompt no longer asks the model to "decide to stay silent" on
+every group line.
+
+- **T1 — token budgets through env.** `TelegramConfig` gained
+  `decision_max_tokens`, `reply_max_tokens`, and
+  `reflection_max_tokens`, each backed by `PROTOAGI_DECISION_MAX_TOKENS`
+  / `PROTOAGI_REPLY_MAX_TOKENS` / `PROTOAGI_REFLECTION_MAX_TOKENS`. The
+  hard-coded `768`/`320` values in
+  [orchestrator.py](../src/protoagi/telegram/orchestrator.py) are gone.
+  `.env` and `.env.example` ship `PROTOAGI_MAX_TOKENS=4096`,
+  `PROTOAGI_DECISION_MAX_TOKENS=2560`, `PROTOAGI_REPLY_MAX_TOKENS=2048`
+  to leave deepseek reasoning enough headroom.
+- **G1 — group reactivity gate.** New
+  [protoagi/telegram/group_gate.py](../src/protoagi/telegram/group_gate.py)
+  classifies an incoming Telegram update before
+  `decide_incoming` runs. In groups it lets a turn through only when
+  (a) addressed (alias / `@username` / "/" / reply-to-bot), (b) text
+  matches one of `NIKOLA_GROUP_TRIGGER_KEYWORDS` (Cyrillic-safe,
+  case-insensitive, word-boundary), or (c) the cooldown window has
+  elapsed and a deterministic sampler crosses
+  `NIKOLA_GROUP_PASSIVE_REPLY_RATIO` (default 0.04). The gate records
+  passive timestamps in `kv` so a second ambient reply cannot fire
+  within `NIKOLA_GROUP_REPLY_COOLDOWN_SECONDS`. Private chats and
+  `addressed=true` always run.
+- **G2 — tighter group prompt.** The decision prompt now states the
+  contract explicitly: in groups silence is the default; the only
+  reasons to speak are addressing, a unique factual question, or a
+  strong emotional spike. Ambient replies must be one short sentence
+  without follow-up questions or threading.
+- **W1 — web search tool.** New
+  [protoagi/web_search.py](../src/protoagi/web_search.py) reuses the
+  SSRF-aware `_fetch_public_url` from
+  [agent_tools/core.py](../src/protoagi/agent_tools/core.py), expects a
+  SearxNG-style `?q=&format=json` endpoint, caches by SHA256(query) in
+  `kv` for `PROTOAGI_WEB_SEARCH_CACHE_SECONDS`, and trims snippets to
+  `snippet_max_chars`. The tool is opt-in: empty
+  `PROTOAGI_WEB_SEARCH_URL` → `WebSearchClient.enabled=False`, the
+  `web_search` schema is left out of `TELEGRAM_TOOL_SCHEMAS`, and the
+  decision prompt receives an `available_tools` list so the model
+  cannot request a tool that is not configured.
+  `_TOOL_REQUEST_SCHEMA.properties.name.enum`
+  ([json_io.py](../src/protoagi/telegram/json_io.py)) now permits
+  `web_search` alongside `recall`/`remind_me`.
+
+**Tests:** 173 → 183.
+[tests/test_group_gate.py](../tests/test_group_gate.py) covers private
+allow, addressed allow, keyword match, cooldown, passive sample
+ratio. [tests/test_web_search.py](../tests/test_web_search.py) covers
+the disabled state, response trimming, snippet truncation, cache hit
+window, and `kv` key prefix. New integration tests in
+[tests/test_telegram_bot.py](../tests/test_telegram_bot.py) verify
+that an unaddressed group message skips the LLM call entirely while
+`Миколо, …` still triggers a decision, and that the decision context
+includes the configured `available_tools`.
+
+**Also shipped in this phase:**
+
+- **T2 — capture reasoning content in admin.**
+  [protoagi/telegram/reasoning_log.py](../src/protoagi/telegram/reasoning_log.py)
+  is a `kv`-backed ring buffer keyed by `telegram:reasoning:<chat_id>`,
+  bounded by `PROTOAGI_REASONING_MAX_ENTRIES` (default 20) and
+  `PROTOAGI_REASONING_MAX_CHARS` (default 3000). Off by default behind
+  `PROTOAGI_CAPTURE_REASONING=0`. The orchestrator captures the
+  deepseek `reasoning_content` (with a `<think>...</think>` fallback for
+  servers that leak it into `content`) at the end of `decide_incoming`,
+  attaches `chat_id` + `message_id` + decision kind + reply excerpt, and
+  flushes through `ReasoningLog.record`. The admin dashboard gained a
+  "Reasoning capture" section listing chats with stored entries plus a
+  collapsible per-chat panel rendered through `/api/reasoning` and
+  `/api/reasoning/<chat_id>`.
+
+**Live smoke verification (W2 — 2026-05-07).** Ran the stack on the
+host machine and exercised the full decision pipeline against
+`gpt-oss-20b-MXFP4` via `runs/smoke-decision.py`. Confirmed: token
+budgets fit a private-chat reply with reasoning headroom, group gate
+short-circuited an unaddressed supergroup line without an LLM call,
+and reasoning capture worked once the Harmony analysis fallback was
+added. Findings are written up in
+[AUDIT.md](AUDIT.md). Bug-fix landing: new
+`protoagi.harmony.extract_analysis_content` + Harmony branch in
+`extract_reasoning_text` (`tests/test_reasoning_log.py` +1).
+
+**Open follow-ons (not blocking Phase 13):**
+
+- **W2-extended.** Live SearxNG capture when an endpoint is available;
+  Telegram long-poll smoke once a maintainer is ready to put the bot
+  online.
+
 ### Phase 9 — P3 research baselines (2026-05-03)
 Turned each P3 research direction into a dependency-free first working layer:
 
@@ -359,9 +453,263 @@ Turned each P3 research direction into a dependency-free first working layer:
 
 ---
 
+## 2026-05-07 audit (pre-Phase 13)
+
+Re-read pass over the running stack and the Telegram orchestrator before
+committing to the next cohort. Nothing is on fire; what follows is
+"what would surprise the bot once it lands in a group chat" plus the
+explicit asks that triggered this pass.
+
+### What the system already does well
+
+- **Reasoning ("thinking")** is wired at the inference layer:
+  [scripts/start-nikola-stack.ps1](../scripts/start-nikola-stack.ps1)
+  launches `llama-server` with `--reasoning auto --reasoning-format
+  deepseek`, and
+  [config.py](../src/protoagi/config.py) carries the same defaults in
+  `LlamaServerProfile`. The deepseek format keeps the chain of thought
+  out of `message.content`, so the existing JSON parsing is unaffected.
+  No code change is needed to "turn thinking on" — it is already on.
+- **Decision discipline** is solid:
+  [orchestrator.py:641](../src/protoagi/telegram/orchestrator.py#L641)
+  always asks the model for a constrained-JSON `Decision` (via
+  `DECISION_JSON_SCHEMA`), and the
+  [prompts.py:42](../src/protoagi/telegram/prompts.py#L42) explicitly
+  tells the persona "у групі відповідай лише коли до тебе звернулись
+  або ти справді доречний". Reply-mode `mention` already short-circuits
+  unaddressed group messages without an LLM call
+  ([orchestrator.py:1448](../src/protoagi/telegram/orchestrator.py#L1448)).
+- **Sticker over-activity** was fixed in Phase 12 (post-filter +
+  cooldown + paragraph guard). The same shape — pre-filter, narrow
+  trigger set, hard cooldown — is the right template for the group
+  reply gate below.
+- **Tool channel** is pinned to `tool_request` in the production decision
+  call ([orchestrator.py:691](../src/protoagi/telegram/orchestrator.py#L691)
+  passes `response_format` only, no native `tools=`). Adding a third
+  tool name is a one-line schema change in
+  [json_io.py:90](../src/protoagi/telegram/json_io.py#L90) plus a
+  handler in
+  [tool_runner.py:108](../src/protoagi/telegram/tool_runner.py#L108).
+- **SSRF hardening** for outbound HTTP is real: `_prepare_public_url`
+  resolves DNS once, validates the IP, then `_fetch_public_url` opens
+  the socket against that exact address
+  ([agent_tools/core.py:485](../src/protoagi/agent_tools/core.py#L485)).
+  A new web-search tool can reuse this rather than reinvent it.
+
+### Gaps that the next phase should close
+
+- **Group reactivity is LLM-gated, not heuristic-gated.** In `smart`
+  mode (the default), every incoming group message reaches
+  `decide_incoming` and pays one full constrained-JSON completion,
+  even when the bot was never addressed. On a 20B local model that's
+  ~3–8 s of GPU time per ambient line. This is what makes the bot
+  *feel* over-active in a busy group: every message produces a chat
+  action / typing event before the model decides "ні, мовчу".
+- **Token budget is too tight for thinking.**
+  `PROTOAGI_MAX_TOKENS=1536` and the hard-coded
+  `decision_max_tokens=768` ([config.py:23](../src/protoagi/telegram/config.py#L23))
+  share their budget with the deepseek reasoning channel. On longer
+  reasoning runs the model truncates the JSON before the closing brace
+  and the parser falls through to a "no reply" branch silently. The
+  user explicitly asked for bigger limits; `.env` and `.env.example`
+  now ship `PROTOAGI_MAX_TOKENS=4096` plus opt-in
+  `PROTOAGI_DECISION_MAX_TOKENS=2560` /
+  `PROTOAGI_REPLY_MAX_TOKENS=2048` placeholders. The Telegram layer
+  still ignores those last two — wiring them is part of Phase 13.
+- **Web search does not exist.** The agent CLI has `web_get` (single
+  URL fetch), but the Telegram persona has no way to discover URLs,
+  and there is no search tool at all. Asking the bot a fresh fact
+  ("що сьогодні з курсом …") forces a hallucinated answer or a polite
+  refusal.
+- **`bench-tools` baseline is still unverified.** Carried from B2a.
+  Doesn't block anything but the gate cannot fail until a maintainer
+  captures a real run on the production model.
+- **No live-Telegram smoke run since the stack moved to `models/`.**
+  B10's `scripts/smoke-test.ps1` is wired but has not been exercised
+  end-to-end against the real chat / embed / vision servers since the
+  Phase 12 cleanup.
+- **Admin dashboard does not surface reasoning content.** When the
+  decision JSON looks wrong, the only debug surface is
+  `runs/llama-server.stdout.log`. Capturing the deepseek
+  `reasoning_content` next to the decision payload would make the
+  "why did the bot say this" question answerable from the dashboard.
+
+These are the inputs to Phase 13.
+
+---
+
 ## Backlog
 
 Ordered by priority. Reorder freely as new evidence arrives.
+
+### Phase 13 — group readiness, web search, thinking budget — **shipped**
+
+Goal: make the bot safe to drop into a busy group chat without it
+feeling chatty, give it real-time information through a search tool,
+and make sure the reasoning model has room to think before answering.
+
+Status after the 2026-05-07 landing: G1, G2, T1, T2, W1 all shipped
+and verified against the live model (W2). See the Phase 13 entry under
+"Done so far" above for acceptance details.
+
+#### G1. Pre-LLM trigger gate for group chats — **M** *(shipped)*
+
+**What:** before the constrained-JSON decision call,
+`process_update` should classify whether the message is "the bot's
+business". If not, it logs the message into thread history (so context
+stays warm) and returns without running `decide_incoming`. The gate
+fires the LLM only when one of the following holds:
+
+- `chat.chat_type == "private"` (always run);
+- the message is addressed (alias / `@<bot_username>` / "/" command /
+  reply to a bot message);
+- the text matches one of `NIKOLA_GROUP_TRIGGER_KEYWORDS` after a
+  case-insensitive normalize (Cyrillic-safe, mirroring the laughter
+  pattern in [stickers.py](../src/protoagi/telegram/stickers.py));
+- the per-chat cooldown elapsed *and* the random sampler crosses
+  `NIKOLA_GROUP_PASSIVE_REPLY_RATIO` (default 0.04 — about one ambient
+  reaction per 25 lines, never two in a row, never within
+  `NIKOLA_GROUP_REPLY_COOLDOWN_SECONDS`).
+
+**Why:** it removes the expensive "decide to stay silent" round trip
+from the hot path, makes the bot feel like a guest in the room, and
+keeps the cooldown / passive ratio in `.env` so each chat owner can
+tune temperament without code changes.
+
+**How:** lift `_should_skip_without_llm`
+([orchestrator.py:1448](../src/protoagi/telegram/orchestrator.py#L1448))
+into a richer `GroupReactivityGate` class in a new
+`telegram/group_gate.py`. Inputs: `TelegramConfig`, `chat`, parsed
+addressed flag, last-bot-reply timestamp from
+`telegram_chats.last_bot_message_at`, last-passive-reply timestamp
+(new column or new `kv` key per chat). Output: `Decision-skip` |
+`Decision-run`. Unit tests cover: addressed → run, keyword → run,
+passive-window-closed → skip, passive-window-open + 0.04 sample → run
+once, two passes within cooldown → second skipped.
+
+**Acceptance:** in a synthetic group transcript of 50 unaddressed
+messages, the LLM is invoked at most twice (once for the keyword line,
+once for an opportunistic ambient reply); deterministic test seeds the
+sampler.
+
+#### G2. Tighten group prompt language — **S** *(shipped)*
+
+**What:** the decision prompt at
+[prompts.py:27](../src/protoagi/telegram/prompts.py#L27) already says
+"у групі відповідай лише коли до тебе звернулись або ти справді
+доречний". Replace with a stronger contract: in groups the default is
+silence, the only reasons to speak are (1) addressed, (2) factual
+question we can uniquely help with, (3) emotional spike worth a short
+reaction. Mention that ambient replies must be one short sentence
+without follow-up questions.
+
+**Why:** belt-and-braces with G1 — even when the gate lets a turn
+through, the model should default to text-only and short.
+
+**Acceptance:** prompt change lands together with a test fixture that
+feeds five neutral group lines and asserts `should_reply=False` on
+each.
+
+#### W1. Web search tool — **M** *(shipped)*
+
+**What:** add a `web_search(query, limit=5)` tool that hits the
+endpoint at `PROTOAGI_WEB_SEARCH_URL` (SearxNG-style — `?q=&format=json`
+returning `{"results": [{title, url, content}]}`). Empty URL means the
+tool is unavailable and the schema is not advertised to the model.
+Reuse `_prepare_public_url` / `_fetch_public_url` from
+[agent_tools/core.py](../src/protoagi/agent_tools/core.py) to keep the
+DNS-rebinding fix; cap result text per snippet, cap total bytes,
+cache by SHA256(query) for `PROTOAGI_WEB_SEARCH_CACHE_SECONDS` in `kv`.
+
+**Why:** the user explicitly asked for "веб пошук для того щоб
+отримувати інформацію за потреби". A tool the model can call
+on-demand fits the existing `tool_request` channel and stays opt-in
+("за потреби") rather than becoming a default detour.
+
+**How:**
+- New `protoagi.web_search` module with a `search(query)` function and
+  the SSRF-aware fetch.
+- Extend `TelegramToolRunner.execute` to dispatch `web_search`.
+- Extend `TELEGRAM_TOOL_SCHEMAS` and the
+  `_TOOL_REQUEST_SCHEMA.properties.name.enum`
+  ([json_io.py:93](../src/protoagi/telegram/json_io.py#L93)) with
+  `"web_search"`. Make sure the schema only includes the new name when
+  `PROTOAGI_WEB_SEARCH_URL` is set, so disabled deployments don't tempt
+  the model.
+- Mention the tool in the decision prompt only when enabled (the
+  "available_tools" hint is currently implicit; pass an explicit list
+  through `context_payload`).
+- Inline a one-line answer through `_inline_tool_decision` when the
+  search yields a single strong hit, mirroring `recall`.
+
+**Acceptance:** unit test stubs an HTTP server, asserts the tool
+returns three trimmed snippets; integration test injects a
+`tool_request` for `web_search` and asserts the merged decision quotes
+the snippet text. Disabled deployments must show the tool absent from
+the schema.
+
+#### T1. Wire decision/reply token budgets through env — **S** *(shipped)*
+
+**What:** stop hard-coding `decision_max_tokens=768` in
+[telegram/config.py:23](../src/protoagi/telegram/config.py#L23). Add
+`decision_max_tokens` and `reply_max_tokens` fields backed by
+`PROTOAGI_DECISION_MAX_TOKENS` (default 2560) and
+`PROTOAGI_REPLY_MAX_TOKENS` (default 2048), both honoring the global
+`PROTOAGI_MAX_TOKENS` as upper bound. Replace the hard-coded values in
+`decide_incoming`, `_merge_decision_tool_results`, `compose_reply`,
+and `decide_initiative`.
+
+**Why:** with deepseek reasoning the visible reply and the chain of
+thought share the budget. 768 tokens truncates JSON on longer
+deliberations, which silently turns into a missed reply. The user
+asked for bigger limits; this is the wiring that lets the new
+`.env` defaults take effect.
+
+**Acceptance:** unit tests assert that `TelegramConfig.from_env`
+respects the new env vars; behaviour test confirms
+`decide_incoming` passes the configured budget into the chat
+completion call.
+
+#### T2. Capture reasoning content in admin — **S** *(shipped)*
+
+**What:** extend the OpenAI-compat client to surface
+`message.reasoning_content` (deepseek), keep it out of normal
+`Decision` parsing, but persist the latest decision's reasoning into a
+`debug` table or `kv` keyed by chat id, capped to e.g. last 20
+entries. Surface it in the admin dashboard as a collapsible "thinking"
+panel under the decision row. Off by default
+(`PROTOAGI_CAPTURE_REASONING=0`).
+
+**Why:** today the only window into the model's deliberation is
+`runs/llama-server.stdout.log`; correlating that with a specific chat
+turn is painful. With the bot moving into groups the "why did it
+reply / stay silent" question gets asked more.
+
+**Acceptance:** flag-on capture writes a record per decision with
+`{chat_id, message_id, reasoning_content_excerpt}`; admin renders the
+last N for the selected chat; flag-off path adds zero overhead.
+
+#### W2. Smoke run after Phase 13 lands — **S**
+
+**What:** carry over the unfinished B10 follow-up. Run
+`scripts/smoke-test.ps1` end-to-end against the real chat / embed /
+vision servers with a maintainer-controlled bot token; assert that the
+new group gate behaves on a scripted group transcript and that
+`web_search` returns a sensible snippet for a known query. Document
+the captured run in `docs/AUDIT.md`.
+
+**Acceptance:** AUDIT.md gains a "2026-05-?? phase 13 verification"
+section linking the run output.
+
+#### Carried follow-ups
+
+- **B2a — bench-tools production baseline.** Still pending a real
+  capture; no architectural change required.
+- **B7 — image embeddings recall.** The infrastructure is wired, but
+  no eval-section gain has been measured yet. Lower priority than the
+  group readiness work.
+
+---
 
 ### Original P0 — done (see Phase 4 above)
 

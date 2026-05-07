@@ -7,44 +7,67 @@ from typing import Any, Iterable
 
 from ..storage.memory import TelegramChat
 from ..storage.service import MemoryService, RecallQuery
+from ..web_search import WebSearchClient, WebSearchUnavailable
 from .constants import TELEGRAM_GLOBAL_MEMORY_TAG
 
 
-TELEGRAM_TOOL_SCHEMAS: list[dict[str, Any]] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "recall",
-            "description": "Search Telegram memory for facts relevant to this chat turn.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 10},
-                },
-                "required": ["query"],
-                "additionalProperties": False,
+_RECALL_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "recall",
+        "description": "Search Telegram memory for facts relevant to this chat turn.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
             },
+            "required": ["query"],
+            "additionalProperties": False,
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "remind_me",
-            "description": "Create a reminder for this Telegram chat.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string"},
-                    "in_minutes": {"type": "integer", "minimum": 1, "maximum": 525600},
-                    "trigger_at": {"type": "string"},
-                },
-                "required": ["text"],
-                "additionalProperties": False,
+}
+
+_REMIND_ME_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "remind_me",
+        "description": "Create a reminder for this Telegram chat.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+                "in_minutes": {"type": "integer", "minimum": 1, "maximum": 525600},
+                "trigger_at": {"type": "string"},
             },
+            "required": ["text"],
+            "additionalProperties": False,
         },
     },
-]
+}
+
+_WEB_SEARCH_SCHEMA: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": (
+            "Look up fresh information on the open web. Use sparingly: only when "
+            "the answer cannot be derived from memory or the chat itself."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+TELEGRAM_TOOL_SCHEMAS: list[dict[str, Any]] = [_RECALL_SCHEMA, _REMIND_ME_SCHEMA]
 
 
 @dataclass(slots=True)
@@ -64,6 +87,7 @@ class TelegramToolRunner:
         user_id: str | None = None,
         global_memory: bool = True,
         max_steps: int = 4,
+        web_search: WebSearchClient | None = None,
     ) -> None:
         self.memory_service = memory_service
         self.chat = chat
@@ -71,10 +95,20 @@ class TelegramToolRunner:
         self.user_id = user_id
         self.global_memory = global_memory
         self.max_steps = max(1, max_steps)
+        self.web_search = web_search
 
     @staticmethod
-    def schemas() -> list[dict[str, Any]]:
-        return TELEGRAM_TOOL_SCHEMAS
+    def schemas(*, web_search_enabled: bool = False) -> list[dict[str, Any]]:
+        schemas = [_RECALL_SCHEMA, _REMIND_ME_SCHEMA]
+        if web_search_enabled:
+            schemas.append(_WEB_SEARCH_SCHEMA)
+        return schemas
+
+    def available_tool_names(self) -> list[str]:
+        names = ["recall", "remind_me"]
+        if self.web_search is not None and self.web_search.enabled:
+            names.append("web_search")
+        return names
 
     def run(
         self,
@@ -110,7 +144,29 @@ class TelegramToolRunner:
             return self._recall(arguments)
         if name == "remind_me":
             return self._remind_me(arguments)
+        if name == "web_search":
+            return self._web_search(arguments)
         return {"ok": False, "error": f"unknown telegram tool: {name}"}
+
+    def _web_search(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        if self.web_search is None or not self.web_search.enabled:
+            return {"ok": False, "error": "web_search is not configured"}
+        query = str(arguments.get("query") or "").strip()
+        if not query:
+            return {"ok": False, "error": "query is required"}
+        try:
+            limit = int(arguments.get("limit", 5))
+        except (TypeError, ValueError):
+            limit = 5
+        try:
+            results = self.web_search.search(query, limit=limit)
+        except WebSearchUnavailable as exc:
+            return {"ok": False, "error": str(exc)}
+        return {
+            "ok": True,
+            "query": query,
+            "items": [item.as_dict() for item in results],
+        }
 
     def _recall(self, arguments: dict[str, Any]) -> dict[str, Any]:
         query = str(arguments.get("query") or "").strip()

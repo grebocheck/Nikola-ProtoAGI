@@ -1,0 +1,11 @@
+ProtoAGI
+Copyright 2026 ProtoAGI contributors
+
+This repository's source code, scripts, tests, and documentation are licensed
+under the Apache License, Version 2.0.
+
+Third-party model weights, tokenizer files, downloaded inference runtimes,
+Telegram media, SQLite databases, logs, and generated benchmark outputs are not
+part of the licensed Work unless explicitly committed with their own license
+notice. See THIRD_PARTY_MODELS.md for the model references used by the default
+local configuration.

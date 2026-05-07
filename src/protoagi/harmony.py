@@ -24,6 +24,30 @@ TOKEN_RE = re.compile(
 )
 
 
+def extract_analysis_content(content: str) -> str:
+    """Pull out Harmony ``analysis`` channel text from a raw response.
+
+    gpt-oss-style models running with ``--skip-chat-parsing`` emit the
+    chain of thought as ``<|channel|>analysis<|message|>...<|end|>`` sections
+    inside ``message.content``. ``clean_model_content`` strips these for
+    the user-facing reply; this helper keeps the *content* of those blocks
+    so we can route them into the reasoning log.
+    """
+
+    if not content:
+        return ""
+    pattern = re.compile(
+        CHANNEL_PREFIX.format(channel="analysis")
+        + r"(.*?)(?=<\|channel\|>(?:final|commentary)(?:\s*<\|constrain\|>\w+)?\s*<\|message\|>|<\|end\|>|$)",
+        re.DOTALL,
+    )
+    matches = pattern.findall(content)
+    if not matches:
+        return ""
+    pieces = [_strip_tokens(item).strip() for item in matches]
+    return "\n\n".join(piece for piece in pieces if piece)
+
+
 def clean_model_content(content: str) -> str:
     """Remove raw Harmony channel markup from user-facing text.
 

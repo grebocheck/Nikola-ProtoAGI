@@ -12,6 +12,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
+$ModelCacheRoot = Join-Path $Root "models\hf-cache"
+$env:HF_HOME = $ModelCacheRoot
+$env:HF_HUB_CACHE = Join-Path $ModelCacheRoot "hub"
+$env:HUGGINGFACE_HUB_CACHE = $env:HF_HUB_CACHE
+$env:LLAMA_CACHE = $env:HF_HUB_CACHE
 $Server = Join-Path $Root "tools\llama.cpp\llama-server.exe"
 $StdOut = Join-Path $Root "runs\llama-vision.stdout.log"
 $StdErr = Join-Path $Root "runs\llama-vision.stderr.log"
@@ -45,7 +50,9 @@ if ($Existing.Count -gt 0) {
     throw "A llama-server process is already bound to port $Port but is not ready. Check runs\llama-vision.stderr.log or stop it first."
 }
 
-New-Item -ItemType Directory -Force -Path (Join-Path $Root "runs") | Out-Null
+New-Item -ItemType Directory -Force -Path `
+    (Join-Path $Root "runs"), `
+    $env:HF_HUB_CACHE | Out-Null
 
 $Args = @(
     "-hf", $HfRepo,

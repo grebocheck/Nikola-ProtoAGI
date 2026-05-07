@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+.envrc
 
 # Local runtime configuration
 config/protoagi.json
@@ -25,9 +26,16 @@ env/
 # Local model/runtime artifacts
 *.gguf
 *.safetensors
+*.onnx
 *.bin
 *.pt
 *.pth
+*.ckpt
+*.msgpack
+*.tflite
+*.mlmodel
+*.arrow
+*.parquet
 models/*
 !models/.gitkeep
 tools/*
@@ -36,6 +44,11 @@ tools/*
 # Generated local state
 data/*
 !data/.gitkeep
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
 runs/*
 !runs/.gitkeep
 !runs/*-baseline.json
@@ -48,4 +61,3 @@ Thumbs.db
 .idea/
 .vscode/
 .claude/
-

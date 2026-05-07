@@ -7,6 +7,7 @@ import math
 from typing import Any
 
 from ..storage.memory import MemoryStore
+from ..telegram.reasoning_log import REASONING_KV_PREFIX
 from ..telegram.style import STYLE_ARM_ORDER, STYLE_LAST_SENT_PREFIX, STYLE_STATE_PREFIX
 
 
@@ -228,6 +229,63 @@ def memory_graph(
     }
 
 
+def reasoning_overview(memory: MemoryStore, *, limit: int = 50) -> list[dict[str, Any]]:
+    with memory.connect() as conn:
+        rows = conn.execute(
+            "SELECT key, value, updated_at FROM kv WHERE key LIKE ? "
+            "ORDER BY updated_at DESC LIMIT ?",
+            (f"{REASONING_KV_PREFIX}%", max(1, min(limit, 200))),
+        ).fetchall()
+    chats: list[dict[str, Any]] = []
+    chat_names: dict[str, dict[str, Any]] = {}
+    with memory.connect() as conn:
+        for row in conn.execute(
+            "SELECT chat_id, display_name, chat_type FROM telegram_chats"
+        ).fetchall():
+            chat_names[str(row["chat_id"])] = {
+                "display_name": row["display_name"],
+                "chat_type": row["chat_type"],
+            }
+    for row in rows:
+        chat_id = str(row["key"])[len(REASONING_KV_PREFIX) :]
+        try:
+            payload = json.loads(str(row["value"] or "{}"))
+        except json.JSONDecodeError:
+            payload = {}
+        entries = payload.get("entries") if isinstance(payload, dict) else []
+        count = len(entries) if isinstance(entries, list) else 0
+        last_entry = entries[-1] if isinstance(entries, list) and entries else {}
+        chat_meta = chat_names.get(chat_id, {})
+        chats.append(
+            {
+                "chat_id": chat_id,
+                "display_name": chat_meta.get("display_name", ""),
+                "chat_type": chat_meta.get("chat_type", ""),
+                "entries": count,
+                "updated_at": row["updated_at"],
+                "last_decision_kind": str(last_entry.get("decision_kind", "")) if isinstance(last_entry, dict) else "",
+            }
+        )
+    return chats
+
+
+def reasoning_entries(memory: MemoryStore, chat_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
+    raw = memory.get_kv(REASONING_KV_PREFIX + str(chat_id))
+    if not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    entries = payload.get("entries") if isinstance(payload, dict) else []
+    if not isinstance(entries, list):
+        return []
+    items = [item for item in entries if isinstance(item, dict)]
+    if limit > 0:
+        items = items[-limit:]
+    return list(reversed(items))
+
+
 def _decision_metrics(raw: str | None) -> dict[str, Any]:
     if not raw:
         return {
@@ -280,6 +338,8 @@ def _histogram_percentile(histogram: dict[str, Any], percentile: float) -> int:
 
 __all__ = [
     "memory_graph",
+    "reasoning_entries",
+    "reasoning_overview",
     "serialize_memory",
     "stats",
     "style_report",

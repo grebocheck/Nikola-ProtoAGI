@@ -27,6 +27,8 @@ from urllib.parse import parse_qs, urlparse
 
 from .data import (
     memory_graph,
+    reasoning_entries,
+    reasoning_overview,
     serialize_memory,
     stats,
     style_report,
@@ -79,6 +81,7 @@ def _bytes_response(
 def _dashboard_html(memory: MemoryStore) -> str:
     stats_payload = stats(memory)
     style = style_report(memory)
+    reasoning_chats = reasoning_overview(memory, limit=15)
     items = memory.list_memories(limit=20)
     chats = []
     with memory.connect() as conn:
@@ -148,6 +151,18 @@ def _dashboard_html(memory: MemoryStore) -> str:
         "</tr>"
         for arm, stats in style["aggregate"].items()
     )
+    reasoning_rows = "".join(
+        "<tr>"
+        f"<td><button data-act=\"reasoning\" data-chat=\"{html.escape(str(row['chat_id']))}\">"
+        f"{html.escape(str(row['chat_id']))}</button></td>"
+        f"<td>{html.escape(str(row.get('display_name') or ''))}</td>"
+        f"<td>{html.escape(str(row.get('chat_type') or ''))}</td>"
+        f"<td>{int(row.get('entries', 0))}</td>"
+        f"<td>{html.escape(str(row.get('last_decision_kind') or ''))}</td>"
+        f"<td>{html.escape(str(row.get('updated_at') or ''))}</td>"
+        "</tr>"
+        for row in reasoning_chats
+    )
     stats_html = "".join(
         f"<dt>{html.escape(str(key))}</dt><dd>{html.escape(str(value))}</dd>"
         for key, value in stats_payload.items()
@@ -207,6 +222,14 @@ def _dashboard_html(memory: MemoryStore) -> str:
 <tbody>{aggregate_rows}</tbody></table>
 <table><thead><tr><th>chat_id</th><th>name</th><th>active arm</th><th>trials</th><th>signals</th><th>updated</th></tr></thead>
 <tbody id=\"style-tbody\">{style_rows or '<tr><td colspan=6>—</td></tr>'}</tbody></table>
+<h2>Reasoning capture</h2>
+<p style=\"color:#666;font-size:13px;margin:0 0 8px\">
+Opt-in chain-of-thought log. Set <code>PROTOAGI_CAPTURE_REASONING=1</code> to populate it.
+</p>
+<table><thead><tr><th>chat_id</th><th>name</th><th>type</th><th>entries</th><th>last kind</th><th>updated</th></tr></thead>
+<tbody id=\"reasoning-tbody\">{reasoning_rows or '<tr><td colspan=6>—</td></tr>'}</tbody></table>
+<details id=\"reasoning-detail\" style=\"display:none\"><summary id=\"reasoning-summary\">Reasoning entries</summary>
+<div id=\"reasoning-body\"></div></details>
 <h2>Memory graph</h2>
 <div class=\"controls\">
   <label>scope
@@ -274,6 +297,45 @@ document.getElementById('memory-tbody').addEventListener('click', async (event) 
     flash(err.message || 'error', true);
   }}
 }});
+const escapeHtml = (text) => String(text).replace(/[&<>"']/g, ch => ({{
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+}}[ch]));
+const renderReasoningEntries = (entries, chatId) => {{
+  const detail = document.getElementById('reasoning-detail');
+  const body = document.getElementById('reasoning-body');
+  document.getElementById('reasoning-summary').textContent = `Reasoning entries — chat ${{chatId}} (${{entries.length}})`;
+  if (!entries.length) {{
+    body.innerHTML = '<p style="color:#666">no captured reasoning for this chat</p>';
+  }} else {{
+    body.innerHTML = entries.map(entry => `
+      <div style="margin:8px 0;padding:8px 10px;border:1px solid #eee;border-radius:4px">
+        <div style="font-size:12px;color:#666">
+          ${{escapeHtml(entry.captured_at || '')}} · ${{escapeHtml(entry.decision_kind || '')}}
+          · message_id ${{escapeHtml(entry.message_id ?? '—')}}
+        </div>
+        <div style="font-size:13px;margin-top:4px"><b>incoming:</b> ${{escapeHtml(entry.incoming_text || '')}}</div>
+        <div style="font-size:13px;margin-top:4px"><b>reply:</b> ${{escapeHtml(entry.reply_excerpt || '—')}}</div>
+        <pre style="white-space:pre-wrap;background:#fafafa;padding:6px;margin:6px 0 0;font-size:12px;border-radius:3px">${{escapeHtml(entry.reasoning || '')}}</pre>
+      </div>
+    `).join('');
+  }}
+  detail.style.display = 'block';
+  detail.open = true;
+}};
+const reasoningTbody = document.getElementById('reasoning-tbody');
+if (reasoningTbody) {{
+  reasoningTbody.addEventListener('click', async (event) => {{
+    const button = event.target.closest('button[data-act="reasoning"]');
+    if (!button) return;
+    const chatId = button.dataset.chat;
+    try {{
+      const entries = await fetch(`/api/reasoning/${{encodeURIComponent(chatId)}}`).then(r => r.json());
+      renderReasoningEntries(entries, chatId);
+    }} catch (err) {{
+      flash(err.message || 'error', true);
+    }}
+  }});
+}}
 const drawGraph = async () => {{
   const canvas = document.getElementById('memory-graph');
   const ctx = canvas.getContext('2d');
@@ -373,6 +435,18 @@ def make_handler(memory: MemoryStore, service: MemoryService) -> type[BaseHTTPRe
                 limit = int(params.get("limit", ["50"])[0])
                 items = memory.list_memories(limit=limit)
                 _json_response(self, [serialize_memory(item) for item in items])
+                return
+            if parsed.path == "/api/reasoning":
+                _json_response(self, reasoning_overview(memory))
+                return
+            if parsed.path.startswith("/api/reasoning/"):
+                chat_id = parsed.path[len("/api/reasoning/") :].strip()
+                if not chat_id:
+                    self.send_error(400, "missing chat_id")
+                    return
+                params = parse_qs(parsed.query)
+                limit = int(params.get("limit", ["20"])[0])
+                _json_response(self, reasoning_entries(memory, chat_id, limit=limit))
                 return
             if parsed.path == "/api/memory-graph":
                 params = parse_qs(parsed.query)

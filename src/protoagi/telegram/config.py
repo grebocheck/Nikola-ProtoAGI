@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..env import env_bool, env_int
 from ..persona import get_persona, resolve_persona_key
+from ..web_search import WebSearchConfig
+from .group_gate import GroupGateConfig, parse_trigger_keywords
+from .reasoning_log import ReasoningLogConfig
 
 
 @dataclass(slots=True)
@@ -20,7 +23,13 @@ class TelegramConfig:
     max_reply_chars: int = 3900
     max_history_messages: int = 14
     max_memory_facts: int = 6
-    decision_max_tokens: int = 768
+    # Token budgets share the global ``PROTOAGI_MAX_TOKENS`` cap with the
+    # deepseek reasoning channel. Keep them generous so a longer chain of
+    # thought does not silently truncate the JSON decision before the
+    # closing brace.
+    decision_max_tokens: int = 2560
+    reply_max_tokens: int = 2048
+    reflection_max_tokens: int = 768
     max_reply_messages: int = 3
     # Default policy is "low": stickers feel like a punctuation mark, not a
     # filler. Cooldown is measured in user messages between stickers.
@@ -50,6 +59,9 @@ class TelegramConfig:
     tts_model: str = ""
     tts_voice: str = "alloy"
     tts_max_chars: int = 600
+    group_gate: GroupGateConfig = field(default_factory=GroupGateConfig)
+    web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
+    reasoning_log: ReasoningLogConfig = field(default_factory=ReasoningLogConfig)
 
     def __post_init__(self) -> None:
         self.set_persona(self.persona_key)
@@ -76,6 +88,9 @@ class TelegramConfig:
             reply_mode=reply_mode,
             poll_timeout_seconds=env_int("TELEGRAM_POLL_TIMEOUT", 25),
             max_reply_messages=env_int("TELEGRAM_MAX_REPLY_MESSAGES", 3),
+            decision_max_tokens=env_int("PROTOAGI_DECISION_MAX_TOKENS", 2560),
+            reply_max_tokens=env_int("PROTOAGI_REPLY_MAX_TOKENS", 2048),
+            reflection_max_tokens=env_int("PROTOAGI_REFLECTION_MAX_TOKENS", 768),
             sticker_frequency=sticker_frequency,
             sticker_cooldown_messages=env_int("NIKOLA_STICKER_COOLDOWN_MESSAGES", 6),
             sticker_max_reply_chars=env_int("NIKOLA_STICKER_MAX_REPLY_CHARS", 180),
@@ -99,12 +114,51 @@ class TelegramConfig:
             tts_model=os.environ.get("PROTOAGI_TTS_MODEL", "").strip(),
             tts_voice=os.environ.get("PROTOAGI_TTS_VOICE", "alloy").strip() or "alloy",
             tts_max_chars=env_int("PROTOAGI_TTS_MAX_CHARS", 600),
+            group_gate=_load_group_gate_config(),
+            web_search=_load_web_search_config(),
+            reasoning_log=_load_reasoning_log_config(),
         )
 
 
 def _parse_chat_ids(raw: str) -> set[str] | None:
     ids = {part.strip() for part in raw.split(",") if part.strip()}
     return ids or None
+
+
+def _load_reasoning_log_config() -> ReasoningLogConfig:
+    return ReasoningLogConfig(
+        enabled=env_bool("PROTOAGI_CAPTURE_REASONING", False),
+        max_entries_per_chat=env_int("PROTOAGI_REASONING_MAX_ENTRIES", 20),
+        max_chars_per_entry=env_int("PROTOAGI_REASONING_MAX_CHARS", 3000),
+    )
+
+
+def _load_web_search_config() -> WebSearchConfig:
+    return WebSearchConfig(
+        base_url=os.environ.get("PROTOAGI_WEB_SEARCH_URL", "").strip(),
+        timeout_seconds=env_int("PROTOAGI_WEB_SEARCH_TIMEOUT_SECONDS", 10),
+        max_results=env_int("PROTOAGI_WEB_SEARCH_MAX_RESULTS", 5),
+        cache_seconds=env_int("PROTOAGI_WEB_SEARCH_CACHE_SECONDS", 900),
+    )
+
+
+def _load_group_gate_config() -> GroupGateConfig:
+    raw_ratio = os.environ.get("NIKOLA_GROUP_PASSIVE_REPLY_RATIO", "")
+    try:
+        ratio = float(raw_ratio) if raw_ratio.strip() else 0.04
+    except ValueError:
+        ratio = 0.04
+    if ratio < 0.0:
+        ratio = 0.0
+    if ratio > 1.0:
+        ratio = 1.0
+    return GroupGateConfig(
+        cooldown_seconds=env_int("NIKOLA_GROUP_REPLY_COOLDOWN_SECONDS", 120),
+        passive_reply_ratio=ratio,
+        trigger_keywords=parse_trigger_keywords(
+            os.environ.get("NIKOLA_GROUP_TRIGGER_KEYWORDS", "")
+        ),
+    )
 
 
 __all__ = ["TelegramConfig"]

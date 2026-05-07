@@ -35,6 +35,7 @@ from ..storage.service import MemoryService, RecallQuery
 from .api import TelegramApi, TelegramApiError, is_telegram_polling_conflict
 from .attachments import TelegramAttachmentMixin
 from .config import TelegramConfig
+from .group_gate import GroupReactivityGate
 from .constants import (
     OFFSET_KEY,
     TELEGRAM_CHAT_THREAD_PREFIX,
@@ -75,7 +76,9 @@ from .text import (
     strip_assistanty_phrases,
     strip_speaker_prefixes,
 )
+from .reasoning_log import ReasoningLog, extract_reasoning_text
 from .tool_runner import TelegramToolEvent, TelegramToolRunner
+from ..web_search import WebSearchClient
 from .vision import VisionDescriber
 from .style import ReplyStyleTuner
 from .voice import (
@@ -128,6 +131,9 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         self._sticker_cache: dict[str, list[dict[str, str]]] = {}
         self.error_log_path = PROJECT_ROOT / "runs" / "telegram-errors.log"
         self._style_tuner = ReplyStyleTuner(memory)
+        self._group_gate = GroupReactivityGate(memory, telegram_config.group_gate)
+        self._web_search = WebSearchClient(telegram_config.web_search, memory=memory)
+        self._reasoning_log = ReasoningLog(memory, telegram_config.reasoning_log)
         initial_vision_llm = (
             OpenAICompatibleClient(
                 telegram_config.vision_base_url or agent_config.base_url,
@@ -447,7 +453,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             ],
             temperature=0.4,
             top_p=0.95,
-            max_tokens=320,
+            max_tokens=self.telegram_config.reflection_max_tokens,
             response_format=schema,
         )
         content = clean_model_content(
@@ -561,6 +567,18 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         addressed = self._is_addressed(text, message)
         if self._should_skip_without_llm(chat_state, addressed):
             return True
+        gate = self._group_gate.evaluate(
+            chat_id=chat_state.chat_id,
+            chat_type=chat_state.chat_type,
+            text=incoming_text,
+            addressed=addressed,
+        )
+        if not gate.allow:
+            self._schedule_from_minutes(
+                chat_state.chat_id,
+                self.telegram_config.proactive_cooldown_seconds // 60,
+            )
+            return True
 
         decision = self.decide_incoming(
             chat_state,
@@ -568,6 +586,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             display,
             addressed,
             user_id=user_id,
+            message_id=current_message_id or None,
         )
         for fact in decision.memories:
             self._remember_chat_fact(chat_state, fact, user_id=user_id)
@@ -645,6 +664,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         sender: str,
         addressed: bool,
         user_id: str | None = None,
+        message_id: int | None = None,
     ) -> Decision:
         started = time.monotonic()
         llm_calls = 0
@@ -680,6 +700,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             ],
             "adaptive_reply_style": self._style_payload(chat),
             "available_sticker_packs": STICKER_PACKS,
+            "available_tools": self._available_tool_names(),
         }
         messages = [
             {"role": "system", "content": self._decision_system_prompt()},
@@ -700,6 +721,14 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         content = clean_model_content(message.get("content", ""))
         payload = extract_json_object(content)
         decision = decision_from_payload(payload)
+        self._capture_reasoning(
+            chat=chat,
+            message_id=message_id,
+            decision_kind="decision",
+            incoming_text=incoming_text,
+            response_message=message,
+            reply_excerpt=_first_reply_excerpt(decision),
+        )
         if decision.tool_request:
             used_tools = True
             decision, merge_llm_calls = self._merge_decision_tool_results(
@@ -760,6 +789,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             user_id=user_id,
             global_memory=self.telegram_config.global_memory,
             max_steps=4,
+            web_search=self._web_search if self._web_search.enabled else None,
         )
         events = runner.run(
             tool_request=initial_decision.tool_request,
@@ -916,7 +946,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             ],
             temperature=self.agent_config.temperature,
             top_p=self.agent_config.top_p,
-            max_tokens=self.telegram_config.decision_max_tokens,
+            max_tokens=self.telegram_config.reply_max_tokens,
         )
         content = clean_model_content(response.get("choices", [{}])[0].get("message", {}).get("content", ""))
         return self._clean_reply_text(content)
@@ -1453,6 +1483,37 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             return True
         return False
 
+    def _available_tool_names(self) -> list[str]:
+        names = ["recall", "remind_me"]
+        if self._web_search.enabled:
+            names.append("web_search")
+        return names
+
+    def _capture_reasoning(
+        self,
+        *,
+        chat: TelegramChat,
+        message_id: int | None,
+        decision_kind: str,
+        incoming_text: str,
+        response_message: dict[str, Any],
+        reply_excerpt: str,
+    ) -> None:
+        if not self._reasoning_log.enabled:
+            return
+        reasoning = extract_reasoning_text(response_message)
+        if not reasoning:
+            return
+        self._reasoning_log.record(
+            chat_id=chat.chat_id,
+            message_id=message_id,
+            captured_at=utc_now(),
+            decision_kind=decision_kind,
+            incoming_text=incoming_text,
+            reasoning=reasoning,
+            reply_excerpt=reply_excerpt,
+        )
+
     def _is_addressed(self, text: str, message: dict[str, Any]) -> bool:
         lower = text.lower()
         if any(name in lower for name in self.persona.aliases):
@@ -1765,6 +1826,14 @@ def _tool_event_payload(event: TelegramToolEvent) -> dict[str, Any]:
         "arguments": event.arguments,
         "result": event.result,
     }
+
+
+def _first_reply_excerpt(decision: Decision) -> str:
+    for candidate in (decision.reply, *decision.replies):
+        text = (candidate or "").strip()
+        if text:
+            return text
+    return ""
 
 
 __all__ = ["NikolaBot", "build_nikola_bot"]

@@ -90,7 +90,7 @@ _REMINDER_ITEM_SCHEMA = {
 _TOOL_REQUEST_SCHEMA = {
     "type": "object",
     "properties": {
-        "name": {"type": "string", "enum": ["recall", "remind_me"]},
+        "name": {"type": "string", "enum": ["recall", "remind_me", "web_search"]},
         "arguments": {"type": "object"},
     },
     "required": ["name"],

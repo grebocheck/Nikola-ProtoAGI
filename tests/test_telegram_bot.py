@@ -1102,6 +1102,202 @@ class TelegramBotTests(unittest.TestCase):
             self.assertTrue(bot._is_addressed("Соломіє, привіт", {}))
             self.assertFalse(bot._is_addressed("Миколо, привіт", {}))
 
+    def test_group_chat_skips_llm_for_unaddressed_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM('{"should_reply": false, "reply": "", "memories": [], "next_check_minutes": 60}')
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(token="token"),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.bootstrap()
+            processed = bot.process_update(
+                {
+                    "update_id": 700,
+                    "message": {
+                        "message_id": 900,
+                        "chat": {"id": -100123, "type": "supergroup", "title": "ChatRoom"},
+                        "from": {"id": 7, "first_name": "Olesia"},
+                        "text": "ну й погодка сьогодні",
+                    },
+                }
+            )
+            self.assertTrue(processed)
+            self.assertEqual(len(llm.messages), 0)
+            self.assertEqual(telegram.sent, [])
+
+    def test_group_chat_runs_llm_when_addressed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": true, "reply": "ага, погода так собі", '
+                '"memories": [], "next_check_minutes": 60}'
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(token="token"),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.bootstrap()
+            processed = bot.process_update(
+                {
+                    "update_id": 701,
+                    "message": {
+                        "message_id": 901,
+                        "chat": {"id": -100123, "type": "supergroup", "title": "ChatRoom"},
+                        "from": {"id": 7, "first_name": "Olesia"},
+                        "text": "Миколо, як тобі погода?",
+                    },
+                }
+            )
+            self.assertTrue(processed)
+            self.assertGreaterEqual(len(llm.messages), 1)
+            self.assertEqual(len(telegram.sent), 1)
+
+    def test_reasoning_capture_records_when_enabled(self) -> None:
+        from protoagi.telegram.config import TelegramConfig
+        from protoagi.telegram.reasoning_log import REASONING_KV_PREFIX, ReasoningLogConfig
+
+        class ReasoningLLM:
+            def __init__(self, content: str, reasoning: str) -> None:
+                self.content = content
+                self.reasoning = reasoning
+                self.messages: list = []
+                self.kwargs: list = []
+
+            def chat_completion(self, messages, **kwargs):
+                self.messages.append(messages)
+                self.kwargs.append(kwargs)
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": self.content,
+                                "reasoning_content": self.reasoning,
+                            }
+                        }
+                    ]
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = ReasoningLLM(
+                '{"should_reply": true, "reply": "ага", "memories": [], "next_check_minutes": 60}',
+                "step 1: parse intent\nstep 2: short ack",
+            )
+            cfg = TelegramConfig(
+                token="token",
+                reasoning_log=ReasoningLogConfig(enabled=True, max_entries_per_chat=5),
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=cfg,
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.bootstrap()
+            bot.process_update(
+                {
+                    "update_id": 800,
+                    "message": {
+                        "message_id": 999,
+                        "chat": {"id": 333, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 333, "first_name": "Vadim"},
+                        "text": "привіт",
+                    },
+                }
+            )
+            raw = memory.get_kv(REASONING_KV_PREFIX + "333")
+            self.assertIsNotNone(raw)
+            entries = json.loads(raw)["entries"]
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["message_id"], 999)
+            self.assertIn("step 1: parse intent", entries[0]["reasoning"])
+
+    def test_reasoning_capture_skipped_when_disabled(self) -> None:
+        from protoagi.telegram.config import TelegramConfig
+        from protoagi.telegram.reasoning_log import REASONING_KV_PREFIX, ReasoningLogConfig
+
+        class ReasoningLLM:
+            def chat_completion(self, messages, **kwargs):
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '{"should_reply": false, "reply": "", "memories": [], "next_check_minutes": 60}',
+                                "reasoning_content": "internal monologue",
+                            }
+                        }
+                    ]
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            cfg = TelegramConfig(
+                token="token",
+                reasoning_log=ReasoningLogConfig(enabled=False),
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=ReasoningLLM(),
+                memory=memory,
+                telegram_config=cfg,
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.bootstrap()
+            bot.process_update(
+                {
+                    "update_id": 801,
+                    "message": {
+                        "message_id": 1000,
+                        "chat": {"id": 444, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 444, "first_name": "Vadim"},
+                        "text": "привіт",
+                    },
+                }
+            )
+            self.assertIsNone(memory.get_kv(REASONING_KV_PREFIX + "444"))
+
+    def test_decision_context_includes_available_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM('{"should_reply": false, "reply": "", "memories": [], "next_check_minutes": 60}')
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(token="token"),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.bootstrap()
+            bot.process_update(
+                {
+                    "update_id": 702,
+                    "message": {
+                        "message_id": 902,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "text": "що там нового",
+                    },
+                }
+            )
+            decision_context = json.loads(llm.messages[0][1]["content"])
+            self.assertIn("available_tools", decision_context)
+            self.assertIn("recall", decision_context["available_tools"])
+            self.assertIn("remind_me", decision_context["available_tools"])
+            self.assertNotIn("web_search", decision_context["available_tools"])
+
     def test_start_uses_active_persona_without_command_menu(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             memory = MemoryStore(Path(tmp) / "memory.sqlite3")

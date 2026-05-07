@@ -1,9 +1,108 @@
 # Architecture Audit
 
-Last audit: 2026-05-04
+Last audit: 2026-05-07
 
 For the forward-looking plan and prioritized backlog, see
 [ROADMAP.md](ROADMAP.md).
+
+## 2026-05-07 phase 13 (group readiness, web search, thinking budget)
+
+The bot was about to land in a busy group chat. The audit before this
+phase flagged three weaknesses (full text in [ROADMAP.md](ROADMAP.md)):
+ambient group lines paid a full constrained-JSON LLM call only to
+decide to stay silent, the decision token budget was tight enough to
+truncate JSON when the deepseek reasoning channel ran long, and the
+persona had no way to look up fresh facts.
+
+Closed in this phase:
+
+- **T1.** Token budgets are env-driven. New
+  `PROTOAGI_DECISION_MAX_TOKENS` (default 2560),
+  `PROTOAGI_REPLY_MAX_TOKENS` (default 2048) and
+  `PROTOAGI_REFLECTION_MAX_TOKENS` (default 768) replace the hard-coded
+  768/320 in `decide_incoming` / `_merge_decision_tool_results` /
+  `compose_reply` / `decide_initiative` / `_run_self_reflection`. The
+  global `PROTOAGI_MAX_TOKENS` was bumped from 1536 to 4096 in
+  `.env.example` so deepseek reasoning has headroom.
+- **G1.** New `protoagi.telegram.group_gate.GroupReactivityGate` runs
+  before `decide_incoming`. In groups it lets a turn through only when
+  the message is addressed (alias / `@bot` / "/" / reply-to-bot),
+  matches a configured trigger keyword, or wins an opportunistic
+  passive sample inside the per-chat cooldown
+  (`NIKOLA_GROUP_REPLY_COOLDOWN_SECONDS=120`,
+  `NIKOLA_GROUP_PASSIVE_REPLY_RATIO=0.04`). All other group lines skip
+  the LLM. Private chats are unaffected.
+- **G2.** Decision prompt rewritten so the model treats group silence
+  as the default and reserves replies for addressing, unique factual
+  questions, and emotional spikes.
+- **W1.** Optional `protoagi.web_search.WebSearchClient` reuses the
+  SSRF-aware fetch from `agent_tools/core.py`, expects a SearxNG-style
+  `?q=&format=json` endpoint at `PROTOAGI_WEB_SEARCH_URL`, and caches
+  results in `kv`. The Telegram tool runner gained a `web_search`
+  branch and `_TOOL_REQUEST_SCHEMA` now lists it alongside
+  `recall`/`remind_me`. The decision context advertises the
+  `available_tools` list so the model never asks for a disabled tool.
+- **T2.** New `protoagi.telegram.reasoning_log` keeps a bounded ring
+  buffer of deepseek `reasoning_content` per chat in `kv`. Off by
+  default behind `PROTOAGI_CAPTURE_REASONING=0`; entries are clipped to
+  `PROTOAGI_REASONING_MAX_CHARS`. The orchestrator captures the
+  reasoning at the end of `decide_incoming` together with `chat_id`,
+  `message_id`, decision kind, and a reply excerpt. The admin dashboard
+  gained a "Reasoning capture" section listing chats with entries and a
+  collapsible per-chat panel served by `/api/reasoning` and
+  `/api/reasoning/<chat_id>`.
+
+Verification: 173 → 198 unit tests. New modules covered by
+`tests/test_group_gate.py`, `tests/test_web_search.py`, and
+`tests/test_reasoning_log.py`; orchestrator-level integration tests in
+`tests/test_telegram_bot.py` (group gate, available_tools,
+reasoning capture on/off); admin endpoint test in `tests/test_admin.py`.
+Full suite green.
+
+### Live smoke run (W2) — 2026-05-07
+
+Ran the stack on the host machine (RTX 5070 Ti, 16 GB VRAM,
+`models/gpt-oss-20b-MXFP4.gguf` via `tools/llama.cpp/llama-server.exe`
+with `--reasoning auto --reasoning-format deepseek --skip-chat-parsing`).
+Used a synthetic Telegram-shaped update through `NikolaBot.process_update`
+against the live LLM (no Telegram traffic was sent — `FakeTelegram`
+captured outbound calls). Verified end-to-end:
+
+- **Token budgets (T1).** A real "привіт, як справи?" turn produced a
+  well-formed JSON decision with budget to spare; no truncation under
+  the new defaults.
+- **Group gate (G1).** Unaddressed `supergroup` line ("сьогодні дощ")
+  reached the gate, the gate returned `passive_disabled` (default
+  `NIKOLA_GROUP_PASSIVE_REPLY_RATIO=0.04` left the random sampler
+  almost always rejecting), and the orchestrator returned without a
+  single LLM call. ~0 ms for the silent path.
+- **Reasoning capture (T2).** First live invocation revealed that
+  llama-server with `--skip-chat-parsing` ships gpt-oss output with
+  Harmony control tokens (`<|channel|>analysis<|message|>...`)
+  inside `message.content` rather than splitting them into
+  `reasoning_content`. `extract_reasoning_text` therefore missed them.
+  Added `protoagi.harmony.extract_analysis_content` and a third
+  fallback branch in
+  [reasoning_log.py](../src/protoagi/telegram/reasoning_log.py); the
+  next live run captured the full chain of thought, e.g.
+  *"We have a private chat… user is not addressing the bot explicitly
+  but it's a greeting. According to policy: In private chat, respond
+  more often…"* — confirming the new prompt language reaches the
+  model and the gate does not apply in private. New unit test in
+  `tests/test_reasoning_log.py` covers the Harmony branch (197 → 198
+  tests).
+- **G2 prompt verbiage.** The captured reasoning explicitly references
+  the new policy lines ("respond more often" / addressing rules), so
+  the prompt is reaching the model and being parsed.
+
+What was *not* covered by the live run (intentionally): Telegram
+long-polling (would require pushing the live bot online — out of scope
+for a smoke check); web_search end-to-end (no SearxNG endpoint on the
+host); TTS/voice (off in `.env`).
+
+Phase 13 is now closed end to end. Remaining items in ROADMAP backlog
+are W2 follow-on captures (e.g. live SearxNG run when an endpoint is
+available) and the long-standing `bench-tools` baseline.
 
 ## Current Shape
 
