@@ -383,12 +383,17 @@ class MemoryStore:
             self._ensure_column(conn, "memory_items", "media_id", "TEXT")
             self._ensure_column(conn, "memory_items", "updated_at", "TEXT")
             self._ensure_column(conn, "memory_items", "origin_message_id", "TEXT")
+            self._ensure_column(conn, "memory_items", "expires_at", "TEXT")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memory_items_media ON memory_items(media_id)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memory_items_origin "
                 "ON memory_items(origin_message_id) WHERE origin_message_id IS NOT NULL"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_items_expires "
+                "ON memory_items(expires_at) WHERE expires_at IS NOT NULL"
             )
             try:
                 # Self-contained FTS5 (no external-content) so DELETE / INSERT
@@ -431,6 +436,7 @@ class MemoryStore:
         embedding_model: str | None = None,
         metadata: dict[str, Any] | None = None,
         origin_message_id: str | int | None = None,
+        expires_at: str | None = None,
     ) -> int:
         text = text.strip()
         if not text:
@@ -450,15 +456,20 @@ class MemoryStore:
         else:
             stripped = str(origin_message_id).strip()
             origin_value = stripped or None
+        expires_value: str | None = None
+        if expires_at is not None:
+            stripped = str(expires_at).strip()
+            expires_value = stripped or None
         with self.connect() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO memory_items(
                     kind, text, scope, user_id, chat_id, persona_key, media_id,
                     importance, confidence, source, supersedes_id,
-                    pinned, created_at, updated_at, metadata, origin_message_id
+                    pinned, created_at, updated_at, metadata, origin_message_id,
+                    expires_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     kind,
@@ -477,6 +488,7 @@ class MemoryStore:
                     now,
                     json.dumps(metadata or {}, ensure_ascii=False),
                     origin_value,
+                    expires_value,
                 ),
             )
             rowid = int(cur.lastrowid)
@@ -873,6 +885,11 @@ class MemoryStore:
             params.append(kind)
         if not include_superseded:
             clauses.append("superseded_by IS NULL")
+        # Hide expired working-memory rows from regular listings. The
+        # reflection sweep is what actually deletes them; until then,
+        # the row stays in storage but stops surfacing.
+        clauses.append("(expires_at IS NULL OR expires_at > ?)")
+        params.append(utc_now())
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(limit)
         with self.connect() as conn:
@@ -956,6 +973,7 @@ class MemoryStore:
         require_tags: Sequence[str] | None = None,
     ) -> list[MemoryItem]:
         query = query.strip()
+        now = utc_now()
         with self.connect() as conn:
             rows: list[sqlite3.Row]
             if query:
@@ -968,25 +986,28 @@ class MemoryStore:
                         JOIN memory_items ON memory_items.id = memory_items_fts.rowid
                         WHERE memory_items_fts MATCH ?
                           AND memory_items.superseded_by IS NULL
+                          AND (memory_items.expires_at IS NULL OR memory_items.expires_at > ?)
                         ORDER BY rank
                         LIMIT ?
                         """,
-                        (fts_query, limit * 2),
+                        (fts_query, now, limit * 2),
                     ).fetchall()
                 except sqlite3.OperationalError:
                     rows = conn.execute(
                         """
                         SELECT * FROM memory_items
                         WHERE text LIKE ? AND superseded_by IS NULL
+                          AND (expires_at IS NULL OR expires_at > ?)
                         ORDER BY id DESC LIMIT ?
                         """,
-                        (f"%{query}%", limit * 2),
+                        (f"%{query}%", now, limit * 2),
                     ).fetchall()
             else:
                 rows = conn.execute(
                     "SELECT * FROM memory_items WHERE superseded_by IS NULL "
+                    "AND (expires_at IS NULL OR expires_at > ?) "
                     "ORDER BY id DESC LIMIT ?",
-                    (limit * 2,),
+                    (now, limit * 2),
                 ).fetchall()
             results: list[MemoryItem] = []
             for row in rows:
@@ -1674,6 +1695,73 @@ class MemoryStore:
             )
         return self.get_conflict(conflict_id)
 
+    def expire_working_memory(self, *, grace_seconds: int = 0) -> int:
+        """Hard-delete memory_items past their ``expires_at``.
+
+        Called from the reflection pass. The grace window lets a row sit
+        around for a bit after expiry so a concurrent reader doesn't see
+        it vanish mid-query. Returns the number of rows deleted.
+        """
+
+        now = datetime.now(timezone.utc) - timedelta(seconds=max(0, int(grace_seconds)))
+        cutoff = now.isoformat(timespec="seconds")
+        with self.connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM memory_items WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                (cutoff,),
+            )
+            try:
+                # Keep FTS in sync — the trigger-free FTS5 setup needs
+                # manual cleanup. ``rowid NOT IN (SELECT id FROM memory_items)``
+                # would scan twice; the per-row delete above already
+                # cascades for our usage.
+                conn.execute(
+                    "DELETE FROM memory_items_fts "
+                    "WHERE rowid NOT IN (SELECT id FROM memory_items)"
+                )
+            except sqlite3.OperationalError:
+                pass
+        return max(0, int(cur.rowcount))
+
+    def count_memories(
+        self,
+        *,
+        scope: str | None = None,
+        persona_key: str | None = None,
+        include_superseded: bool = False,
+    ) -> int:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if scope is not None:
+            clauses.append("scope = ?")
+            params.append(scope)
+        if persona_key is not None:
+            clauses.append("persona_key = ?")
+            params.append(persona_key)
+        if not include_superseded:
+            clauses.append("superseded_by IS NULL")
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self.connect() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) AS n FROM memory_items {where}",
+                tuple(params),
+            ).fetchone()
+        return int(row["n"])
+
+    def count_user_states(self, *, persona_key: str | None = None) -> int:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if persona_key is not None:
+            clauses.append("persona_key = ?")
+            params.append(persona_key)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self.connect() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) AS n FROM user_state {where}",
+                tuple(params),
+            ).fetchone()
+        return int(row["n"])
+
     def count_conflicts(
         self,
         *,
@@ -1695,6 +1783,53 @@ class MemoryStore:
                 tuple(params),
             ).fetchone()
         return int(row["n"])
+
+    def conflict_partners_for(
+        self,
+        memory_ids: Iterable[int],
+        *,
+        only_unresolved: bool = True,
+    ) -> dict[int, list[tuple[int, float]]]:
+        """For each id in ``memory_ids``, return its conflict partners.
+
+        The partner is the OTHER side of the (a, b) pair. Items not in
+        a conflict get no entry in the result (rather than an empty
+        list) so callers can detect "no conflict" with a single ``in``
+        check.
+        """
+
+        ids = sorted({int(value) for value in memory_ids})
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        clauses = [
+            f"(memory_a_id IN ({placeholders}) OR memory_b_id IN ({placeholders}))"
+        ]
+        params: list[Any] = list(ids) + list(ids)
+        if only_unresolved:
+            clauses.append("resolution_status = 'unresolved'")
+        where = " AND ".join(clauses)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT memory_a_id, memory_b_id, similarity
+                FROM memory_conflicts
+                WHERE {where}
+                ORDER BY similarity DESC
+                """,
+                tuple(params),
+            ).fetchall()
+        partners: dict[int, list[tuple[int, float]]] = {}
+        ids_set = set(ids)
+        for row in rows:
+            a = int(row["memory_a_id"])
+            b = int(row["memory_b_id"])
+            sim = float(row["similarity"])
+            if a in ids_set:
+                partners.setdefault(a, []).append((b, sim))
+            if b in ids_set:
+                partners.setdefault(b, []).append((a, sim))
+        return partners
 
     def conflicts_for_memory(
         self,
@@ -2205,11 +2340,12 @@ class MemoryStore:
 
     @staticmethod
     def _memory_from_row(row: sqlite3.Row, tags: list[str]) -> MemoryItem:
-        # ``origin_message_id`` is read defensively because legacy v4 rows
-        # predate the column. ``sqlite3.Row`` raises IndexError on missing
-        # keys, not KeyError, so we coerce through the keys() check.
+        # Newer columns (``origin_message_id``, ``expires_at``) are read
+        # defensively because legacy databases predate them. ``sqlite3.Row``
+        # has ``.keys()`` so we probe rather than catching IndexError.
         keys = row.keys()
         origin = row["origin_message_id"] if "origin_message_id" in keys else None
+        expires = row["expires_at"] if "expires_at" in keys else None
         return MemoryItem(
             id=int(row["id"]),
             kind=str(row["kind"]),
@@ -2232,6 +2368,7 @@ class MemoryStore:
             tags=tags,
             metadata=json.loads(row["metadata"] or "{}"),
             origin_message_id=origin,
+            expires_at=expires,
         )
 
     @staticmethod

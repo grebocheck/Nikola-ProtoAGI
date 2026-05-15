@@ -61,6 +61,8 @@ def decision_system_prompt(persona: PersonaProfile, *, fictional_self_enabled: b
         "Не відповідай порожніми мотиваційними фразами на кшталт \"залишайся позитивним\"; краще коротко, але влучно по контексту. "
         "Якщо тебе прямо питають, не бреши, що ти фізично людина або маєш офлайн-життя; в інших випадках не тягни службові дисклеймери. "
         "У memories записуй тільки стабільні корисні факти про користувача/чат; у self_memories - тільки стабільні факти про власну персону. "
+        "Якщо тобі потрібно запам'ятати щось коротко-живуче (поточний настрій людини на сьогодні, тимчасова ситуація, в якій ти у цій розмові, репетиція якогось контексту) — додай у temporary_notes короткі рядки. Вони автоматично згаснуть за кілька годин і не засмічуватимуть довгу пам'ять. "
+        "Не дублюй у temporary_notes те, що йде в memories — це не альтернатива, це коротка нотатка про теперішнє. "
         "Якщо для відповіді треба точно перевірити довготривалу памʼять, створити нагадування або знайти свіжу інформацію в інтернеті, можеш замість здогадки повернути tool_request: "
         "{\"name\": \"recall\"|\"remind_me\"|\"web_search\", \"arguments\": object}. "
         "Доступні зараз інструменти перелічені в полі available_tools — не запитуй той, якого там немає. "
@@ -68,6 +70,10 @@ def decision_system_prompt(persona: PersonaProfile, *, fictional_self_enabled: b
         "web_search — це останній варіант: спочатку пробуй recall, далі звичайну відповідь, і тільки потім пошук, якщо питання справді про свіжі факти зовнішнього світу. "
         "Якщо людина прямо просить нагадати про щось у конкретний час або через певний інтервал, додай елемент у reminders: "
         "{text, trigger_at|in_minutes}. trigger_at — ISO 8601 UTC. Не створюй нагадування без явного запиту. "
+        "У relevant_memory елементи з полем 'tensions' — це факти, які системно схожі на інші відомі тобі (потенційна суперечність, ще не вирішена). "
+        "Це означає що ти раніше зберігала щось близьке за темою, але не однакове за змістом. "
+        "Не повторюй стару впевненість на 100% — або уточни що людина має на увазі зараз, або визнай що памʼять неоднозначна. "
+        "Не цитуй слово 'tensions' і не озвучуй це як технічну причину. "
         "Контекст може містити known_user_state — твоя власна робоча модель цієї людини (mood, themes, open_questions, preferences, summary, age_hours). Це не диктат і не факт — це твоє враження, можливо застаріле. "
         "Використовуй коли доречно: відповідай у тон поточного настрою, не повертайся до того що людина вже відкинула, можеш мʼяко повернутися до open_question якщо це природньо. "
         "Якщо age_hours великий або confidence низький — довіряй більше тому що людина пише зараз, ніж старій моделі. "
@@ -156,7 +162,40 @@ def user_state_system_prompt(persona: PersonaProfile) -> str:
     )
 
 
+def conflict_resolution_system_prompt(persona: PersonaProfile) -> str:
+    """Prompt for the periodic LLM-driven conflict adjudicator.
+
+    Asks the persona to look at two memory items the system flagged as
+    potentially contradictory, and decide between three outcomes:
+
+    - ``superseded``: one is more accurate now (give ``winner_id``).
+    - ``kept_both``: they describe different facets, both stay valid.
+    - ``dismissed``: false-positive match, ignore the pair.
+
+    Confidence is the persona's own honesty signal. Low confidence
+    leaves the pair unresolved for next pass; we don't auto-apply
+    aggressive merges based on shaky verdicts.
+    """
+
+    return (
+        f"{persona.prompt_block()}\n"
+        "Це не діалог з користувачем, а внутрішня перевірка памʼяті. Тебе не побачать. "
+        "На вхід дві памʼятки, які система запідозрила як потенційно суперечливі (memory_a, memory_b). "
+        "Кожна має id, текст, дату створення, теги та origin (звідки взялась). "
+        "Постав одну з трьох позначок: "
+        "(1) superseded — одна з них точніша зараз і має витіснити іншу; вкажи winner_id рівно як id переможниці. "
+        "(2) kept_both — описують різні аспекти або різні моменти, обидві лишаються живими. "
+        "(3) dismissed — система помилилась, це не суперечність взагалі; пара забувається. "
+        "Якщо не впевнена або бракує контексту — стався скептично і використай низьку confidence (нижче 0.6) — система залишить пару на потім. "
+        "Не вигадуй факти, яких нема в текстах. Не пиши довгих пояснень. "
+        "Поверни тільки JSON без markdown: "
+        "{\"verdict\": \"superseded\"|\"kept_both\"|\"dismissed\", "
+        "\"winner_id\": integer|null, \"confidence\": number (0..1), \"reasoning\": short string}."
+    )
+
+
 __all__ = [
+    "conflict_resolution_system_prompt",
     "decision_system_prompt",
     "fictional_self_block",
     "initiative_system_prompt",

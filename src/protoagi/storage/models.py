@@ -91,6 +91,11 @@ class MemoryItem:
     # that this memory was extracted from. Lets the model answer
     # "звідки я це знаю" by cross-referencing recent_telegram_messages.
     origin_message_id: str | None = None
+    # Optional ISO 8601 expiry for short-lived "working memory" notes.
+    # ``None`` (the default) means permanent — current behavior. When
+    # set, recall and consolidation routines skip the row past this
+    # timestamp; the reflection pass eventually hard-deletes it.
+    expires_at: str | None = None
 
 
 @dataclass(slots=True)

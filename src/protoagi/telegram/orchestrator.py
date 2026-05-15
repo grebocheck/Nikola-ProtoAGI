@@ -17,6 +17,9 @@ from ..config import AgentConfig, PROJECT_ROOT
 from ..embedding import EmbeddingClient, EmbeddingConfig
 from ..harmony import clean_model_content
 from ..storage.memory import (
+    CONFLICT_STATUS_DISMISSED,
+    CONFLICT_STATUS_KEPT_BOTH,
+    CONFLICT_STATUS_SUPERSEDED,
     GOAL_STATUS_ABANDONED,
     GOAL_STATUS_COMPLETED,
     GOAL_STATUS_OPEN,
@@ -54,6 +57,8 @@ from .identity import (
     is_image_blind_reply,
 )
 from .json_io import (
+    CONFLICT_RESOLUTION_JSON_SCHEMA,
+    ConflictResolutionVerdict,
     DECISION_JSON_SCHEMA,
     Decision,
     INITIATIVE_JSON_SCHEMA,
@@ -62,6 +67,7 @@ from .json_io import (
     StickerAttachment,
     USER_STATE_JSON_SCHEMA,
     UserStateUpdate,
+    conflict_resolution_from_payload,
     decision_from_payload,
     decision_reply_texts,
     extract_json_object,
@@ -71,6 +77,7 @@ from .json_io import (
     user_state_from_payload,
 )
 from .prompts import (
+    conflict_resolution_system_prompt,
     decision_system_prompt,
     initiative_system_prompt,
     reply_system_prompt,
@@ -459,6 +466,16 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             print(f"conflict scan failed: {exc}", flush=True)
             result["conflicts_detected_global"] = 0
             result["conflicts_detected_persona"] = 0
+        try:
+            result["conflicts_resolved"] = self._run_conflict_resolution()
+        except (OpenAICompatError, OSError) as exc:  # pragma: no cover - defensive
+            print(f"conflict resolution failed: {exc}", flush=True)
+            result["conflicts_resolved"] = 0
+        try:
+            result["working_memory_expired"] = self.memory.expire_working_memory()
+        except sqlite3_error_types() as exc:  # pragma: no cover - defensive
+            print(f"working memory expiry failed: {exc}", flush=True)
+            result["working_memory_expired"] = 0
         self.memory.set_kv(_REFLECTION_LAST_KV, utc_now())
         return result
 
@@ -542,6 +559,158 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         return written
 
     # ------------------------------------------------------------------
+    # Conflict resolution
+
+    def try_resolve_conflict(
+        self,
+        conflict_id: int,
+        *,
+        confidence_floor: float = 0.6,
+    ) -> ConflictResolutionVerdict | None:
+        """Ask the LLM to adjudicate one conflict pair.
+
+        Loads both memories, prompts the persona to choose between
+        superseded / kept_both / dismissed, and (if confidence is above
+        ``confidence_floor``) applies the verdict to the conflict + the
+        underlying memory items. Returns the verdict for the caller to
+        count/log, or ``None`` when the pair was malformed or the LLM
+        call failed.
+        """
+
+        conflict = self.memory.get_conflict(int(conflict_id))
+        if conflict is None or conflict.resolution_status != "unresolved":
+            return None
+        items = self.memory.get_memories(
+            [conflict.memory_a_id, conflict.memory_b_id]
+        )
+        item_a = items.get(conflict.memory_a_id)
+        item_b = items.get(conflict.memory_b_id)
+        # If either side has been hard-deleted or superseded already, the
+        # pair is stale — dismiss it without spending a token.
+        if item_a is None or item_b is None or item_a.superseded_by or item_b.superseded_by:
+            self.memory.resolve_conflict(
+                conflict_id,
+                status=CONFLICT_STATUS_DISMISSED,
+                metadata_patch={"auto_reason": "side_removed_or_superseded"},
+            )
+            return None
+
+        payload = {
+            "memory_a": _memory_pair_view(item_a),
+            "memory_b": _memory_pair_view(item_b),
+            "similarity": conflict.similarity,
+        }
+        try:
+            response = self.llm.chat_completion(
+                [
+                    {"role": "system", "content": conflict_resolution_system_prompt(self.persona)},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+                temperature=0.2,
+                top_p=0.9,
+                max_tokens=self.telegram_config.reflection_max_tokens,
+                response_format=CONFLICT_RESOLUTION_JSON_SCHEMA,
+            )
+        except OpenAICompatError as exc:  # pragma: no cover - defensive
+            print(f"conflict resolution LLM call failed: {exc}", flush=True)
+            return None
+
+        content = clean_model_content(
+            response.get("choices", [{}])[0].get("message", {}).get("content", "")
+        )
+        verdict = conflict_resolution_from_payload(extract_json_object(content))
+
+        # Low-confidence verdicts are left for the next reflection pass.
+        if verdict.confidence < confidence_floor:
+            self.memory.resolve_conflict(
+                conflict_id,
+                status="unresolved",
+                metadata_patch={
+                    "last_verdict": verdict.verdict,
+                    "last_confidence": verdict.confidence,
+                    "last_reasoning": verdict.reasoning,
+                },
+            )
+            return verdict
+
+        if verdict.verdict == "superseded":
+            # winner_id must be one of the two items, otherwise reject.
+            if verdict.winner_id not in (item_a.id, item_b.id):
+                # Treat as unresolvable: leave the pair, store the note.
+                self.memory.resolve_conflict(
+                    conflict_id,
+                    status="unresolved",
+                    metadata_patch={
+                        "last_verdict": "superseded",
+                        "last_confidence": verdict.confidence,
+                        "last_reasoning": "winner_id outside the pair",
+                    },
+                )
+                return verdict
+            winner_id = verdict.winner_id
+            loser_id = item_b.id if winner_id == item_a.id else item_a.id
+            self.memory.supersede(loser_id, winner_id)
+            self.memory.resolve_conflict(
+                conflict_id,
+                status=CONFLICT_STATUS_SUPERSEDED,
+                winner_id=winner_id,
+                metadata_patch={
+                    "confidence": verdict.confidence,
+                    "reasoning": verdict.reasoning,
+                },
+            )
+        elif verdict.verdict == "kept_both":
+            self.memory.resolve_conflict(
+                conflict_id,
+                status=CONFLICT_STATUS_KEPT_BOTH,
+                metadata_patch={
+                    "confidence": verdict.confidence,
+                    "reasoning": verdict.reasoning,
+                },
+            )
+        else:  # dismissed
+            self.memory.resolve_conflict(
+                conflict_id,
+                status=CONFLICT_STATUS_DISMISSED,
+                metadata_patch={
+                    "confidence": verdict.confidence,
+                    "reasoning": verdict.reasoning,
+                },
+            )
+        return verdict
+
+    def _run_conflict_resolution(
+        self,
+        *,
+        max_per_pass: int = 3,
+        confidence_floor: float = 0.6,
+    ) -> int:
+        """Adjudicate up to ``max_per_pass`` unresolved conflicts.
+
+        Called inside ``run_reflection_pass``. Capped so a single
+        reflection cycle doesn't burn too many tokens, especially when
+        the conflict backlog is large after a long-running deployment.
+        Returns the count of conflicts the LLM actually moved out of
+        ``unresolved`` (low-confidence ones don't count).
+        """
+
+        conflicts = self.memory.list_unresolved_conflicts(
+            persona_key=self.persona.key, limit=int(max_per_pass)
+        )
+        resolved = 0
+        for conflict in conflicts:
+            try:
+                verdict = self.try_resolve_conflict(
+                    conflict.id, confidence_floor=confidence_floor
+                )
+            except (OpenAICompatError, OSError) as exc:  # pragma: no cover - defensive
+                print(f"conflict {conflict.id} resolution failed: {exc}", flush=True)
+                continue
+            if verdict is not None and verdict.confidence >= confidence_floor:
+                resolved += 1
+        return resolved
+
+    # ------------------------------------------------------------------
     # User state refresh
 
     def refresh_user_state(self, user_id: str, *, message_limit: int = 20) -> UserState | None:
@@ -556,8 +725,12 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         user_id = str(user_id or "").strip()
         if not user_id:
             return None
+        # user_state rows are keyed by the prefixed id (``telegram:555``)
+        # but ``telegram_messages.sender_id`` stores the raw Telegram id.
+        # Look up messages by the raw id so we actually find them.
+        raw_telegram_id = _strip_telegram_prefix(user_id)
         messages = self.memory.recent_user_message_texts(
-            user_id=user_id, limit=message_limit
+            user_id=raw_telegram_id, limit=message_limit
         )
         if not messages:
             return None
@@ -616,6 +789,59 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             confidence=update.confidence,
             messages_at_last_update=len(messages),
         )
+
+    def _maybe_bootstrap_user_state(
+        self,
+        user_id: str | None,
+        *,
+        min_messages: int = 3,
+    ) -> bool:
+        """Create an empty user_state row once a user has talked enough.
+
+        Without this, ``_run_user_state_refresh`` only updates rows that
+        already exist — so a new user would never get a state model.
+        We pre-allocate a placeholder row at message N and backdate its
+        ``last_updated_at`` so the next reflection pass picks it up and
+        fills it in. Costs zero extra LLM calls in the message turn.
+        Returns ``True`` when a new row was created.
+        """
+
+        if not user_id:
+            return False
+        if self.memory.get_user_state(user_id, self.persona.key) is not None:
+            return False
+        # See refresh_user_state: messages use raw Telegram id, not the
+        # ``telegram:`` prefixed form used as the user_state key.
+        raw_telegram_id = _strip_telegram_prefix(user_id)
+        try:
+            msg_count = self.memory.count_user_messages(user_id=raw_telegram_id)
+        except Exception:  # noqa: BLE001
+            return False
+        if msg_count < int(min_messages):
+            return False
+        try:
+            self.memory.upsert_user_state(
+                user_id=user_id,
+                persona_key=self.persona.key,
+                summary="",
+                confidence=0.0,
+                metadata={"bootstrap": True, "bootstrap_at_messages": msg_count},
+            )
+            # Backdate last_updated_at so stale_user_states sees it on the
+            # next reflection pass instead of treating it as "just updated".
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(hours=48)
+            ).isoformat(timespec="seconds")
+            with self.memory.connect() as conn:
+                conn.execute(
+                    "UPDATE user_state SET last_updated_at = ? "
+                    "WHERE user_id = ? AND persona_key = ?",
+                    (cutoff, user_id, self.persona.key),
+                )
+        except (ValueError, RuntimeError) as exc:  # pragma: no cover - defensive
+            print(f"user_state bootstrap failed for {user_id}: {exc}", flush=True)
+            return False
+        return True
 
     def _run_user_state_refresh(
         self,
@@ -793,6 +1019,13 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             user_id=user_id,
             origin_message_id=current_message_id or None,
         )
+        self._persist_temporary_notes(
+            decision.temporary_notes,
+            chat=chat_state,
+            user_id=user_id,
+            origin_message_id=current_message_id or None,
+        )
+        self._maybe_bootstrap_user_state(user_id)
         self._filter_decision_stickers(chat_state, incoming_text, decision)
         self._maybe_add_reaction_sticker(chat_state, incoming_text, decision)
         if not decision.should_reply and not decision.stickers:
@@ -886,15 +1119,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             "incoming_text": incoming_text,
             "recent_messages": recent,
             "recent_telegram_messages": recent_telegram,
-            "relevant_memory": [
-                {
-                    "text": fact.text,
-                    "tags": fact.tags,
-                    "created_at": fact.created_at,
-                    "origin": fact.origin_message_id,
-                }
-                for fact in facts
-            ],
+            "relevant_memory": self._relevant_memory_payload(facts),
             "known_persona_self_memory": [
                 {"text": fact.text, "created_at": fact.created_at}
                 for fact in persona_self_memory
@@ -1651,6 +1876,70 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             added += 1
         return added
 
+    def _relevant_memory_payload(self, facts) -> list[dict[str, Any]]:
+        """Build the ``relevant_memory`` list passed to the model.
+
+        Includes provenance (``origin``) plus a ``tensions`` field when
+        the fact has unresolved conflict partners. Omitting ``tensions``
+        entirely for non-conflicted items keeps the prompt lean.
+        """
+
+        tensions_by_id = self._tensions_for_facts(facts)
+        payload: list[dict[str, Any]] = []
+        for fact in facts:
+            entry: dict[str, Any] = {
+                "id": getattr(fact, "id", None),
+                "text": fact.text,
+                "tags": fact.tags,
+                "created_at": fact.created_at,
+                "origin": getattr(fact, "origin_message_id", None),
+            }
+            tensions = tensions_by_id.get(getattr(fact, "id", None))
+            if tensions:
+                entry["tensions"] = tensions
+            payload.append(entry)
+        return payload
+
+    def _tensions_for_facts(self, facts) -> dict[int, list[dict[str, Any]]]:
+        """For each recalled fact id, look up unresolved conflict partners.
+
+        Returns ``{fact_id: [{partner_text, similarity}, ...]}``. Items
+        with no conflict are omitted entirely so the prompt stays light.
+        We cap each item at the two strongest tensions; surfacing more
+        would dilute the model's attention without adding signal.
+        """
+
+        fact_ids = [fact.id for fact in facts if getattr(fact, "id", None) is not None]
+        if not fact_ids:
+            return {}
+        try:
+            partners = self.memory.conflict_partners_for(fact_ids)
+        except Exception:  # noqa: BLE001
+            return {}
+        if not partners:
+            return {}
+        partner_ids = sorted({pid for pairs in partners.values() for pid, _ in pairs})
+        partner_items = self.memory.get_memories(partner_ids)
+        result: dict[int, list[dict[str, Any]]] = {}
+        for fact_id, pairs in partners.items():
+            top = sorted(pairs, key=lambda p: p[1], reverse=True)[:2]
+            tensions: list[dict[str, Any]] = []
+            for partner_id, similarity in top:
+                partner = partner_items.get(partner_id)
+                if partner is None or partner.superseded_by is not None:
+                    continue
+                tensions.append(
+                    {
+                        "with_text": partner.text,
+                        "with_id": partner_id,
+                        "similarity": round(float(similarity), 3),
+                        "with_origin": getattr(partner, "origin_message_id", None),
+                    }
+                )
+            if tensions:
+                result[fact_id] = tensions
+        return result
+
     def _user_state_payload(self, user_id: str | None) -> dict[str, Any] | None:
         """Compact view of the persona's user_state for the prompt.
 
@@ -1682,6 +1971,68 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             "confidence": state.confidence,
             "age_hours": age_hours,
         }
+
+    def _persist_temporary_notes(
+        self,
+        notes: list[str],
+        *,
+        chat: TelegramChat,
+        user_id: str | None,
+        origin_message_id: int | None,
+        expires_in_hours: float = 4.0,
+    ) -> int:
+        """Store ``decision.temporary_notes`` as short-lived memory rows.
+
+        These are observations the persona wants in the next few turns
+        but does not want to commit to long-term memory ("user sounds
+        irritated this evening", "we're rehearsing a deflection skit").
+        Default 4-hour expiry is short enough that the next morning the
+        slate is clean; the reflection sweep deletes them physically.
+        """
+
+        if not notes:
+            return 0
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(hours=float(expires_in_hours))
+        ).isoformat(timespec="seconds")
+        scope = (
+            SCOPE_GLOBAL if self.telegram_config.global_memory
+            else (SCOPE_USER if user_id else SCOPE_CHAT)
+        )
+        origin_ref = _format_origin_ref(chat.chat_id, origin_message_id)
+        added = 0
+        for raw in notes:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            tags = [
+                "telegram",
+                "working_memory",
+                TELEGRAM_GLOBAL_MEMORY_TAG,
+                f"source_chat:{chat.chat_id}",
+                f"persona:{self.persona.key}",
+            ]
+            if user_id:
+                tags.append(f"user:{user_id}")
+            try:
+                self.memory_service.remember(
+                    text,
+                    kind=KIND_FACT,
+                    scope=scope,
+                    tags=tags,
+                    user_id=user_id,
+                    chat_id=chat.chat_id,
+                    persona_key=self.persona.key,
+                    source="telegram_temporary_note",
+                    importance=0.3,  # not durable; keep recall weight low
+                    expires_at=expires_at,
+                    origin_message_id=origin_ref,
+                    metadata={"working_memory": True, "expires_in_hours": expires_in_hours},
+                )
+                added += 1
+            except (ValueError, RuntimeError):
+                continue
+        return added
 
     def _open_goals_payload(self, chat: TelegramChat) -> list[dict[str, Any]]:
         """Compact open-goals view for the model prompt (persona + chat scoped)."""
@@ -2222,6 +2573,20 @@ def _decision_to_payload(decision: Decision) -> dict[str, Any]:
     }
 
 
+def _strip_telegram_prefix(user_id: str) -> str:
+    """Strip the ``telegram:`` prefix that ``_user_id_for`` puts on Telegram ids.
+
+    user_state rows and other persona-scoped data use the prefixed form
+    so we can distinguish Telegram users from agent callers, but the
+    Telegram message log stores raw ids. Anything that needs to join
+    across the two has to peel the prefix.
+    """
+
+    if user_id.startswith("telegram:"):
+        return user_id[len("telegram:"):]
+    return user_id
+
+
 def _format_origin_ref(chat_id: str | int, message_id: int | str | None) -> str | None:
     """Build a stable provenance reference like ``telegram:555:42``.
 
@@ -2239,6 +2604,25 @@ def _format_origin_ref(chat_id: str | int, message_id: int | str | None) -> str 
     if message_int <= 0:
         return None
     return f"telegram:{chat_id}:{message_int}"
+
+
+def _memory_pair_view(item) -> dict[str, Any]:
+    """Compact projection of a MemoryItem for the conflict-resolution prompt.
+
+    Strips embedding, access counters and other noise the model doesn't
+    need, while keeping the bits that actually help adjudication:
+    id (so the verdict can name a winner), text, tags, created_at,
+    origin (provenance), and importance.
+    """
+
+    return {
+        "id": item.id,
+        "text": item.text,
+        "tags": list(item.tags),
+        "created_at": item.created_at,
+        "origin": getattr(item, "origin_message_id", None),
+        "importance": item.importance,
+    }
 
 
 def _goal_summary(goal: Goal) -> dict[str, Any]:

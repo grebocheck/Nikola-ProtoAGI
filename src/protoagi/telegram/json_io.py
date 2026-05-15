@@ -30,6 +30,11 @@ class Decision:
     tool_request: dict[str, Any] | None = None
     next_check_minutes: int | None = None
     goals: list[dict[str, Any]] = field(default_factory=list)
+    # Short-lived "working memory" notes. Each is stored as a fact with
+    # a few-hour expiry — useful for ephemeral context like current
+    # emotional state or in-flight test scenarios that should not bleed
+    # into long-term memory.
+    temporary_notes: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -154,6 +159,7 @@ DECISION_JSON_SCHEMA: dict[str, Any] = {
                     "anyOf": [{"type": "null"}, {"type": "integer"}]
                 },
                 "goals": {"type": "array", "items": _GOAL_ACTION_SCHEMA},
+                "temporary_notes": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["should_reply"],
             "additionalProperties": False,
@@ -186,6 +192,75 @@ USER_STATE_JSON_SCHEMA: dict[str, Any] = {
         },
     },
 }
+
+
+CONFLICT_RESOLUTION_JSON_SCHEMA: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "conflict_resolution",
+        "strict": False,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "verdict": {
+                    "type": "string",
+                    "enum": ["superseded", "kept_both", "dismissed"],
+                },
+                "winner_id": {
+                    "anyOf": [{"type": "null"}, {"type": "integer"}]
+                },
+                "confidence": {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "maximum": 1.0,
+                },
+                "reasoning": {"type": "string"},
+            },
+            "required": ["verdict", "confidence"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+@dataclass(slots=True)
+class ConflictResolutionVerdict:
+    """Model's call on a conflict pair.
+
+    ``superseded``: one side is more accurate now; the loser gets a
+    ``supersedes`` link pointing at the winner. ``winner_id`` MUST be
+    one of the two memory ids in the conflict — otherwise we treat the
+    verdict as malformed and leave the pair unresolved.
+
+    ``kept_both``: they describe different facets, both stay active.
+    ``dismissed``: false-positive match; ignore the pair going forward.
+    """
+
+    verdict: str
+    winner_id: int | None
+    confidence: float
+    reasoning: str
+
+
+def conflict_resolution_from_payload(payload: dict[str, Any]) -> ConflictResolutionVerdict:
+    verdict = str(payload.get("verdict") or "").strip().lower()
+    if verdict not in {"superseded", "kept_both", "dismissed"}:
+        verdict = "dismissed"
+    winner_raw = payload.get("winner_id")
+    winner_id: int | None = None
+    if isinstance(winner_raw, int) and winner_raw > 0:
+        winner_id = winner_raw
+    try:
+        confidence = max(0.0, min(1.0, float(payload.get("confidence", 0.0))))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    reasoning = str(payload.get("reasoning") or "").strip()[:500]
+    return ConflictResolutionVerdict(
+        verdict=verdict,
+        winner_id=winner_id,
+        confidence=confidence,
+        reasoning=reasoning,
+    )
 
 
 @dataclass(slots=True)
@@ -302,6 +377,11 @@ def decision_from_payload(payload: dict[str, Any]) -> Decision:
         tool_request=normalize_tool_request(payload.get("tool_request")),
         next_check_minutes=_optional_int(payload.get("next_check_minutes")),
         goals=normalize_goal_actions(payload.get("goals", [])),
+        temporary_notes=[
+            str(item).strip()
+            for item in payload.get("temporary_notes", [])
+            if str(item).strip()
+        ][:5],
     )
 
 
@@ -505,6 +585,8 @@ def _optional_int(value: Any) -> int | None:
 
 
 __all__ = [
+    "CONFLICT_RESOLUTION_JSON_SCHEMA",
+    "ConflictResolutionVerdict",
     "DECISION_JSON_SCHEMA",
     "Decision",
     "INITIATIVE_JSON_SCHEMA",
@@ -513,6 +595,7 @@ __all__ = [
     "StickerAttachment",
     "USER_STATE_JSON_SCHEMA",
     "UserStateUpdate",
+    "conflict_resolution_from_payload",
     "user_state_from_payload",
     "decision_from_payload",
     "decision_reply_texts",

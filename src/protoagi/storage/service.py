@@ -136,6 +136,7 @@ class MemoryService:
         metadata: dict | None = None,
         embed: bool = True,
         origin_message_id: str | int | None = None,
+        expires_at: str | None = None,
     ) -> StoredMemory | None:
         text = text.strip()
         if not text:
@@ -190,6 +191,7 @@ class MemoryService:
             embedding_model=embed_model,
             metadata=metadata,
             origin_message_id=origin_message_id,
+            expires_at=expires_at,
         )
         if vector is not None and self.embedding_index is not None:
             self.embedding_index.add(memory_id, vector)
@@ -540,6 +542,52 @@ class MemoryService:
                     if recorded >= max_pairs_recorded:
                         break
         return recorded
+
+    # ------------------------------------------------------------------
+    # Introspection
+
+    def memory_health(
+        self,
+        *,
+        persona_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Snapshot of the memory subsystem for admin/audit/CLI use.
+
+        Returns a small JSON-friendly dict with counts of active vs
+        superseded memories, open goals, tracked user_states, and
+        unresolved conflicts. Optionally scoped to a single persona;
+        without ``persona_key`` it reports global totals (still scoped
+        per-status, just not per-persona).
+        """
+
+        from .models import (
+            CONFLICT_STATUS_UNRESOLVED,
+            GOAL_STATUS_OPEN,
+        )
+
+        active = self.store.count_memories(persona_key=persona_key)
+        total = self.store.count_memories(
+            persona_key=persona_key, include_superseded=True
+        )
+        superseded = max(0, total - active)
+        open_goals = (
+            self.store.count_goals(persona_key=persona_key, status=GOAL_STATUS_OPEN)
+            if persona_key
+            else self.store.count_goals(status=GOAL_STATUS_OPEN)
+        )
+        user_states = self.store.count_user_states(persona_key=persona_key)
+        unresolved_conflicts = self.store.count_conflicts(
+            persona_key=persona_key, status=CONFLICT_STATUS_UNRESOLVED
+        )
+        return {
+            "persona_key": persona_key,
+            "memories_active": active,
+            "memories_superseded": superseded,
+            "memories_total": total,
+            "open_goals": open_goals,
+            "user_states_tracked": user_states,
+            "unresolved_conflicts": unresolved_conflicts,
+        }
 
     # ------------------------------------------------------------------
     # Pruning
