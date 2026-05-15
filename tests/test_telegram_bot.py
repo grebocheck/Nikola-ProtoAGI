@@ -1,7 +1,12 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+
+# Tests use FakeTelegram + offline endpoints, so suppress the bootstrap probe
+# warnings (and their per-target ~1 s timeout) globally for this module.
+os.environ.setdefault("PROTOAGI_BOOTSTRAP_PROBE", "0")
 
 from protoagi.config import AgentConfig
 from protoagi.storage.memory import MemoryStore
@@ -83,17 +88,51 @@ class FakeTelegram:
         )
         return {"message_id": 100 + len(self.stickers)}
 
-    def send_voice_bytes(self, chat_id, data, *, filename="reply.ogg", reply_to_message_id=None, disable_notification=False):
+    def send_voice_bytes(
+        self,
+        chat_id,
+        data,
+        *,
+        filename="reply.ogg",
+        mime_type="audio/ogg",
+        reply_to_message_id=None,
+        disable_notification=False,
+    ):
         self.voices.append(
             {
                 "chat_id": str(chat_id),
                 "data": data,
                 "filename": filename,
+                "mime_type": mime_type,
                 "reply_to_message_id": reply_to_message_id,
                 "disable_notification": disable_notification,
             }
         )
         return {"message_id": 200 + len(self.voices)}
+
+    def send_audio_bytes(
+        self,
+        chat_id,
+        data,
+        *,
+        filename="reply.mp3",
+        mime_type="audio/mpeg",
+        reply_to_message_id=None,
+        disable_notification=False,
+    ):
+        if not hasattr(self, "audios"):
+            self.audios = []
+        self.audios.append(
+            {
+                "chat_id": str(chat_id),
+                "data": data,
+                "filename": filename,
+                "mime_type": mime_type,
+                "reply_to_message_id": reply_to_message_id,
+                "disable_notification": disable_notification,
+            }
+        )
+        return {"message_id": 300 + len(self.audios)}
 
 
 class FakeLLM:
@@ -138,11 +177,27 @@ class FakeVoiceTranscriberWithBytes(FakeVoiceTranscriber):
 
 
 class FakeTTS:
-    def __init__(self, data: bytes) -> None:
+    def __init__(self, data: bytes, response_format: str = "opus") -> None:
         self.data = data
+        self._response_format = response_format
+        self.last_error: str | None = None
+        self.last_voice: str | None = None
 
-    def synthesize(self, text: str):
+    def synthesize(self, text: str, *, voice: str | None = None):
+        self.last_voice = voice
         return self.data
+
+    @property
+    def response_format(self) -> str:
+        return self._response_format
+
+    @property
+    def expected_mime(self) -> str:
+        return {
+            "opus": "audio/ogg",
+            "ogg": "audio/ogg",
+            "mp3": "audio/mpeg",
+        }.get(self._response_format, "application/octet-stream")
 
 
 class TelegramBotTests(unittest.TestCase):
@@ -860,6 +915,190 @@ class TelegramBotTests(unittest.TestCase):
             )
             self.assertEqual(telegram.voices[0]["data"], b"voice-bytes")
 
+    def test_tts_uses_persona_voice_when_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": true, "reply": "ага", "memories": [], "next_check_minutes": 60}'
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(
+                    token="token",
+                    persona_key="solomiya",
+                    tts_enabled=True,
+                    tts_base_url="http://tts.local/v1",
+                    tts_model="tts-1-hd",
+                    tts_voice="nova",
+                ),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            fake_tts = FakeTTS(b"voice-bytes")
+            bot._tts = fake_tts
+            bot.bootstrap()
+            bot.process_update(
+                {
+                    "update_id": 720,
+                    "message": {
+                        "message_id": 920,
+                        "chat": {"id": 130, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 130, "first_name": "Vadim"},
+                        "text": "що там",
+                    },
+                }
+            )
+            # Persona is solomiya, so the persona's tts_voice ("solomiya") wins
+            # over the global TelegramConfig fallback ("nova").
+            self.assertEqual(fake_tts.last_voice, "solomiya")
+
+    def test_tts_falls_back_to_config_voice_when_persona_has_none(self) -> None:
+        from protoagi.persona import PersonaProfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": true, "reply": "ок", "memories": [], "next_check_minutes": 60}'
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(
+                    token="token",
+                    tts_enabled=True,
+                    tts_base_url="http://tts.local/v1",
+                    tts_model="tts-1-hd",
+                    tts_voice="nova",
+                ),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            # Override the persona instance to one without tts_voice.
+            bot.persona = PersonaProfile(
+                key="anon",
+                display_name="Anon",
+                memory_tag="anon",
+                aliases=("anon",),
+                self_model="",
+                user_model="",
+                relationship_model="",
+                decision_style=(),
+                reply_style=(),
+                memory_policy=(),
+                initiative_policy=(),
+                start_message="",
+                tts_voice="",
+            )
+            fake_tts = FakeTTS(b"voice-bytes")
+            bot._tts = fake_tts
+            bot.bootstrap()
+            bot.process_update(
+                {
+                    "update_id": 721,
+                    "message": {
+                        "message_id": 921,
+                        "chat": {"id": 131, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 131, "first_name": "Vadim"},
+                        "text": "тук-тук",
+                    },
+                }
+            )
+            # Synthesize() got voice=None, so it should fall back to config.voice.
+            self.assertIsNone(fake_tts.last_voice)
+
+    def test_persona_json_loads_tts_voice_field(self) -> None:
+        from protoagi.persona import get_persona
+
+        self.assertEqual(get_persona("solomiya").tts_voice, "solomiya")
+        self.assertEqual(get_persona("mykola").tts_voice, "mykola")
+
+    def test_voice_synthesizer_rejects_json_error_blob(self) -> None:
+        from protoagi.telegram.voice import VoiceSynthesisConfig, VoiceSynthesizer
+        from urllib.request import Request as _Req
+
+        synth = VoiceSynthesizer(
+            VoiceSynthesisConfig(
+                base_url="http://tts.local/v1",
+                model="tts-stub",
+                enabled=True,
+                response_format="opus",
+            )
+        )
+
+        captured_payloads: list[dict] = []
+
+        def fake_urlopen(request, timeout=120):  # type: ignore[no-untyped-def]
+            assert isinstance(request, _Req)
+            captured_payloads.append(json.loads(request.data.decode("utf-8")))
+
+            class _Resp:
+                def read(self_inner):
+                    return b'{"error": {"message": "voice not found", "code": 400}}'
+
+                def __enter__(self_inner):
+                    return self_inner
+
+                def __exit__(self_inner, *exc):
+                    return False
+
+            return _Resp()
+
+        import protoagi.telegram.voice as voice_mod
+
+        original = voice_mod.urlopen
+        voice_mod.urlopen = fake_urlopen  # type: ignore[assignment]
+        try:
+            self.assertIsNone(synth.synthesize("hello"))
+        finally:
+            voice_mod.urlopen = original  # type: ignore[assignment]
+        self.assertIsNotNone(synth.last_error)
+        self.assertIn("JSON error", synth.last_error or "")
+        self.assertEqual(captured_payloads[0]["response_format"], "opus")
+        self.assertEqual(captured_payloads[0]["model"], "tts-stub")
+
+    def test_tts_mp3_routes_through_send_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": true, "reply": "audio reply", "memories": [], "next_check_minutes": 60}'
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(
+                    token="token",
+                    tts_enabled=True,
+                    tts_base_url="http://tts.local/v1",
+                    tts_model="tts-stub",
+                    tts_response_format="mp3",
+                ),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot._tts = FakeTTS(b"mp3-bytes", response_format="mp3")
+            bot.bootstrap()
+            bot.process_update(
+                {
+                    "update_id": 555,
+                    "message": {
+                        "message_id": 916,
+                        "chat": {"id": 124, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 124, "first_name": "Vadim"},
+                        "text": "say it",
+                    },
+                }
+            )
+            self.assertEqual(telegram.voices, [])
+            self.assertTrue(getattr(telegram, "audios", []))
+            audio = telegram.audios[0]
+            self.assertEqual(audio["data"], b"mp3-bytes")
+            self.assertEqual(audio["mime_type"], "audio/mpeg")
+            self.assertTrue(audio["filename"].endswith(".mp3"))
+
     def test_photo_blind_reply_is_suppressed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             memory = MemoryStore(Path(tmp) / "memory.sqlite3")
@@ -1267,6 +1506,81 @@ class TelegramBotTests(unittest.TestCase):
                 }
             )
             self.assertIsNone(memory.get_kv(REASONING_KV_PREFIX + "444"))
+
+    def test_normalize_tool_request_accepts_web_search(self) -> None:
+        from protoagi.telegram.json_io import normalize_tool_request
+
+        for name in ("recall", "remind_me", "web_search"):
+            self.assertEqual(
+                normalize_tool_request({"name": name, "arguments": {"query": "x"}}),
+                {"name": name, "arguments": {"query": "x"}},
+            )
+        self.assertIsNone(normalize_tool_request({"name": "rm -rf /", "arguments": {}}))
+
+    def test_web_search_tool_request_invokes_runner(self) -> None:
+        from protoagi.telegram.config import TelegramConfig
+        from protoagi.web_search import WebSearchConfig
+
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+
+            llm = FakeLLM(
+                [
+                    '{"should_reply": true, "reply": "", '
+                    '"tool_request": {"name": "web_search", "arguments": {"query": "погода"}}, '
+                    '"memories": [], "next_check_minutes": 60}',
+                    '{"should_reply": true, "reply": "Знайшла: weather.example", '
+                    '"memories": [], "next_check_minutes": 60}',
+                ]
+            )
+            cfg = TelegramConfig(
+                token="token",
+                web_search=WebSearchConfig(base_url="https://search.example/api"),
+            )
+
+            captured: list[str] = []
+
+            payload_json = json.dumps(
+                {
+                    "results": [
+                        {
+                            "title": "Forecast",
+                            "url": "https://weather.example",
+                            "content": "сонячно",
+                        }
+                    ]
+                }
+            ).encode("utf-8")
+
+            def fake_fetch(url: str, max_chars: int) -> tuple[str, bytes]:
+                captured.append(url)
+                return ("application/json", payload_json)
+
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=cfg,
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.bootstrap()
+            bot._web_search._fetcher = fake_fetch  # type: ignore[attr-defined]
+            processed = bot.process_update(
+                {
+                    "update_id": 900,
+                    "message": {
+                        "message_id": 909,
+                        "chat": {"id": 6001, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 6001, "first_name": "Vadim"},
+                        "text": "яка зараз погода?",
+                    },
+                }
+            )
+            self.assertTrue(processed)
+            self.assertEqual(len(captured), 1)
+            self.assertIn("q=", captured[0])
+            self.assertIn("Знайшла", telegram.sent[0]["text"])
 
     def test_decision_context_includes_available_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

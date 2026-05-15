@@ -1,0 +1,19 @@
+{
+  "_comment": "Persona voice key -> Piper UA speaker mapping for tts-server-uk.py. The 'speaker' field must be one of the names from the Piper model's speaker_id_map (uk_UA-ukrainian_tts-medium ships with three speakers: lada, mykyta, tetiana). length_scale > 1.0 slows speech down; < 1.0 speeds it up. The persona's tts_voice in config/personas/*.json picks one of these keys.",
+
+  "voices": {
+    "solomiya":  { "speaker": "lada",    "length_scale": 1.05, "_comment": "Warm female timbre, slightly slowed for clarity." },
+    "mykola":    { "speaker": "mykyta",  "length_scale": 1.00, "_comment": "Calm male timbre." },
+
+    "alloy":     { "speaker": "tetiana", "length_scale": 1.00 },
+    "echo":      { "speaker": "mykyta",  "length_scale": 1.00 },
+    "fable":     { "speaker": "lada",    "length_scale": 1.00 },
+    "onyx":      { "speaker": "mykyta",  "length_scale": 1.00, "_comment": "Piper UA medium has no second male speaker; both onyx and echo map to mykyta." },
+    "nova":      { "speaker": "lada",    "length_scale": 1.00 },
+    "shimmer":   { "speaker": "tetiana", "length_scale": 1.00 },
+
+    "mykyta":    { "speaker": "mykyta",  "length_scale": 1.00 },
+    "lada":      { "speaker": "lada",    "length_scale": 1.00 },
+    "tetiana":   { "speaker": "tetiana", "length_scale": 1.00 }
+  }
+}

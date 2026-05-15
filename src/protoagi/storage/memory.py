@@ -28,14 +28,25 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
 
 from .models import (
+    ALL_CONFLICT_STATUSES,
+    ALL_GOAL_STATUSES,
     ALL_KINDS,
     ALL_SCOPES,
+    CONFLICT_STATUS_DISMISSED,
+    CONFLICT_STATUS_KEPT_BOTH,
+    CONFLICT_STATUS_SUPERSEDED,
+    CONFLICT_STATUS_UNRESOLVED,
+    GOAL_STATUS_ABANDONED,
+    GOAL_STATUS_COMPLETED,
+    GOAL_STATUS_OPEN,
+    Goal,
     KIND_EPISODIC,
     KIND_FACT,
     KIND_PERSONA_SELF,
     KIND_PROCEDURAL,
     KIND_SEMANTIC,
     MediaBlob,
+    MemoryConflict,
     MemoryFact,
     MemoryItem,
     RecallResult,
@@ -47,6 +58,7 @@ from .models import (
     TelegramChat,
     TelegramMessage,
     UserProfile,
+    UserState,
     cosine_similarity,
     pack_embedding,
     unpack_embedding,
@@ -54,14 +66,25 @@ from .models import (
 )
 
 __all__ = [
+    "ALL_CONFLICT_STATUSES",
+    "ALL_GOAL_STATUSES",
     "ALL_KINDS",
     "ALL_SCOPES",
+    "CONFLICT_STATUS_DISMISSED",
+    "CONFLICT_STATUS_KEPT_BOTH",
+    "CONFLICT_STATUS_SUPERSEDED",
+    "CONFLICT_STATUS_UNRESOLVED",
+    "GOAL_STATUS_ABANDONED",
+    "GOAL_STATUS_COMPLETED",
+    "GOAL_STATUS_OPEN",
+    "Goal",
     "KIND_EPISODIC",
     "KIND_FACT",
     "KIND_PERSONA_SELF",
     "KIND_PROCEDURAL",
     "KIND_SEMANTIC",
     "MediaBlob",
+    "MemoryConflict",
     "MemoryFact",
     "MemoryItem",
     "MemoryStore",
@@ -74,6 +97,7 @@ __all__ = [
     "TelegramChat",
     "TelegramMessage",
     "UserProfile",
+    "UserState",
     "cosine_similarity",
     "pack_embedding",
     "unpack_embedding",
@@ -106,7 +130,7 @@ class MemoryStore:
     handles).
     """
 
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 7
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -294,12 +318,77 @@ class MemoryStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_reminders_due
                     ON reminders(status, trigger_at);
+                CREATE TABLE IF NOT EXISTS goals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    persona_key TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    priority REAL NOT NULL DEFAULT 0.5,
+                    user_id TEXT,
+                    chat_id TEXT,
+                    origin_message_id INTEGER,
+                    due_at TEXT,
+                    last_touched_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT,
+                    closed_at TEXT,
+                    metadata TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE INDEX IF NOT EXISTS idx_goals_persona_status
+                    ON goals(persona_key, status);
+                CREATE INDEX IF NOT EXISTS idx_goals_chat_status
+                    ON goals(chat_id, status);
+                CREATE INDEX IF NOT EXISTS idx_goals_due_open
+                    ON goals(due_at) WHERE status = 'open';
+                CREATE TABLE IF NOT EXISTS user_state (
+                    user_id TEXT NOT NULL,
+                    persona_key TEXT NOT NULL,
+                    mood TEXT NOT NULL DEFAULT '',
+                    themes TEXT NOT NULL DEFAULT '[]',
+                    open_questions TEXT NOT NULL DEFAULT '[]',
+                    preferences TEXT NOT NULL DEFAULT '{}',
+                    summary TEXT NOT NULL DEFAULT '',
+                    confidence REAL NOT NULL DEFAULT 0.5,
+                    last_updated_at TEXT NOT NULL,
+                    messages_at_last_update INTEGER NOT NULL DEFAULT 0,
+                    metadata TEXT NOT NULL DEFAULT '{}',
+                    PRIMARY KEY (user_id, persona_key)
+                );
+                CREATE INDEX IF NOT EXISTS idx_user_state_persona_age
+                    ON user_state(persona_key, last_updated_at);
+                CREATE TABLE IF NOT EXISTS memory_conflicts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    memory_a_id INTEGER NOT NULL,
+                    memory_b_id INTEGER NOT NULL,
+                    similarity REAL NOT NULL,
+                    persona_key TEXT,
+                    detected_at TEXT NOT NULL,
+                    resolution_status TEXT NOT NULL DEFAULT 'unresolved',
+                    resolution_winner_id INTEGER,
+                    resolved_at TEXT,
+                    metadata TEXT NOT NULL DEFAULT '{}',
+                    FOREIGN KEY (memory_a_id) REFERENCES memory_items(id) ON DELETE CASCADE,
+                    FOREIGN KEY (memory_b_id) REFERENCES memory_items(id) ON DELETE CASCADE,
+                    CHECK (memory_a_id < memory_b_id)
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_conflicts_pair
+                    ON memory_conflicts(memory_a_id, memory_b_id);
+                CREATE INDEX IF NOT EXISTS idx_memory_conflicts_unresolved
+                    ON memory_conflicts(resolution_status, detected_at)
+                    WHERE resolution_status = 'unresolved';
+                CREATE INDEX IF NOT EXISTS idx_memory_conflicts_persona
+                    ON memory_conflicts(persona_key, resolution_status);
                 """
             )
             self._ensure_column(conn, "memory_items", "media_id", "TEXT")
             self._ensure_column(conn, "memory_items", "updated_at", "TEXT")
+            self._ensure_column(conn, "memory_items", "origin_message_id", "TEXT")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memory_items_media ON memory_items(media_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memory_items_origin "
+                "ON memory_items(origin_message_id) WHERE origin_message_id IS NOT NULL"
             )
             try:
                 # Self-contained FTS5 (no external-content) so DELETE / INSERT
@@ -341,6 +430,7 @@ class MemoryStore:
         embedding: Sequence[float] | None = None,
         embedding_model: str | None = None,
         metadata: dict[str, Any] | None = None,
+        origin_message_id: str | int | None = None,
     ) -> int:
         text = text.strip()
         if not text:
@@ -354,15 +444,21 @@ class MemoryStore:
         tag_set = sorted({tag.strip() for tag in (tags or []) if tag and tag.strip()})
 
         now = utc_now()
+        origin_value: str | None
+        if origin_message_id is None:
+            origin_value = None
+        else:
+            stripped = str(origin_message_id).strip()
+            origin_value = stripped or None
         with self.connect() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO memory_items(
                     kind, text, scope, user_id, chat_id, persona_key, media_id,
                     importance, confidence, source, supersedes_id,
-                    pinned, created_at, updated_at, metadata
+                    pinned, created_at, updated_at, metadata, origin_message_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     kind,
@@ -380,6 +476,7 @@ class MemoryStore:
                     now,
                     now,
                     json.dumps(metadata or {}, ensure_ascii=False),
+                    origin_value,
                 ),
             )
             rowid = int(cur.lastrowid)
@@ -1062,6 +1159,562 @@ class MemoryStore:
             )
 
     # ------------------------------------------------------------------
+    # Goals (persistent commitments / open threads)
+
+    def open_goal(
+        self,
+        *,
+        persona_key: str,
+        text: str,
+        priority: float = 0.5,
+        user_id: str | None = None,
+        chat_id: str | int | None = None,
+        origin_message_id: int | None = None,
+        due_at: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> int:
+        cleaned = text.strip()
+        if not cleaned:
+            raise ValueError("goal text cannot be empty")
+        persona = (persona_key or "").strip()
+        if not persona:
+            raise ValueError("goal persona_key cannot be empty")
+        priority_value = max(0.0, min(1.0, float(priority)))
+        chat_id_value = None if chat_id is None else str(chat_id)
+        now = utc_now()
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO goals(
+                    persona_key, text, status, priority, user_id, chat_id,
+                    origin_message_id, due_at, last_touched_at, created_at,
+                    updated_at, metadata
+                )
+                VALUES (?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    persona,
+                    cleaned,
+                    priority_value,
+                    user_id,
+                    chat_id_value,
+                    origin_message_id,
+                    due_at,
+                    now,
+                    now,
+                    now,
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def get_goal(self, goal_id: int) -> Goal | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM goals WHERE id = ?", (int(goal_id),)
+            ).fetchone()
+        return None if row is None else self._goal_from_row(row)
+
+    def list_open_goals(
+        self,
+        *,
+        persona_key: str,
+        chat_id: str | int | None = None,
+        user_id: str | None = None,
+        limit: int = 20,
+    ) -> list[Goal]:
+        clauses: list[str] = ["persona_key = ?", "status = 'open'"]
+        params: list[Any] = [persona_key]
+        if chat_id is not None:
+            clauses.append("chat_id = ?")
+            params.append(str(chat_id))
+        if user_id is not None:
+            clauses.append("user_id = ?")
+            params.append(user_id)
+        params.append(int(limit))
+        where = " AND ".join(clauses)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM goals
+                WHERE {where}
+                ORDER BY
+                    CASE WHEN due_at IS NULL THEN 1 ELSE 0 END,
+                    due_at ASC,
+                    priority DESC,
+                    last_touched_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return [self._goal_from_row(row) for row in rows]
+
+    def list_due_goals(
+        self,
+        *,
+        persona_key: str,
+        now: str,
+        lookahead_hours: float = 24.0,
+        chat_id: str | int | None = None,
+        limit: int = 10,
+    ) -> list[Goal]:
+        """Open goals with a ``due_at`` at or before ``now + lookahead_hours``.
+
+        Goals without a ``due_at`` are intentionally excluded: this method is
+        for the initiative loop, which needs a real time anchor to decide
+        whether to act now.
+        """
+
+        cutoff = (
+            datetime.fromisoformat(now.replace("Z", "+00:00"))
+            + timedelta(hours=float(lookahead_hours))
+        ).isoformat(timespec="seconds")
+        clauses: list[str] = [
+            "persona_key = ?",
+            "status = 'open'",
+            "due_at IS NOT NULL",
+            "due_at <= ?",
+        ]
+        params: list[Any] = [persona_key, cutoff]
+        if chat_id is not None:
+            clauses.append("chat_id = ?")
+            params.append(str(chat_id))
+        params.append(int(limit))
+        where = " AND ".join(clauses)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM goals
+                WHERE {where}
+                ORDER BY due_at ASC, priority DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return [self._goal_from_row(row) for row in rows]
+
+    def update_goal(
+        self,
+        goal_id: int,
+        *,
+        status: str | None = None,
+        priority: float | None = None,
+        text: str | None = None,
+        due_at: str | None | type(...) = ...,
+        metadata_patch: dict[str, Any] | None = None,
+    ) -> Goal | None:
+        """Partial update. ``due_at=...`` means "leave as-is"; pass ``None`` to clear it."""
+
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM goals WHERE id = ?", (int(goal_id),)
+            ).fetchone()
+            if row is None:
+                return None
+            updates: list[str] = []
+            params: list[Any] = []
+            now = utc_now()
+            if status is not None:
+                if status not in ALL_GOAL_STATUSES:
+                    raise ValueError(f"unknown goal status: {status}")
+                updates.append("status = ?")
+                params.append(status)
+                if status != GOAL_STATUS_OPEN:
+                    updates.append("closed_at = ?")
+                    params.append(now)
+                else:
+                    updates.append("closed_at = NULL")
+            if priority is not None:
+                updates.append("priority = ?")
+                params.append(max(0.0, min(1.0, float(priority))))
+            if text is not None:
+                cleaned = text.strip()
+                if not cleaned:
+                    raise ValueError("goal text cannot be empty")
+                updates.append("text = ?")
+                params.append(cleaned)
+            if due_at is not ...:
+                updates.append("due_at = ?")
+                params.append(due_at)
+            if metadata_patch is not None:
+                existing = json.loads(row["metadata"] or "{}")
+                existing.update(metadata_patch)
+                updates.append("metadata = ?")
+                params.append(json.dumps(existing, ensure_ascii=False))
+            if not updates:
+                return self._goal_from_row(row)
+            updates.append("updated_at = ?")
+            params.append(now)
+            updates.append("last_touched_at = ?")
+            params.append(now)
+            params.append(int(goal_id))
+            conn.execute(
+                f"UPDATE goals SET {', '.join(updates)} WHERE id = ?",
+                tuple(params),
+            )
+        return self.get_goal(goal_id)
+
+    def touch_goal(self, goal_id: int) -> None:
+        """Bump ``last_touched_at`` so list ordering reflects recent attention."""
+
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE goals SET last_touched_at = ? WHERE id = ?",
+                (utc_now(), int(goal_id)),
+            )
+
+    def count_goals(
+        self,
+        *,
+        persona_key: str | None = None,
+        status: str | None = None,
+    ) -> int:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if persona_key is not None:
+            clauses.append("persona_key = ?")
+            params.append(persona_key)
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self.connect() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) AS n FROM goals {where}", tuple(params)
+            ).fetchone()
+        return int(row["n"])
+
+    # ------------------------------------------------------------------
+    # User state (persona-specific working model of a user)
+
+    def get_user_state(self, user_id: str, persona_key: str) -> UserState | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM user_state WHERE user_id = ? AND persona_key = ?",
+                (str(user_id), str(persona_key)),
+            ).fetchone()
+        return None if row is None else self._user_state_from_row(row)
+
+    def upsert_user_state(
+        self,
+        *,
+        user_id: str,
+        persona_key: str,
+        mood: str = "",
+        themes: list[str] | None = None,
+        open_questions: list[str] | None = None,
+        preferences: dict[str, Any] | None = None,
+        summary: str = "",
+        confidence: float = 0.5,
+        messages_at_last_update: int = 0,
+        metadata: dict[str, Any] | None = None,
+    ) -> UserState:
+        user_id = str(user_id or "").strip()
+        persona = str(persona_key or "").strip()
+        if not user_id or not persona:
+            raise ValueError("user_state needs user_id and persona_key")
+        themes_clean = [str(t).strip() for t in (themes or []) if str(t).strip()][:10]
+        questions_clean = [str(q).strip() for q in (open_questions or []) if str(q).strip()][:10]
+        confidence_value = max(0.0, min(1.0, float(confidence)))
+        now = utc_now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO user_state(
+                    user_id, persona_key, mood, themes, open_questions,
+                    preferences, summary, confidence, last_updated_at,
+                    messages_at_last_update, metadata
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, persona_key) DO UPDATE SET
+                    mood = excluded.mood,
+                    themes = excluded.themes,
+                    open_questions = excluded.open_questions,
+                    preferences = excluded.preferences,
+                    summary = excluded.summary,
+                    confidence = excluded.confidence,
+                    last_updated_at = excluded.last_updated_at,
+                    messages_at_last_update = excluded.messages_at_last_update,
+                    metadata = excluded.metadata
+                """,
+                (
+                    user_id,
+                    persona,
+                    str(mood or "").strip()[:200],
+                    json.dumps(themes_clean, ensure_ascii=False),
+                    json.dumps(questions_clean, ensure_ascii=False),
+                    json.dumps(preferences or {}, ensure_ascii=False),
+                    str(summary or "").strip()[:1000],
+                    confidence_value,
+                    now,
+                    int(messages_at_last_update),
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                ),
+            )
+        found = self.get_user_state(user_id, persona)
+        if found is None:
+            raise RuntimeError("user_state upsert failed")
+        return found
+
+    def stale_user_states(
+        self,
+        *,
+        persona_key: str,
+        older_than: str,
+        limit: int = 20,
+    ) -> list[UserState]:
+        """Return rows whose ``last_updated_at`` is older than ``older_than``.
+
+        Used by the reflection pass to pick which states to refresh. The
+        caller computes ``older_than`` (e.g. ``now - 24h``).
+        """
+
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM user_state
+                WHERE persona_key = ? AND last_updated_at < ?
+                ORDER BY last_updated_at ASC
+                LIMIT ?
+                """,
+                (str(persona_key), str(older_than), int(limit)),
+            ).fetchall()
+        return [self._user_state_from_row(row) for row in rows]
+
+    def list_user_state_user_ids(self, persona_key: str) -> list[str]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT user_id FROM user_state WHERE persona_key = ?",
+                (str(persona_key),),
+            ).fetchall()
+        return [str(row["user_id"]) for row in rows]
+
+    def count_user_messages(
+        self,
+        *,
+        chat_id: str | int | None = None,
+        user_id: str | None = None,
+        since: str | None = None,
+    ) -> int:
+        clauses: list[str] = ["role = 'user'"]
+        params: list[Any] = []
+        if chat_id is not None:
+            clauses.append("chat_id = ?")
+            params.append(str(chat_id))
+        if user_id is not None:
+            clauses.append("sender_id = ?")
+            params.append(str(user_id))
+        if since is not None:
+            clauses.append("created_at >= ?")
+            params.append(since)
+        where = " AND ".join(clauses)
+        with self.connect() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) AS n FROM telegram_messages WHERE {where}",
+                tuple(params),
+            ).fetchone()
+        return int(row["n"])
+
+    def recent_user_message_texts(
+        self,
+        *,
+        user_id: str,
+        limit: int = 20,
+    ) -> list[dict[str, str]]:
+        """Last N Telegram messages where the user was the sender.
+
+        Used by the user_state refresh routine. Returns oldest-first so
+        the LLM sees the conversation in temporal order.
+        """
+
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT chat_id, message_id, text, created_at
+                FROM telegram_messages
+                WHERE role = 'user' AND sender_id = ?
+                ORDER BY created_at DESC, message_id DESC
+                LIMIT ?
+                """,
+                (str(user_id), int(limit)),
+            ).fetchall()
+        items = [
+            {
+                "chat_id": str(row["chat_id"]),
+                "text": str(row["text"] or ""),
+                "created_at": str(row["created_at"]),
+            }
+            for row in rows
+            if str(row["text"] or "").strip()
+        ]
+        items.reverse()
+        return items
+
+    # ------------------------------------------------------------------
+    # Memory conflicts (pairs of semantically-similar facts the
+    # consolidate pass did not auto-merge — candidates for the persona
+    # to review or for belief revision down the line).
+
+    def record_conflict(
+        self,
+        memory_a_id: int,
+        memory_b_id: int,
+        *,
+        similarity: float,
+        persona_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> int | None:
+        """Insert a conflict pair (normalized so smaller id is ``a``).
+
+        Returns the new row id, or ``None`` when the pair already exists
+        (we treat the existing row as canonical). Refuses degenerate
+        same-id pairs since they cannot conflict.
+        """
+
+        a = int(memory_a_id)
+        b = int(memory_b_id)
+        if a == b:
+            return None
+        if a > b:
+            a, b = b, a
+        sim_value = max(0.0, min(1.0, float(similarity)))
+        now = utc_now()
+        with self.connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO memory_conflicts(
+                    memory_a_id, memory_b_id, similarity, persona_key,
+                    detected_at, resolution_status, metadata
+                )
+                VALUES (?, ?, ?, ?, ?, 'unresolved', ?)
+                """,
+                (
+                    a,
+                    b,
+                    sim_value,
+                    persona_key,
+                    now,
+                    json.dumps(metadata or {}, ensure_ascii=False),
+                ),
+            )
+            if cur.rowcount == 0:
+                return None
+            return int(cur.lastrowid)
+
+    def get_conflict(self, conflict_id: int) -> MemoryConflict | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM memory_conflicts WHERE id = ?", (int(conflict_id),)
+            ).fetchone()
+        return None if row is None else self._conflict_from_row(row)
+
+    def list_unresolved_conflicts(
+        self,
+        *,
+        persona_key: str | None = None,
+        limit: int = 20,
+    ) -> list[MemoryConflict]:
+        clauses: list[str] = ["resolution_status = 'unresolved'"]
+        params: list[Any] = []
+        if persona_key is not None:
+            clauses.append("persona_key = ?")
+            params.append(persona_key)
+        params.append(int(limit))
+        where = " AND ".join(clauses)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM memory_conflicts
+                WHERE {where}
+                ORDER BY detected_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return [self._conflict_from_row(row) for row in rows]
+
+    def resolve_conflict(
+        self,
+        conflict_id: int,
+        *,
+        status: str,
+        winner_id: int | None = None,
+        metadata_patch: dict[str, Any] | None = None,
+    ) -> MemoryConflict | None:
+        if status not in ALL_CONFLICT_STATUSES:
+            raise ValueError(f"unknown conflict status: {status}")
+        if status != CONFLICT_STATUS_UNRESOLVED and winner_id is None and status == CONFLICT_STATUS_SUPERSEDED:
+            raise ValueError("status=superseded requires winner_id")
+        now = utc_now()
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM memory_conflicts WHERE id = ?", (int(conflict_id),)
+            ).fetchone()
+            if row is None:
+                return None
+            updates: list[str] = ["resolution_status = ?"]
+            params: list[Any] = [status]
+            if winner_id is not None:
+                updates.append("resolution_winner_id = ?")
+                params.append(int(winner_id))
+            if status == CONFLICT_STATUS_UNRESOLVED:
+                updates.append("resolved_at = NULL")
+            else:
+                updates.append("resolved_at = ?")
+                params.append(now)
+            if metadata_patch:
+                existing = json.loads(row["metadata"] or "{}")
+                existing.update(metadata_patch)
+                updates.append("metadata = ?")
+                params.append(json.dumps(existing, ensure_ascii=False))
+            params.append(int(conflict_id))
+            conn.execute(
+                f"UPDATE memory_conflicts SET {', '.join(updates)} WHERE id = ?",
+                tuple(params),
+            )
+        return self.get_conflict(conflict_id)
+
+    def count_conflicts(
+        self,
+        *,
+        persona_key: str | None = None,
+        status: str | None = None,
+    ) -> int:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if persona_key is not None:
+            clauses.append("persona_key = ?")
+            params.append(persona_key)
+        if status is not None:
+            clauses.append("resolution_status = ?")
+            params.append(status)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self.connect() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) AS n FROM memory_conflicts {where}",
+                tuple(params),
+            ).fetchone()
+        return int(row["n"])
+
+    def conflicts_for_memory(
+        self,
+        memory_id: int,
+        *,
+        only_unresolved: bool = True,
+    ) -> list[MemoryConflict]:
+        clauses = ["(memory_a_id = ? OR memory_b_id = ?)"]
+        params: list[Any] = [int(memory_id), int(memory_id)]
+        if only_unresolved:
+            clauses.append("resolution_status = 'unresolved'")
+        where = " AND ".join(clauses)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM memory_conflicts WHERE {where} ORDER BY detected_at DESC",
+                tuple(params),
+            ).fetchall()
+        return [self._conflict_from_row(row) for row in rows]
+
+    # ------------------------------------------------------------------
     # Backwards-compatible legacy API
 
     def remember(self, text: str, tags: list[str] | None = None) -> int:
@@ -1501,7 +2154,62 @@ class MemoryStore:
         )
 
     @staticmethod
+    def _conflict_from_row(row: sqlite3.Row) -> MemoryConflict:
+        return MemoryConflict(
+            id=int(row["id"]),
+            memory_a_id=int(row["memory_a_id"]),
+            memory_b_id=int(row["memory_b_id"]),
+            similarity=float(row["similarity"]),
+            persona_key=row["persona_key"],
+            detected_at=str(row["detected_at"]),
+            resolution_status=str(row["resolution_status"]),
+            resolution_winner_id=row["resolution_winner_id"],
+            resolved_at=row["resolved_at"],
+            metadata=json.loads(row["metadata"] or "{}"),
+        )
+
+    @staticmethod
+    def _user_state_from_row(row: sqlite3.Row) -> UserState:
+        return UserState(
+            user_id=str(row["user_id"]),
+            persona_key=str(row["persona_key"]),
+            mood=str(row["mood"] or ""),
+            themes=list(json.loads(row["themes"] or "[]")),
+            open_questions=list(json.loads(row["open_questions"] or "[]")),
+            preferences=dict(json.loads(row["preferences"] or "{}")),
+            summary=str(row["summary"] or ""),
+            confidence=float(row["confidence"]),
+            last_updated_at=str(row["last_updated_at"]),
+            messages_at_last_update=int(row["messages_at_last_update"]),
+            metadata=dict(json.loads(row["metadata"] or "{}")),
+        )
+
+    @staticmethod
+    def _goal_from_row(row: sqlite3.Row) -> Goal:
+        return Goal(
+            id=int(row["id"]),
+            persona_key=str(row["persona_key"]),
+            text=str(row["text"]),
+            status=str(row["status"]),
+            priority=float(row["priority"]),
+            user_id=row["user_id"],
+            chat_id=row["chat_id"],
+            origin_message_id=row["origin_message_id"],
+            due_at=row["due_at"],
+            last_touched_at=str(row["last_touched_at"]),
+            created_at=str(row["created_at"]),
+            updated_at=row["updated_at"],
+            closed_at=row["closed_at"],
+            metadata=json.loads(row["metadata"] or "{}"),
+        )
+
+    @staticmethod
     def _memory_from_row(row: sqlite3.Row, tags: list[str]) -> MemoryItem:
+        # ``origin_message_id`` is read defensively because legacy v4 rows
+        # predate the column. ``sqlite3.Row`` raises IndexError on missing
+        # keys, not KeyError, so we coerce through the keys() check.
+        keys = row.keys()
+        origin = row["origin_message_id"] if "origin_message_id" in keys else None
         return MemoryItem(
             id=int(row["id"]),
             kind=str(row["kind"]),
@@ -1523,6 +2231,7 @@ class MemoryStore:
             access_count=int(row["access_count"]),
             tags=tags,
             metadata=json.loads(row["metadata"] or "{}"),
+            origin_message_id=origin,
         )
 
     @staticmethod

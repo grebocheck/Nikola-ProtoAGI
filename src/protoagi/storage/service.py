@@ -135,6 +135,7 @@ class MemoryService:
         pinned: bool = False,
         metadata: dict | None = None,
         embed: bool = True,
+        origin_message_id: str | int | None = None,
     ) -> StoredMemory | None:
         text = text.strip()
         if not text:
@@ -188,6 +189,7 @@ class MemoryService:
             embedding=vector,
             embedding_model=embed_model,
             metadata=metadata,
+            origin_message_id=origin_message_id,
         )
         if vector is not None and self.embedding_index is not None:
             self.embedding_index.add(memory_id, vector)
@@ -415,6 +417,129 @@ class MemoryService:
         if dry_run or return_plan:
             return {"merged": merges, "dry_run": dry_run, "plan": plan}
         return merges
+
+    # ------------------------------------------------------------------
+    # Conflict detection
+    #
+    # ``scan_for_conflicts`` is the lighter sibling of ``consolidate``.
+    # ``consolidate`` looks for *near duplicates* (cosine > 0.92 by
+    # default) and auto-supersedes the older one. ``scan_for_conflicts``
+    # looks for the band underneath that — pairs that talk about the
+    # same topic but are different enough that automatic merging would
+    # be risky. We record the pair in ``memory_conflicts`` for later
+    # review (introspection API, model-driven belief revision, etc.).
+
+    def scan_for_conflicts(
+        self,
+        *,
+        persona_key: str | None = None,
+        scope: str | None = None,
+        chat_id: str | None = None,
+        similarity_min: float = 0.78,
+        similarity_max: float = 0.92,
+        max_items: int = 200,
+        max_pairs_recorded: int = 50,
+    ) -> int:
+        """Detect potentially-conflicting memory pairs and record them.
+
+        Walks the most recent ``max_items`` rows in the requested scope,
+        does a pairwise cosine over their stored embeddings, and records
+        pairs whose similarity falls in [``similarity_min``,
+        ``similarity_max``]. The upper bound exists because anything
+        higher gets handled by ``consolidate`` instead.
+
+        Returns the number of NEW conflicts recorded (existing pairs are
+        left alone — the unique index on (a, b) deduplicates).
+        """
+
+        from .memory import cosine_similarity, unpack_embedding
+
+        items = self.store.list_memories(
+            scope=scope,
+            chat_id=chat_id,
+            persona_key=persona_key,
+            limit=max_items,
+        )
+        if len(items) < 2:
+            return 0
+
+        # Build id -> (item, vector) map using stored embeddings only.
+        # Conflicts detection is best-effort: items without an embedding
+        # are skipped rather than re-embedded on the fly (would burn
+        # budget for every reflection pass).
+        with self.store.connect() as conn:
+            placeholders = ",".join("?" for _ in items)
+            rows = conn.execute(
+                f"""
+                SELECT memory_id, vector
+                FROM memory_embeddings
+                WHERE memory_id IN ({placeholders})
+                """,
+                tuple(item.id for item in items),
+            ).fetchall()
+        vectors: dict[int, list[float]] = {
+            int(row["memory_id"]): unpack_embedding(row["vector"]) for row in rows
+        }
+        if len(vectors) < 2:
+            return 0
+
+        # Pre-fetch already-recorded pairs in one round-trip so we don't
+        # hammer the unique index for every candidate.
+        item_ids = sorted(vectors.keys())
+        with self.store.connect() as conn:
+            existing_rows = conn.execute(
+                f"""
+                SELECT memory_a_id, memory_b_id FROM memory_conflicts
+                WHERE memory_a_id IN ({','.join('?' for _ in item_ids)})
+                   OR memory_b_id IN ({','.join('?' for _ in item_ids)})
+                """,
+                tuple(item_ids) + tuple(item_ids),
+            ).fetchall()
+        existing_pairs: set[tuple[int, int]] = {
+            (int(r["memory_a_id"]), int(r["memory_b_id"])) for r in existing_rows
+        }
+
+        # Index items by id so we can fetch supersession state during
+        # the scan.
+        item_by_id = {item.id: item for item in items if item.id in vectors}
+        recorded = 0
+        for i, a_id in enumerate(item_ids):
+            if recorded >= max_pairs_recorded:
+                break
+            item_a = item_by_id.get(a_id)
+            if item_a is None or item_a.superseded_by is not None:
+                continue
+            vec_a = vectors[a_id]
+            for b_id in item_ids[i + 1 :]:
+                pair_key = (a_id, b_id) if a_id < b_id else (b_id, a_id)
+                if pair_key in existing_pairs:
+                    continue
+                item_b = item_by_id.get(b_id)
+                if item_b is None or item_b.superseded_by is not None:
+                    continue
+                # Skip pairs already linked through supersession.
+                if (
+                    item_a.supersedes_id == item_b.id
+                    or item_b.supersedes_id == item_a.id
+                ):
+                    continue
+                vec_b = vectors[b_id]
+                sim = cosine_similarity(vec_a, vec_b)
+                if sim < similarity_min or sim >= similarity_max:
+                    continue
+                inserted = self.store.record_conflict(
+                    a_id,
+                    b_id,
+                    similarity=sim,
+                    persona_key=persona_key,
+                    metadata={"scope": scope or "any"},
+                )
+                if inserted is not None:
+                    recorded += 1
+                    existing_pairs.add(pair_key)
+                    if recorded >= max_pairs_recorded:
+                        break
+        return recorded
 
     # ------------------------------------------------------------------
     # Pruning

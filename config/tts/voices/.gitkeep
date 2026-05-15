@@ -1,0 +1,5 @@
+# Drop reference WAV samples here for true voice cloning
+# (e.g. voices/solomiya.wav, voices/mykola.wav).
+# 6-30 seconds, 16-24 kHz mono, clear single-speaker audio.
+# Then change `"speaker": "Sofia Hellen"` in voice_to_speaker.json to
+# `"speaker": "voices/solomiya.wav"` (path inside the container).

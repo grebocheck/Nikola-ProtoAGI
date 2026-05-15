@@ -1,0 +1,28 @@
+{
+  "_comment": "openedai-speech voice → XTTS-v2 speaker mapping for ProtoAGI personas. Mount this file into the openedai-speech container at /app/config/voice_to_speaker.json (start-tts-server.ps1 already does this). The persona's `tts_voice` field in config/personas/*.json picks one of these keys.",
+
+  "tts-1-hd": {
+    "alloy":     { "model": "xtts", "speaker": "Ana Florence",   "language": "uk", "speed": 1.0 },
+    "echo":      { "model": "xtts", "speaker": "Damien Black",   "language": "uk", "speed": 1.0 },
+    "fable":     { "model": "xtts", "speaker": "Daisy Studious", "language": "uk", "speed": 1.0 },
+    "onyx":      { "model": "xtts", "speaker": "Royston Min",    "language": "uk", "speed": 1.0 },
+    "nova":      { "model": "xtts", "speaker": "Sofia Hellen",   "language": "uk", "speed": 1.0 },
+    "shimmer":   { "model": "xtts", "speaker": "Alma María",     "language": "uk", "speed": 1.0 },
+
+    "solomiya":  { "model": "xtts", "speaker": "Sofia Hellen",   "language": "uk", "speed": 0.95,
+                   "_comment": "Warm, slightly low female timbre. Swap `speaker` to a path under voices/ to use a custom Ukrainian reference wav." },
+    "mykola":    { "model": "xtts", "speaker": "Damien Black",   "language": "uk", "speed": 1.0,
+                   "_comment": "Calm, grounded male timbre. Swap `speaker` to voices/mykola.wav for a Ukrainian reference clone (6–30 s recommended)." }
+  },
+
+  "tts-1": {
+    "alloy":     { "model": "xtts", "speaker": "Ana Florence",   "language": "uk", "speed": 1.0 },
+    "echo":      { "model": "xtts", "speaker": "Damien Black",   "language": "uk", "speed": 1.0 },
+    "fable":     { "model": "xtts", "speaker": "Daisy Studious", "language": "uk", "speed": 1.0 },
+    "onyx":      { "model": "xtts", "speaker": "Royston Min",    "language": "uk", "speed": 1.0 },
+    "nova":      { "model": "xtts", "speaker": "Sofia Hellen",   "language": "uk", "speed": 1.0 },
+    "shimmer":   { "model": "xtts", "speaker": "Alma María",     "language": "uk", "speed": 1.0 },
+    "solomiya":  { "model": "xtts", "speaker": "Sofia Hellen",   "language": "uk", "speed": 0.95 },
+    "mykola":    { "model": "xtts", "speaker": "Damien Black",   "language": "uk", "speed": 1.0 }
+  }
+}

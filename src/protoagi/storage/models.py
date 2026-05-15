@@ -29,6 +29,27 @@ SCOPE_CHAT = "chat"
 SCOPE_PERSONA = "persona"
 ALL_SCOPES = (SCOPE_GLOBAL, SCOPE_USER, SCOPE_CHAT, SCOPE_PERSONA)
 
+# Goal lifecycle states. ``open`` is the only state surfaced to the model as
+# something it can still act on; the other two are terminal.
+GOAL_STATUS_OPEN = "open"
+GOAL_STATUS_COMPLETED = "completed"
+GOAL_STATUS_ABANDONED = "abandoned"
+ALL_GOAL_STATUSES = (GOAL_STATUS_OPEN, GOAL_STATUS_COMPLETED, GOAL_STATUS_ABANDONED)
+
+# Conflict resolution states. A conflict is a pair of semantically-similar
+# memory items that the consolidate pass did not auto-merge. ``unresolved``
+# means the system has flagged the pair but not chosen a winner yet.
+CONFLICT_STATUS_UNRESOLVED = "unresolved"
+CONFLICT_STATUS_SUPERSEDED = "superseded"  # one side replaced the other
+CONFLICT_STATUS_KEPT_BOTH = "kept_both"    # they describe distinct facets after all
+CONFLICT_STATUS_DISMISSED = "dismissed"    # false positive; ignore
+ALL_CONFLICT_STATUSES = (
+    CONFLICT_STATUS_UNRESOLVED,
+    CONFLICT_STATUS_SUPERSEDED,
+    CONFLICT_STATUS_KEPT_BOTH,
+    CONFLICT_STATUS_DISMISSED,
+)
+
 
 @dataclass(slots=True)
 class MemoryFact:
@@ -41,6 +62,7 @@ class MemoryFact:
     importance: float = 0.5
     kind: str = KIND_FACT
     scope: str = SCOPE_GLOBAL
+    origin_message_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -65,6 +87,10 @@ class MemoryItem:
     access_count: int
     tags: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Provenance: the Telegram message_id (or other external identifier)
+    # that this memory was extracted from. Lets the model answer
+    # "звідки я це знаю" by cross-referencing recent_telegram_messages.
+    origin_message_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -105,6 +131,83 @@ class Reminder:
     text: str
     status: str
     created_at: str
+
+
+@dataclass(slots=True)
+class MemoryConflict:
+    """A pair of memory items the system thinks might be in tension.
+
+    The pair is normalized so ``memory_a_id < memory_b_id`` — that gives
+    us a unique (a, b) index regardless of write order. Similarity is
+    the cosine value at detection time; it doesn't get re-computed when
+    items change. ``resolution_status`` is the action the persona /
+    operator takes once the conflict is reviewed.
+    """
+
+    id: int
+    memory_a_id: int
+    memory_b_id: int
+    similarity: float
+    persona_key: str | None
+    detected_at: str
+    resolution_status: str
+    resolution_winner_id: int | None
+    resolved_at: str | None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class UserState:
+    """Persona-specific working model of a Telegram user.
+
+    Each (user_id, persona_key) pair has at most one row. The state is
+    refreshed periodically (every reflection pass, throttled by age) by
+    an LLM call that consolidates recent messages + previous state into
+    a new state. Mykola and Solomiya keep separate states because each
+    persona attends to a different cross-section of the same person.
+
+    The fields are deliberately small and structured (rather than a
+    single free-form blob) so the model can scan them at a glance during
+    decision-making.
+    """
+
+    user_id: str
+    persona_key: str
+    mood: str
+    themes: list[str]
+    open_questions: list[str]
+    preferences: dict[str, Any]
+    summary: str
+    confidence: float
+    last_updated_at: str
+    messages_at_last_update: int
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class Goal:
+    """A persistent commitment / open thread the persona is tracking.
+
+    Lives in its own table (not ``memory_items``) because it has a discrete
+    lifecycle and is queried by status/due-date rather than by free-text
+    recall. The persona scope is intentional: ``mykola`` and ``solomiya``
+    keep their own goal lists, even when they share the chat memory.
+    """
+
+    id: int
+    persona_key: str
+    text: str
+    status: str
+    priority: float
+    user_id: str | None
+    chat_id: str | None
+    origin_message_id: int | None
+    due_at: str | None
+    last_touched_at: str
+    created_at: str
+    updated_at: str | None
+    closed_at: str | None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -176,14 +279,25 @@ def cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
 
 
 __all__ = [
+    "ALL_CONFLICT_STATUSES",
+    "ALL_GOAL_STATUSES",
     "ALL_KINDS",
     "ALL_SCOPES",
+    "CONFLICT_STATUS_DISMISSED",
+    "CONFLICT_STATUS_KEPT_BOTH",
+    "CONFLICT_STATUS_SUPERSEDED",
+    "CONFLICT_STATUS_UNRESOLVED",
+    "GOAL_STATUS_ABANDONED",
+    "GOAL_STATUS_COMPLETED",
+    "GOAL_STATUS_OPEN",
+    "Goal",
     "KIND_EPISODIC",
     "KIND_FACT",
     "KIND_PERSONA_SELF",
     "KIND_PROCEDURAL",
     "KIND_SEMANTIC",
     "MediaBlob",
+    "MemoryConflict",
     "MemoryFact",
     "MemoryItem",
     "RecallResult",
@@ -195,6 +309,7 @@ __all__ = [
     "TelegramChat",
     "TelegramMessage",
     "UserProfile",
+    "UserState",
     "cosine_similarity",
     "pack_embedding",
     "unpack_embedding",

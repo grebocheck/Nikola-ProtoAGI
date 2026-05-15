@@ -141,6 +141,7 @@ class TelegramApi:
         filename: str = "reply.ogg",
         reply_to_message_id: int | None = None,
         disable_notification: bool = False,
+        mime_type: str = "audio/ogg",
     ) -> dict[str, Any]:
         fields: dict[str, str] = {
             "chat_id": str(chat_id),
@@ -152,7 +153,31 @@ class TelegramApi:
             self._call_multipart(
                 "sendVoice",
                 fields,
-                {"voice": (filename, data, "audio/ogg")},
+                {"voice": (filename, data, mime_type)},
+            )
+        )
+
+    def send_audio_bytes(
+        self,
+        chat_id: str | int,
+        data: bytes,
+        *,
+        filename: str = "reply.mp3",
+        mime_type: str = "audio/mpeg",
+        reply_to_message_id: int | None = None,
+        disable_notification: bool = False,
+    ) -> dict[str, Any]:
+        fields: dict[str, str] = {
+            "chat_id": str(chat_id),
+            "disable_notification": "true" if disable_notification else "false",
+        }
+        if reply_to_message_id is not None:
+            fields["reply_parameters"] = json.dumps({"message_id": reply_to_message_id})
+        return dict(
+            self._call_multipart(
+                "sendAudio",
+                fields,
+                {"audio": (filename, data, mime_type)},
             )
         )
 

@@ -17,6 +17,10 @@ from ..config import AgentConfig, PROJECT_ROOT
 from ..embedding import EmbeddingClient, EmbeddingConfig
 from ..harmony import clean_model_content
 from ..storage.memory import (
+    GOAL_STATUS_ABANDONED,
+    GOAL_STATUS_COMPLETED,
+    GOAL_STATUS_OPEN,
+    Goal,
     KIND_EPISODIC,
     KIND_FACT,
     KIND_PERSONA_SELF,
@@ -26,6 +30,7 @@ from ..storage.memory import (
     SCOPE_PERSONA,
     SCOPE_USER,
     TelegramChat,
+    UserState,
     utc_now,
 )
 from ..openai_compat import OpenAICompatError, OpenAICompatibleClient
@@ -55,14 +60,22 @@ from .json_io import (
     ImageAttachment,
     InitiativeDecision,
     StickerAttachment,
+    USER_STATE_JSON_SCHEMA,
+    UserStateUpdate,
     decision_from_payload,
     decision_reply_texts,
     extract_json_object,
     image_to_payload,
     initiative_from_payload,
     sticker_to_payload,
+    user_state_from_payload,
 )
-from .prompts import decision_system_prompt, initiative_system_prompt, reply_system_prompt
+from .prompts import (
+    decision_system_prompt,
+    initiative_system_prompt,
+    reply_system_prompt,
+    user_state_system_prompt,
+)
 from .stickers import (
     STICKER_PACKS,
     normalize_sticker_pack,
@@ -168,6 +181,8 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                 timeout_seconds=telegram_config.voice_timeout_seconds,
                 max_chars=telegram_config.tts_max_chars,
                 enabled=telegram_config.tts_enabled,
+                response_format=telegram_config.tts_response_format,
+                speed=telegram_config.tts_speed,
             )
         )
         if memory_service is None:
@@ -212,7 +227,43 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         self.bot_username = str(me.get("username", ""))
         self.memory.set_kv("telegram:bot_username", self.bot_username)
         self.memory.set_kv("telegram:bot_id", str(me.get("id", "")))
+        self._warn_about_unreachable_endpoints()
         return me
+
+    def _warn_about_unreachable_endpoints(self) -> None:
+        """Print a one-line warning when an optional helper endpoint is configured
+        but does not respond. We do not want to abort startup — the features
+        gracefully degrade — but the operator should know before someone sends
+        a voice message and gets nothing back. Disable by setting
+        ``PROTOAGI_BOOTSTRAP_PROBE=0`` (used in unit tests)."""
+
+        import os
+        from urllib.error import URLError
+        from urllib.request import urlopen
+
+        if os.environ.get("PROTOAGI_BOOTSTRAP_PROBE", "1").strip().lower() in ("0", "false", "no", "off"):
+            return
+
+        targets: list[tuple[str, str, str]] = []
+        cfg = self.telegram_config
+        if cfg.vision_model and cfg.vision_base_url:
+            targets.append(("vision", cfg.vision_base_url, cfg.vision_model))
+        if cfg.voice_model and cfg.voice_base_url:
+            targets.append(("voice", cfg.voice_base_url, cfg.voice_model))
+        if cfg.tts_enabled and cfg.tts_base_url and cfg.tts_model:
+            targets.append(("tts", cfg.tts_base_url, cfg.tts_model))
+        for label, base_url, model in targets:
+            probe_url = base_url.rstrip("/") + "/models"
+            try:
+                with urlopen(probe_url, timeout=1):
+                    pass
+            except (URLError, OSError) as exc:
+                print(
+                    f"[bootstrap] {label} endpoint configured ({model} @ {base_url}) "
+                    f"but probe failed: {exc}. Feature will silently degrade until "
+                    f"the server is reachable.",
+                    flush=True,
+                )
 
     def run_forever(self) -> None:
         while True:
@@ -388,6 +439,26 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                 result["reflections_written"] = self._write_reflection_memory()
             except (OpenAICompatError, OSError) as exc:
                 print(f"reflection memory write failed: {exc}", flush=True)
+        try:
+            result["user_states_refreshed"] = self._run_user_state_refresh()
+        except (OpenAICompatError, OSError) as exc:  # pragma: no cover - defensive
+            print(f"user_state refresh failed: {exc}", flush=True)
+            result["user_states_refreshed"] = 0
+        try:
+            result["conflicts_detected_global"] = self.memory_service.scan_for_conflicts(
+                scope=SCOPE_GLOBAL,
+                persona_key=self.persona.key,
+                max_items=150,
+            )
+            result["conflicts_detected_persona"] = self.memory_service.scan_for_conflicts(
+                scope=SCOPE_PERSONA,
+                persona_key=self.persona.key,
+                max_items=100,
+            )
+        except sqlite3_error_types() as exc:  # pragma: no cover - defensive
+            print(f"conflict scan failed: {exc}", flush=True)
+            result["conflicts_detected_global"] = 0
+            result["conflicts_detected_persona"] = 0
         self.memory.set_kv(_REFLECTION_LAST_KV, utc_now())
         return result
 
@@ -471,6 +542,117 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         return written
 
     # ------------------------------------------------------------------
+    # User state refresh
+
+    def refresh_user_state(self, user_id: str, *, message_limit: int = 20) -> UserState | None:
+        """Run one LLM-driven update of the persona's view of a user.
+
+        Pulls the previous state (if any) and the last N messages from
+        that user, asks the model to produce a fresh ``UserStateUpdate``,
+        and upserts the result. Returns the newly stored row, or
+        ``None`` when there is nothing to learn (no messages yet).
+        """
+
+        user_id = str(user_id or "").strip()
+        if not user_id:
+            return None
+        messages = self.memory.recent_user_message_texts(
+            user_id=user_id, limit=message_limit
+        )
+        if not messages:
+            return None
+        previous = self.memory.get_user_state(user_id, self.persona.key)
+        previous_payload = (
+            None
+            if previous is None
+            else {
+                "mood": previous.mood,
+                "themes": previous.themes,
+                "open_questions": previous.open_questions,
+                "preferences": previous.preferences,
+                "summary": previous.summary,
+                "confidence": previous.confidence,
+                "last_updated_at": previous.last_updated_at,
+            }
+        )
+        context_payload = {
+            "previous_state": previous_payload,
+            "recent_messages": [m["text"] for m in messages],
+            "messages_count": len(messages),
+        }
+        try:
+            response = self.llm.chat_completion(
+                [
+                    {"role": "system", "content": user_state_system_prompt(self.persona)},
+                    {
+                        "role": "user",
+                        "content": json.dumps(context_payload, ensure_ascii=False),
+                    },
+                ],
+                temperature=0.3,
+                top_p=0.95,
+                max_tokens=self.telegram_config.reflection_max_tokens,
+                response_format=USER_STATE_JSON_SCHEMA,
+            )
+        except OpenAICompatError as exc:  # pragma: no cover - defensive
+            print(f"user_state refresh LLM call failed for {user_id}: {exc}", flush=True)
+            return previous
+        content = clean_model_content(
+            response.get("choices", [{}])[0].get("message", {}).get("content", "")
+        )
+        update = user_state_from_payload(extract_json_object(content))
+        if not update.summary:
+            # Empty summary is the model's signal that it has nothing to
+            # store; keep whatever previous state we have.
+            return previous
+        return self.memory.upsert_user_state(
+            user_id=user_id,
+            persona_key=self.persona.key,
+            mood=update.mood,
+            themes=update.themes,
+            open_questions=update.open_questions,
+            preferences=update.preferences,
+            summary=update.summary,
+            confidence=update.confidence,
+            messages_at_last_update=len(messages),
+        )
+
+    def _run_user_state_refresh(
+        self,
+        *,
+        stale_after_hours: float = 24.0,
+        max_per_pass: int = 5,
+    ) -> int:
+        """Refresh stale user_state rows during the reflection pass.
+
+        Targets users who already have a row but whose last update is
+        older than ``stale_after_hours``. We deliberately do not create
+        rows for users with zero state yet — those get created on first
+        ``decide_incoming`` via the read-side bootstrap (see Phase 1
+        elsewhere). This keeps the reflection cost predictable.
+        """
+
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(hours=float(stale_after_hours))
+        ).isoformat(timespec="seconds")
+        stale = self.memory.stale_user_states(
+            persona_key=self.persona.key,
+            older_than=cutoff,
+            limit=int(max_per_pass),
+        )
+        refreshed = 0
+        for state in stale:
+            try:
+                if self.refresh_user_state(state.user_id) is not None:
+                    refreshed += 1
+            except (OpenAICompatError, OSError) as exc:  # pragma: no cover - defensive
+                print(
+                    f"user_state refresh failed for {state.user_id}: {exc}",
+                    flush=True,
+                )
+        return refreshed
+
+    # ------------------------------------------------------------------
     # Update handling
 
     def process_update(self, update: dict[str, Any]) -> bool:
@@ -527,6 +709,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                 image,
                 image_description,
                 user_id=user_id,
+                origin_message_id=current_message_id or None,
             )
         if voice is not None:
             self._remember_voice_fact(
@@ -535,6 +718,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                 voice_transcript,
                 user_id=user_id,
                 media_bytes=voice_result.data if self.telegram_config.store_voice else b"",
+                origin_message_id=current_message_id or None,
             )
         if current_message_id:
             self.memory.log_telegram_message(
@@ -589,13 +773,25 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             message_id=current_message_id or None,
         )
         for fact in decision.memories:
-            self._remember_chat_fact(chat_state, fact, user_id=user_id)
+            self._remember_chat_fact(
+                chat_state, fact, user_id=user_id,
+                origin_message_id=current_message_id or None,
+            )
         for fact in decision.self_memories:
-            self._remember_persona_self_fact(fact)
+            self._remember_persona_self_fact(
+                fact,
+                origin_ref=_format_origin_ref(chat_state.chat_id, current_message_id or None),
+            )
         self._persist_reminder_requests(
             decision.reminders,
             chat_state=chat_state,
             user_id=user_id,
+        )
+        self._persist_goal_actions(
+            decision.goals,
+            chat=chat_state,
+            user_id=user_id,
+            origin_message_id=current_message_id or None,
         )
         self._filter_decision_stickers(chat_state, incoming_text, decision)
         self._maybe_add_reaction_sticker(chat_state, incoming_text, decision)
@@ -691,7 +887,12 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             "recent_messages": recent,
             "recent_telegram_messages": recent_telegram,
             "relevant_memory": [
-                {"text": fact.text, "tags": fact.tags, "created_at": fact.created_at}
+                {
+                    "text": fact.text,
+                    "tags": fact.tags,
+                    "created_at": fact.created_at,
+                    "origin": fact.origin_message_id,
+                }
                 for fact in facts
             ],
             "known_persona_self_memory": [
@@ -701,6 +902,8 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             "adaptive_reply_style": self._style_payload(chat),
             "available_sticker_packs": STICKER_PACKS,
             "available_tools": self._available_tool_names(),
+            "open_goals": self._open_goals_payload(chat),
+            "known_user_state": self._user_state_payload(user_id),
         }
         messages = [
             {"role": "system", "content": self._decision_system_prompt()},
@@ -966,6 +1169,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             for fact in decision.self_memories:
                 self._remember_persona_self_fact(fact)
             self._persist_reminder_requests(decision.reminders, chat_state=chat)
+            self._persist_goal_actions(decision.goals, chat=chat)
             self._schedule_from_minutes(chat.chat_id, decision.next_check_minutes)
             if not decision.send:
                 continue
@@ -1001,6 +1205,8 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         recent_telegram = self._recent_telegram_messages(chat.chat_id)
         facts = self._search_chat_memory(chat, chat.display_name)
         persona_self_memory = self._persona_self_context(chat.display_name)
+        open_goals = self._open_goals_payload(chat)
+        due_goals = self._due_goals_payload(chat)
         response = self.llm.chat_completion(
             [
                 {"role": "system", "content": self._initiative_system_prompt()},
@@ -1027,6 +1233,8 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                             "known_persona_self_memory": [fact.text for fact in persona_self_memory],
                             "adaptive_reply_style": self._style_payload(chat),
                             "available_sticker_packs": STICKER_PACKS,
+                            "open_goals": open_goals,
+                            "due_goals": due_goals,
                         },
                         ensure_ascii=False,
                     ),
@@ -1097,24 +1305,37 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                     reply_to_message_id=should_reply_to,
                 )
         if messages and self.telegram_config.tts_enabled:
-            voice_data = self._tts.synthesize(messages[0])
+            voice_data = self._tts.synthesize(
+                messages[0],
+                voice=self.persona.tts_voice or None,
+            )
             if voice_data:
                 try:
-                    sent_voice = self.telegram.send_voice_bytes(
-                        chat.chat_id,
+                    sent_voice = self._send_tts_audio(
+                        chat,
                         voice_data,
                         reply_to_message_id=message_id if not initiative and not sent_text else None,
                         disable_notification=disable_notification,
                     )
-                    self._log_sent_telegram_message(
-                        chat,
-                        sent_voice,
-                        "assistant",
-                        "[voice-reply]",
-                        reply_to_message_id=message_id if not initiative and not sent_text else None,
+                    if sent_voice is not None:
+                        self._log_sent_telegram_message(
+                            chat,
+                            sent_voice,
+                            "assistant",
+                            "[voice-reply]",
+                            reply_to_message_id=message_id if not initiative and not sent_text else None,
+                        )
+                except (TelegramApiError, OSError) as exc:
+                    print(
+                        f"[tts] Telegram rejected the audio for chat {chat.chat_id} "
+                        f"(format={self._tts.response_format}): {exc}",
+                        flush=True,
                     )
-                except (TelegramApiError, OSError):
-                    pass
+            elif self._tts.last_error:
+                print(
+                    f"[tts] synthesis failed for chat {chat.chat_id}: {self._tts.last_error}",
+                    flush=True,
+                )
         for sticker_choice in stickers[:2]:
             file_id = self._select_sticker_file_id(sticker_choice, chat.chat_id)
             if not file_id:
@@ -1224,6 +1445,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         text: str,
         *,
         user_id: str | None = None,
+        origin_message_id: int | str | None = None,
     ) -> None:
         text = text.strip()
         if not text:
@@ -1238,6 +1460,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         if user_id:
             tags.append(f"user:{user_id}")
         scope = SCOPE_GLOBAL if self.telegram_config.global_memory else (SCOPE_USER if user_id else SCOPE_CHAT)
+        provenance = _format_origin_ref(chat.chat_id, origin_message_id)
         self.memory_service.remember(
             text,
             kind=KIND_FACT,
@@ -1247,6 +1470,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             chat_id=chat.chat_id,
             persona_key=self.persona.key,
             source="telegram_chat",
+            origin_message_id=provenance,
         )
 
     def _remember_media_fact(
@@ -1256,6 +1480,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         description: str,
         *,
         user_id: str | None = None,
+        origin_message_id: int | str | None = None,
     ) -> None:
         description = str(description or "").strip()
         if not description:
@@ -1289,6 +1514,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                 "label": image.label,
                 "file_name": image.file_name,
             },
+            origin_message_id=_format_origin_ref(chat.chat_id, origin_message_id),
         )
 
     def _remember_voice_fact(
@@ -1299,6 +1525,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         *,
         user_id: str | None = None,
         media_bytes: bytes | None = None,
+        origin_message_id: int | str | None = None,
     ) -> None:
         transcript = str(transcript or "").strip()
         media_id: str | None = None
@@ -1344,6 +1571,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                 "label": voice.label,
                 "transcript": transcript,
             },
+            origin_message_id=_format_origin_ref(chat.chat_id, origin_message_id),
         )
 
     def _transcribe_voice(self, voice: VoiceAttachment | None) -> VoiceTranscriptionResult:
@@ -1423,7 +1651,147 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             added += 1
         return added
 
-    def _remember_persona_self_fact(self, text: str) -> None:
+    def _user_state_payload(self, user_id: str | None) -> dict[str, Any] | None:
+        """Compact view of the persona's user_state for the prompt.
+
+        ``None`` when no row exists yet (don't surface an empty object —
+        that just adds noise). The age field tells the model whether
+        the snapshot is fresh or stale.
+        """
+
+        if not user_id:
+            return None
+        state = self.memory.get_user_state(str(user_id), self.persona.key)
+        if state is None:
+            return None
+        try:
+            updated = datetime.fromisoformat(state.last_updated_at.replace("Z", "+00:00"))
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=timezone.utc)
+            age_hours = round(
+                (datetime.now(timezone.utc) - updated).total_seconds() / 3600.0, 1
+            )
+        except ValueError:
+            age_hours = None
+        return {
+            "summary": state.summary,
+            "mood": state.mood,
+            "themes": state.themes,
+            "open_questions": state.open_questions,
+            "preferences": state.preferences,
+            "confidence": state.confidence,
+            "age_hours": age_hours,
+        }
+
+    def _open_goals_payload(self, chat: TelegramChat) -> list[dict[str, Any]]:
+        """Compact open-goals view for the model prompt (persona + chat scoped)."""
+
+        try:
+            goals = self.memory.list_open_goals(
+                persona_key=self.persona.key,
+                chat_id=chat.chat_id,
+                limit=5,
+            )
+        except Exception:  # noqa: BLE001
+            return []
+        return [_goal_summary(goal) for goal in goals]
+
+    def _due_goals_payload(self, chat: TelegramChat) -> list[dict[str, Any]]:
+        try:
+            goals = self.memory.list_due_goals(
+                persona_key=self.persona.key,
+                now=utc_now(),
+                lookahead_hours=24.0,
+                chat_id=chat.chat_id,
+                limit=5,
+            )
+        except Exception:  # noqa: BLE001
+            return []
+        return [_goal_summary(goal) for goal in goals]
+
+    def _persist_goal_actions(
+        self,
+        actions: list[dict[str, Any]],
+        *,
+        chat: TelegramChat,
+        user_id: str | None = None,
+        origin_message_id: int | None = None,
+    ) -> int:
+        """Apply ``decision.goals`` entries to the goals table.
+
+        Returns the number of actions that resulted in a write. Invalid /
+        unresolvable entries (e.g. close with unknown goal_id, or close of
+        another persona's goal) are silently skipped so a malformed item
+        does not break the whole turn.
+        """
+
+        if not actions:
+            return 0
+        applied = 0
+        for entry in actions:
+            action = str(entry.get("action") or "").strip().lower()
+            try:
+                if action == "open":
+                    text = str(entry.get("text") or "").strip()
+                    if not text:
+                        continue
+                    due_at = entry.get("due_at")
+                    priority = entry.get("priority")
+                    self.memory.open_goal(
+                        persona_key=self.persona.key,
+                        text=text,
+                        priority=float(priority) if isinstance(priority, (int, float)) else 0.5,
+                        user_id=user_id,
+                        chat_id=chat.chat_id,
+                        origin_message_id=origin_message_id,
+                        due_at=str(due_at) if isinstance(due_at, str) and due_at.strip() else None,
+                        metadata={"source": "telegram_decision"},
+                    )
+                    applied += 1
+                elif action == "update":
+                    goal_id = entry.get("goal_id")
+                    if not isinstance(goal_id, int):
+                        continue
+                    existing = self.memory.get_goal(int(goal_id))
+                    if existing is None or existing.persona_key != self.persona.key:
+                        continue
+                    new_text = entry.get("text")
+                    priority = entry.get("priority")
+                    due_kwargs: dict[str, Any] = {}
+                    if "due_at" in entry:
+                        raw_due = entry.get("due_at")
+                        due_kwargs["due_at"] = (
+                            str(raw_due) if isinstance(raw_due, str) and raw_due.strip() else None
+                        )
+                    self.memory.update_goal(
+                        int(goal_id),
+                        text=str(new_text).strip() if isinstance(new_text, str) and new_text.strip() else None,
+                        priority=float(priority) if isinstance(priority, (int, float)) else None,
+                        **due_kwargs,
+                    )
+                    applied += 1
+                elif action in ("complete", "abandon"):
+                    goal_id = entry.get("goal_id")
+                    if not isinstance(goal_id, int):
+                        continue
+                    existing = self.memory.get_goal(int(goal_id))
+                    if existing is None or existing.persona_key != self.persona.key:
+                        continue
+                    target_status = (
+                        GOAL_STATUS_COMPLETED if action == "complete" else GOAL_STATUS_ABANDONED
+                    )
+                    self.memory.update_goal(int(goal_id), status=target_status)
+                    applied += 1
+            except (ValueError, TypeError):
+                continue
+        return applied
+
+    def _remember_persona_self_fact(
+        self,
+        text: str,
+        *,
+        origin_ref: str | None = None,
+    ) -> None:
         if not self.telegram_config.fictional_self_enabled:
             return
         text = text.strip()
@@ -1444,6 +1812,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             ],
             persona_key=self.persona.key,
             source="telegram_persona_self",
+            origin_message_id=origin_ref,
         )
 
     def _schedule_from_minutes(self, chat_id: str, minutes: int | None) -> None:
@@ -1488,6 +1857,37 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         if self._web_search.enabled:
             names.append("web_search")
         return names
+
+    def _send_tts_audio(
+        self,
+        chat: TelegramChat,
+        data: bytes,
+        *,
+        reply_to_message_id: int | None,
+        disable_notification: bool,
+    ) -> dict[str, Any] | None:
+        fmt = self._tts.response_format
+        mime = self._tts.expected_mime
+        if fmt in ("opus", "ogg"):
+            return self.telegram.send_voice_bytes(
+                chat.chat_id,
+                data,
+                filename="reply.ogg",
+                mime_type=mime,
+                reply_to_message_id=reply_to_message_id,
+                disable_notification=disable_notification,
+            )
+        # mp3 / aac / flac / wav / pcm — Telegram sendVoice rejects these,
+        # so route through sendAudio. The user-visible result is an audio
+        # message bubble instead of a voice waveform.
+        return self.telegram.send_audio_bytes(
+            chat.chat_id,
+            data,
+            filename=f"reply.{fmt}",
+            mime_type=mime,
+            reply_to_message_id=reply_to_message_id,
+            disable_notification=disable_notification,
+        )
 
     def _capture_reasoning(
         self,
@@ -1615,6 +2015,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             importance=item.importance,
             kind=item.kind,
             scope=item.scope,
+            origin_message_id=getattr(item, "origin_message_id", None),
         )
 
     # ------------------------------------------------------------------
@@ -1817,6 +2218,60 @@ def _decision_to_payload(decision: Decision) -> dict[str, Any]:
         "reminders": list(decision.reminders),
         "tool_request": decision.tool_request,
         "next_check_minutes": decision.next_check_minutes,
+        "goals": list(decision.goals),
+    }
+
+
+def _format_origin_ref(chat_id: str | int, message_id: int | str | None) -> str | None:
+    """Build a stable provenance reference like ``telegram:555:42``.
+
+    Returns ``None`` when there is no message_id to anchor against, so
+    legacy callers that pass nothing don't pollute the column with
+    half-references.
+    """
+
+    if message_id is None:
+        return None
+    try:
+        message_int = int(message_id)
+    except (TypeError, ValueError):
+        return None
+    if message_int <= 0:
+        return None
+    return f"telegram:{chat_id}:{message_int}"
+
+
+def _goal_summary(goal: Goal) -> dict[str, Any]:
+    """Compact projection of a Goal row for prompt context.
+
+    Strips heavy fields and adds a derived ``age_days`` / ``due_in_hours``
+    so the model does not have to parse timestamps itself.
+    """
+
+    now = datetime.now(timezone.utc)
+    try:
+        created = datetime.fromisoformat(goal.created_at.replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        age_days = max(0.0, round((now - created).total_seconds() / 86400.0, 1))
+    except ValueError:
+        age_days = 0.0
+    due_in_hours: float | None = None
+    if goal.due_at:
+        try:
+            due = datetime.fromisoformat(goal.due_at.replace("Z", "+00:00"))
+            if due.tzinfo is None:
+                due = due.replace(tzinfo=timezone.utc)
+            due_in_hours = round((due - now).total_seconds() / 3600.0, 1)
+        except ValueError:
+            due_in_hours = None
+    return {
+        "id": goal.id,
+        "text": goal.text,
+        "priority": goal.priority,
+        "age_days": age_days,
+        "due_at": goal.due_at,
+        "due_in_hours": due_in_hours,
     }
 
 

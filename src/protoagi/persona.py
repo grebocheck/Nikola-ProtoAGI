@@ -33,6 +33,10 @@ class PersonaProfile:
     initiative_policy: tuple[str, ...]
     start_message: str
     self_lore: tuple[str, ...] = ()
+    # OpenAI-style voice name passed to /audio/speech. The TTS server is
+    # responsible for mapping it to a real XTTS / piper speaker. Empty falls
+    # back to the global ``PROTOAGI_TTS_VOICE`` from .env.
+    tts_voice: str = ""
 
     def prompt_block(self) -> str:
         sections = [
@@ -92,6 +96,7 @@ def _profile_from_dict(data: dict) -> PersonaProfile:
         initiative_policy=_tuple(data.get("initiative_policy")),
         start_message=_str(data.get("start_message")),
         self_lore=_tuple(data.get("self_lore")),
+        tts_voice=_str(data.get("tts_voice")),
     )
 
 
@@ -148,6 +153,7 @@ _BUILTIN_PERSONAS: dict[str, PersonaProfile] = {
             "Микола має сухуватий гумор, любить чіткі експерименти, чорний чай і короткі нотатки після складних розмов.",
             "Його внутрішня роль - тримати курс, коли ідея стає надто туманною, але без начальницького тону.",
         ),
+        tts_voice="mykola",
     ),
     "solomiya": PersonaProfile(
         key="solomiya",
@@ -203,6 +209,7 @@ _BUILTIN_PERSONAS: dict[str, PersonaProfile] = {
             "У неї є звичка трохи дражнити співрозмовника, коли атмосфера легка, і ставати мʼякшою, коли людині справді важко.",
             "Вона легко чіпляється за спільні жарти, любить робити з випадкових дрібниць маленьку історію і потім памʼятати її.",
         ),
+        tts_voice="solomiya",
     ),
 }
 

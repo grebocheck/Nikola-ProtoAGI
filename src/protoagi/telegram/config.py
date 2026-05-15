@@ -59,6 +59,8 @@ class TelegramConfig:
     tts_model: str = ""
     tts_voice: str = "alloy"
     tts_max_chars: int = 600
+    tts_response_format: str = "opus"
+    tts_speed: float = 1.0
     group_gate: GroupGateConfig = field(default_factory=GroupGateConfig)
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
     reasoning_log: ReasoningLogConfig = field(default_factory=ReasoningLogConfig)
@@ -114,10 +116,22 @@ class TelegramConfig:
             tts_model=os.environ.get("PROTOAGI_TTS_MODEL", "").strip(),
             tts_voice=os.environ.get("PROTOAGI_TTS_VOICE", "alloy").strip() or "alloy",
             tts_max_chars=env_int("PROTOAGI_TTS_MAX_CHARS", 600),
+            tts_response_format=os.environ.get("PROTOAGI_TTS_RESPONSE_FORMAT", "opus").strip().lower() or "opus",
+            tts_speed=_env_float("PROTOAGI_TTS_SPEED", 1.0),
             group_gate=_load_group_gate_config(),
             web_search=_load_web_search_config(),
             reasoning_log=_load_reasoning_log_config(),
         )
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 
 def _parse_chat_ids(raw: str) -> set[str] | None:

@@ -287,14 +287,93 @@ PROTOAGI_STORE_VOICE=1
 ```
 
 Outgoing TTS is opt-in. When enabled, the bot still sends the normal text reply
-and then adds a Telegram voice message generated from `/audio/speech`.
+and then adds a Telegram voice message generated from `/audio/speech`. Each
+persona can pick its own voice through the `tts_voice` field in
+`config/personas/*.json` (built-ins: `solomiya`→`solomiya`, `mykola`→`mykola`);
+`PROTOAGI_TTS_VOICE` is only the fallback when a persona does not set one.
 
 ```env
 PROTOAGI_TTS_ENABLED=1
 PROTOAGI_TTS_BASE_URL=http://127.0.0.1:8084/v1
-PROTOAGI_TTS_MODEL=tts-local
-PROTOAGI_TTS_VOICE=alloy
+PROTOAGI_TTS_MODEL=tts-1-hd
+PROTOAGI_TTS_VOICE=nova
+PROTOAGI_TTS_RESPONSE_FORMAT=opus
+PROTOAGI_TTS_SPEED=1.0
 ```
+
+### Recommended Ukrainian setup: Piper UA bridge
+
+```powershell
+./scripts/start-tts-server.ps1                # start (default port 8084)
+./scripts/start-tts-server.ps1 -Logs          # tail server log
+./scripts/start-tts-server.ps1 -Stop          # stop the server
+./scripts/start-tts-server.ps1 -Reinstall     # wipe venv and reinstall deps
+```
+
+The script bootstraps a local Python venv under `runs\tts-venv`, installs
+[piper-tts](https://github.com/rhasspy/piper) + FastAPI/uvicorn, downloads
+the `uk_UA-ukrainian_tts-medium` model (~63 MB) into `config\tts\models\`,
+and starts the OpenAI-compatible TTS bridge [scripts/tts-server-uk.py](../scripts/tts-server-uk.py).
+
+The bridge transcodes Piper's WAV output through `ffmpeg` into OGG/Opus so
+Telegram receives a proper voice waveform via `sendVoice`. `ffmpeg` must
+be available in `PATH`. Without ffmpeg, set
+`PROTOAGI_TTS_RESPONSE_FORMAT=wav`, which skips transcoding (Telegram will
+deliver it via `sendAudio` instead).
+
+[config/tts/voice_map.json](../config/tts/voice_map.json) maps persona
+voice keys to Piper UA speakers (the model ships with three speakers
+from the `robinhad/ukrainian-tts` dataset):
+
+- `solomiya` → `lada` — warm female timbre, slightly slowed (length_scale 1.05)
+- `mykola` → `mykyta` — the model's only male voice
+- standard OpenAI names (`alloy`/`echo`/`fable`/`onyx`/`nova`/`shimmer`)
+  remap to the three UA speakers
+- raw speaker keys (`mykyta`/`lada`/`tetiana`) also work
+
+Resource footprint: Piper runs on CPU through onnxruntime, ~150 MB RAM,
+no VRAM at all — gpt-oss-20b keeps its full GPU budget. First synthesis
+of a turn takes ~0.5 s; subsequent generations are faster.
+
+### Why not XTTS-v2 / Coqui
+
+The previous Docker setup wired
+[openedai-speech](https://github.com/matatonic/openedai-speech) with
+XTTS-v2 (`language=uk`). XTTS-v2 lists Ukrainian but tokenizes it
+through a Russian-leaning phoneme set; even with a Ukrainian reference
+WAV the output had heavy Russian accent and mis-stressed words. This is
+a property of XTTS-v2's text frontend, not something cloning can fix.
+The old `config/tts/voice_to_speaker.json` is kept only as reference; the
+PowerShell start script no longer launches Docker.
+
+### Cloning your own Ukrainian voice (later)
+
+Piper does not do zero-shot cloning — to use a personal voice you have
+to fine-tune the model on a small dataset. The community workflow:
+
+1. Record 10–30 minutes of clean Ukrainian speech (mono WAV, 22 050 Hz, ~10 s clips with transcripts).
+2. Use [piper-recording-studio](https://github.com/rhasspy/piper-recording-studio) to capture sentences.
+3. Fine-tune with [piper-train](https://github.com/rhasspy/piper#training) starting from the existing `uk_UA-ukrainian_tts-medium` checkpoint.
+4. Drop the resulting `.onnx` + `.onnx.json` into `config/tts/models/` and pass `--model <name>` to `start-tts-server.ps1`.
+
+If you'd rather avoid training, the cloud option is Microsoft Edge
+Neural TTS (`uk-UA-OstapNeural`, `uk-UA-PolinaNeural`) or OpenAI's
+`gpt-4o-mini-tts` — both speak natural Ukrainian and plug into the same
+`/v1/audio/speech` API (point `PROTOAGI_TTS_BASE_URL` at a small
+[openai-edge-tts](https://github.com/travisvn/openai-edge-tts) wrapper
+or OpenAI's API directly).
+
+### Telegram audio plumbing
+
+Telegram `sendVoice` requires OGG/Opus. If your TTS server cannot emit
+opus, set `PROTOAGI_TTS_RESPONSE_FORMAT=mp3` (or `aac`/`flac`/`wav`) and
+the bot will route through `sendAudio` instead — the user sees an audio
+bubble instead of a voice waveform, but the message goes through.
+
+When the TTS request fails (server down, format mismatch, JSON error
+blob instead of audio) the bot prints a one-line `[tts]` reason to
+stdout so the operator notices. The text reply is sent regardless; the
+voice/audio attachment is best-effort.
 
 ## Initiative
 

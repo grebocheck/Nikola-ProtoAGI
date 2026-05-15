@@ -29,6 +29,7 @@ class Decision:
     reminders: list[dict[str, Any]] = field(default_factory=list)
     tool_request: dict[str, Any] | None = None
     next_check_minutes: int | None = None
+    goals: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -40,6 +41,7 @@ class InitiativeDecision:
     self_memories: list[str] = field(default_factory=list)
     stickers: list[dict[str, str]] = field(default_factory=list)
     reminders: list[dict[str, Any]] = field(default_factory=list)
+    goals: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -98,6 +100,31 @@ _TOOL_REQUEST_SCHEMA = {
 }
 
 
+# Goal action — let the persona open / update / close threads of intention
+# right inside the decision JSON. ``action`` is required; ``goal_id`` is
+# only needed when revising or closing an existing goal.
+_GOAL_ACTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "action": {
+            "type": "string",
+            "enum": ["open", "update", "complete", "abandon"],
+        },
+        "text": {"type": "string"},
+        "goal_id": {"anyOf": [{"type": "null"}, {"type": "integer"}]},
+        "due_at": {"anyOf": [{"type": "null"}, {"type": "string"}]},
+        "priority": {
+            "anyOf": [
+                {"type": "null"},
+                {"type": "number", "minimum": 0, "maximum": 1},
+            ]
+        },
+    },
+    "required": ["action"],
+    "additionalProperties": False,
+}
+
+
 DECISION_JSON_SCHEMA: dict[str, Any] = {
     "type": "json_schema",
     "json_schema": {
@@ -126,12 +153,89 @@ DECISION_JSON_SCHEMA: dict[str, Any] = {
                 "next_check_minutes": {
                     "anyOf": [{"type": "null"}, {"type": "integer"}]
                 },
+                "goals": {"type": "array", "items": _GOAL_ACTION_SCHEMA},
             },
             "required": ["should_reply"],
             "additionalProperties": False,
         },
     },
 }
+
+
+USER_STATE_JSON_SCHEMA: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "user_state",
+        "strict": False,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "mood": {"type": "string"},
+                "themes": {"type": "array", "items": {"type": "string"}},
+                "open_questions": {"type": "array", "items": {"type": "string"}},
+                "preferences": {"type": "object"},
+                "summary": {"type": "string"},
+                "confidence": {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "maximum": 1.0,
+                },
+            },
+            "required": ["summary"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+@dataclass(slots=True)
+class UserStateUpdate:
+    """Result of an LLM-driven user_state refresh.
+
+    The summary is the only required field. Empty arrays / strings are
+    valid — they mean "no theme/question worth tracking" rather than
+    "no information available".
+    """
+
+    summary: str
+    mood: str = ""
+    themes: list[str] = field(default_factory=list)
+    open_questions: list[str] = field(default_factory=list)
+    preferences: dict[str, Any] = field(default_factory=dict)
+    confidence: float = 0.5
+
+
+def user_state_from_payload(payload: dict[str, Any]) -> UserStateUpdate:
+    summary = str(payload.get("summary") or "").strip()
+    mood = str(payload.get("mood") or "").strip()
+    themes_raw = payload.get("themes") or []
+    themes = (
+        [str(t).strip() for t in themes_raw if str(t).strip()][:10]
+        if isinstance(themes_raw, list)
+        else []
+    )
+    questions_raw = payload.get("open_questions") or []
+    open_questions = (
+        [str(q).strip() for q in questions_raw if str(q).strip()][:10]
+        if isinstance(questions_raw, list)
+        else []
+    )
+    preferences = payload.get("preferences") or {}
+    if not isinstance(preferences, dict):
+        preferences = {}
+    confidence_raw = payload.get("confidence", 0.5)
+    try:
+        confidence = max(0.0, min(1.0, float(confidence_raw)))
+    except (TypeError, ValueError):
+        confidence = 0.5
+    return UserStateUpdate(
+        summary=summary,
+        mood=mood,
+        themes=themes,
+        open_questions=open_questions,
+        preferences=preferences,
+        confidence=confidence,
+    )
 
 
 INITIATIVE_JSON_SCHEMA: dict[str, Any] = {
@@ -149,6 +253,7 @@ INITIATIVE_JSON_SCHEMA: dict[str, Any] = {
                 "self_memories": {"type": "array", "items": {"type": "string"}},
                 "reminders": {"type": "array", "items": _REMINDER_ITEM_SCHEMA},
                 "next_check_minutes": {"type": "integer"},
+                "goals": {"type": "array", "items": _GOAL_ACTION_SCHEMA},
             },
             "required": ["send"],
             "additionalProperties": False,
@@ -196,6 +301,7 @@ def decision_from_payload(payload: dict[str, Any]) -> Decision:
         reminders=normalize_reminder_requests(payload.get("reminders", [])),
         tool_request=normalize_tool_request(payload.get("tool_request")),
         next_check_minutes=_optional_int(payload.get("next_check_minutes")),
+        goals=normalize_goal_actions(payload.get("goals", [])),
     )
 
 
@@ -208,6 +314,7 @@ def initiative_from_payload(payload: dict[str, Any]) -> InitiativeDecision:
         next_check_minutes=max(30, _optional_int(payload.get("next_check_minutes")) or 360),
         stickers=normalize_sticker_choices(payload.get("stickers", [])),
         reminders=normalize_reminder_requests(payload.get("reminders", [])),
+        goals=normalize_goal_actions(payload.get("goals", [])),
     )
 
 
@@ -243,11 +350,63 @@ def normalize_reminder_requests(value: Any) -> list[dict[str, Any]]:
     return requests
 
 
+_VALID_GOAL_ACTIONS = {"open", "update", "complete", "abandon"}
+
+
+def normalize_goal_actions(value: Any) -> list[dict[str, Any]]:
+    """Coerce goal action items from the model into well-typed dicts.
+
+    Each item must specify ``action`` ∈ {open, update, complete, abandon}.
+    ``open`` and ``update`` need ``text`` (an empty string is a no-op and
+    gets dropped). ``complete`` / ``abandon`` need ``goal_id``. Anything
+    that does not fit these rules is silently discarded so a malformed
+    item does not poison the whole decision.
+    """
+
+    if isinstance(value, dict):
+        items = [value]
+    elif isinstance(value, list):
+        items = value
+    else:
+        return []
+    actions: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get("action") or "").strip().lower()
+        if action not in _VALID_GOAL_ACTIONS:
+            continue
+        normalized: dict[str, Any] = {"action": action}
+        text = str(item.get("text") or "").strip()
+        if text:
+            normalized["text"] = text
+        goal_id = _optional_int(item.get("goal_id"))
+        if goal_id is not None and goal_id > 0:
+            normalized["goal_id"] = goal_id
+        due_at = item.get("due_at")
+        if isinstance(due_at, str) and due_at.strip():
+            normalized["due_at"] = due_at.strip()
+        priority = item.get("priority")
+        if isinstance(priority, (int, float)):
+            normalized["priority"] = max(0.0, min(1.0, float(priority)))
+        # Validation per action type.
+        if action == "open" and "text" not in normalized:
+            continue
+        if action == "update" and "goal_id" not in normalized:
+            continue
+        if action in ("complete", "abandon") and "goal_id" not in normalized:
+            continue
+        actions.append(normalized)
+        if len(actions) >= 5:
+            break
+    return actions
+
+
 def normalize_tool_request(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     name = str(value.get("name") or value.get("tool") or "").strip()
-    if name not in {"recall", "remind_me"}:
+    if name not in {"recall", "remind_me", "web_search"}:
         return None
     arguments = value.get("arguments")
     if not isinstance(arguments, dict):
@@ -352,11 +511,15 @@ __all__ = [
     "ImageAttachment",
     "InitiativeDecision",
     "StickerAttachment",
+    "USER_STATE_JSON_SCHEMA",
+    "UserStateUpdate",
+    "user_state_from_payload",
     "decision_from_payload",
     "decision_reply_texts",
     "extract_json_object",
     "image_to_payload",
     "initiative_from_payload",
+    "normalize_goal_actions",
     "normalize_reminder_requests",
     "normalize_reply_messages",
     "normalize_reply_to",

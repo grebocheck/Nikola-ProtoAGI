@@ -3,10 +3,22 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .api import TelegramApi, TelegramApiError
+
+
+_RESPONSE_FORMAT_MIME: dict[str, str] = {
+    "opus": "audio/ogg",
+    "ogg": "audio/ogg",
+    "mp3": "audio/mpeg",
+    "aac": "audio/aac",
+    "flac": "audio/flac",
+    "wav": "audio/wav",
+    "pcm": "audio/wav",
+}
 
 
 @dataclass(slots=True)
@@ -45,6 +57,12 @@ class VoiceSynthesisConfig:
     timeout_seconds: int = 120
     max_chars: int = 600
     enabled: bool = False
+    # Telegram ``sendVoice`` requires OGG/Opus. ``opus`` is what most
+    # OpenAI-compatible TTS servers (openedai-speech, kokoro,
+    # piper-server) emit when asked for it. Set ``mp3`` only if you
+    # plan to route through ``sendAudio`` instead.
+    response_format: str = "opus"
+    speed: float = 1.0
 
 
 class VoiceTranscriber:
@@ -109,16 +127,30 @@ class VoiceTranscriber:
 class VoiceSynthesizer:
     def __init__(self, config: VoiceSynthesisConfig) -> None:
         self.config = config
+        self.last_error: str | None = None
 
-    def synthesize(self, text: str) -> bytes | None:
+    @property
+    def response_format(self) -> str:
+        return (self.config.response_format or "opus").strip().lower() or "opus"
+
+    @property
+    def expected_mime(self) -> str:
+        fmt = self.response_format
+        return _RESPONSE_FORMAT_MIME.get(fmt, "application/octet-stream")
+
+    def synthesize(self, text: str, *, voice: str | None = None) -> bytes | None:
         text = text.strip()
         if not self.config.enabled or not self.config.base_url or not self.config.model or not text:
             return None
-        payload = {
+        active_voice = (voice or "").strip() or self.config.voice
+        payload: dict[str, Any] = {
             "model": self.config.model,
-            "voice": self.config.voice,
+            "voice": active_voice,
             "input": text[: self.config.max_chars],
+            "response_format": self.response_format,
         }
+        if self.config.speed and self.config.speed != 1.0:
+            payload["speed"] = float(self.config.speed)
         request = Request(
             self.config.base_url.rstrip("/") + "/audio/speech",
             data=json.dumps(payload).encode("utf-8"),
@@ -128,9 +160,26 @@ class VoiceSynthesizer:
         try:
             with urlopen(request, timeout=self.config.timeout_seconds) as response:
                 data = response.read()
-        except (HTTPError, URLError):
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            self.last_error = f"HTTP {exc.code}: {detail}"
             return None
-        return data or None
+        except URLError as exc:
+            self.last_error = f"network: {exc.reason}"
+            return None
+        if not data:
+            self.last_error = "empty response from TTS server"
+            return None
+        # Sanity-check: a JSON error blob is NOT audio. openedai-speech and
+        # similar return application/json on bad params.
+        if data.lstrip().startswith(b"{") and b'"error"' in data[:200]:
+            self.last_error = (
+                f"TTS server returned a JSON error instead of audio: "
+                f"{data[:200].decode('utf-8', errors='replace')}"
+            )
+            return None
+        self.last_error = None
+        return data
 
 
 def _multipart_body(
