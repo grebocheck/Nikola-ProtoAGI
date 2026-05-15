@@ -44,8 +44,8 @@ Copy local environment defaults:
 Copy-Item .env.example .env
 ```
 
-Then edit `.env` if you want Telegram mode or custom runtime settings. `.env`
-is local-only and ignored by git.
+Edit `.env` and set `TELEGRAM_BOT_TOKEN`. `.env` is local-only and ignored
+by git.
 
 Start the local model server:
 
@@ -53,29 +53,19 @@ Start the local model server:
 .\scripts\start-server.ps1 -CtxSize 8192 -CpuMoE 4
 ```
 
-In a second terminal:
+Then in another terminal, run the bot or the admin UI:
 
 ```powershell
-$env:PYTHONPATH="src"
-python -m protoagi status
-python -m protoagi chat --prompt "Create a short plan for improving this repository."
+$env:PYTHONPATH = "src"
+python -m protoagi telegram          # Telegram conversation bot
+python -m protoagi admin             # Local admin dashboard on :8765
 ```
 
-For an interactive session:
-
-```powershell
-$env:PYTHONPATH="src"
-python -m protoagi chat --allow-write --allow-shell
-```
-
-`--allow-shell` gives the local agent permission to run PowerShell commands
-inside this workspace. Destructive command patterns are still blocked unless
-`--allow-unsafe-shell` is also used.
-
-The agent does a small Plan-and-Reflect pass around tool use by default: one
-short JSON plan before acting and, by default, one plan update after the first
-tool observation. Tune it with `PROTOAGI_PLAN_REFLECT` and
-`PROTOAGI_PLAN_CALL_LIMIT`.
+There are intentionally only two CLI subcommands now (`telegram` and
+`admin`). Experimental utilities (bench / chat / eval / memory ops /
+backup / federation) lived on the old single-shot agent loop and have
+been retired; their replacements live inside the admin UI or have
+moved to PowerShell scripts under `scripts/`.
 
 ## Telegram mode
 
@@ -192,47 +182,43 @@ Forward-looking plan: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 Run llama.cpp benchmark profiles:
 
+## Admin UI
+
+The React/Tailwind admin lives under [src/protoagi/admin_panel/web/](src/protoagi/admin_panel/web/).
+Production bundle is served by the Python admin server.
+
+`run-nikola.bat` (and `scripts/start-nikola-stack.ps1`) bootstrap the
+admin automatically — first run installs npm deps and builds the SPA,
+subsequent runs reuse the cached `dist/`. Open <http://127.0.0.1:8765>
+once the bot logs `Admin ready: ...`. Pages:
+
+- **Огляд** — counts (active/superseded memories, open goals, unresolved conflicts, user models).
+- **Память** — search, filter by kind/scope/persona/pinned, edit/pin/delete.
+- **Цілі** — open / completed / abandoned, manual close/reopen.
+- **Суперечності** — review pairs the system flagged as semantically close
+  but not auto-merged; resolve as superseded / kept_both / dismissed.
+- **Чати** — Telegram chats + per-chat reasoning log.
+
+If you don't want the admin spun up alongside the bot, pass `-NoAdmin`
+to `start-nikola-stack.ps1`. To force a fresh SPA build pass
+`-ForceAdminRebuild`. Standalone:
+
 ```powershell
-.\scripts\bench-llama.ps1
+.\scripts\start-admin-server.ps1                  # auto-build + start
+.\scripts\start-admin-server.ps1 -Stop            # kill the running admin
+.\scripts\start-admin-server.ps1 -Logs            # tail stderr
+.\scripts\start-admin-server.ps1 -ForceRebuild    # re-run npm install + build
 ```
 
-Benchmark the OpenAI-compatible endpoint after the server is running:
+For development with hot reload run Vite separately:
 
 ```powershell
-$env:PYTHONPATH="src"
-python -m protoagi bench --rounds 3
+cd src\protoagi\admin_panel\web
+npm run dev   # http://127.0.0.1:5173, proxies /api/* to the Python server
 ```
 
-## Memory ops
-
-```powershell
-# Recall benchmark over the bundled golden corpus
-$env:PYTHONPATH="src"
-python -m protoagi memory-eval
-
-# Inspect SQLite memory store
-python -m protoagi memory-stats
-
-# Forget low-value old items
-python -m protoagi memory-prune --dry-run --json
-
-# Preview near-duplicate consolidation
-python -m protoagi memory-consolidate --dry-run --json
-
-# Back up and restore the SQLite store
-python -m protoagi backup --to data/backups/manual.sqlite3
-python -m protoagi restore --from data/backups/manual.sqlite3
-
-# Keep only the last 7 days of backups
-Get-ChildItem data/backups/*.sqlite3 | Where-Object LastWriteTime -lt (Get-Date).AddDays(-7) | Remove-Item
-
-# Local admin dashboard at http://127.0.0.1:8765
-python -m protoagi admin
-
-# Signed federation bundle; --since emits only deltas plus deletions
-python -m protoagi memory-export --to runs/memory-bundle.json --secret "dev-secret"
-python -m protoagi memory-export --to runs/memory-delta.json --secret "dev-secret" --since 2026-05-03T00:00:00+00:00
-```
+Requires Node 20+ on `PATH`. When missing, the admin step warns and the
+bot still runs.
 
 Set `PROTOAGI_LLM_IMPORTANCE=1` to let the chat model score new memory writes
 for importance/kind with a SHA256 cache. The deterministic heuristic remains

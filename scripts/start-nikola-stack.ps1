@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Token = "",
     [string]$AllowedChatId = "",
     [ValidateSet("smart", "always", "mention", "silent")]
@@ -13,12 +13,21 @@ param(
     [switch]$NoEmbed,
     [string]$EmbedRepo = "",
     [string]$EmbedGpuLayers = "0",
+    [switch]$NoVoice,
+    [string]$VoiceModel = "large-v3",
+    [ValidateSet("cpu", "cuda", "auto")]
+    [string]$VoiceDevice = "cpu",
+    [switch]$NoTts,
+    [switch]$TtsCpu,
     [switch]$KeepServers,
     [switch]$KeepExistingTelegram,
     [switch]$NoProactive,
     [switch]$Once,
     [switch]$DeleteWebhook,
-    [switch]$DropPendingUpdates
+    [switch]$DropPendingUpdates,
+    [switch]$NoAdmin,
+    [int]$AdminPort = 8765,
+    [switch]$ForceAdminRebuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -178,6 +187,75 @@ if (-not $NoEmbed) {
     }
 }
 
+if (-not $NoVoice -and -not $Once) {
+    # Voice transcription is auto-spun-up when the operator configured a
+    # PROTOAGI_VOICE_MODEL alias. First run downloads the CTranslate2
+    # weights (~1.5 GB for large-v3) into runs\voice-cache. Failure
+    # here is non-fatal - the bot keeps working without transcription.
+    $VoiceModelEnv = [string]($DotEnv["PROTOAGI_VOICE_MODEL"])
+    $VoiceBaseUrl = [string]($DotEnv["PROTOAGI_VOICE_BASE_URL"])
+    if (-not [string]::IsNullOrWhiteSpace($VoiceModelEnv) -and `
+        $VoiceBaseUrl -match "^https?://(127\.0\.0\.1|localhost):(?<port>\d+)(/|$)") {
+        $VoicePort = [int]$Matches["port"]
+        try {
+            & (Join-Path $PSScriptRoot "start-voice-server.ps1") `
+                -Port $VoicePort `
+                -Model $VoiceModel `
+                -Device $VoiceDevice
+        } catch {
+            Write-Warning "Voice server failed to start: $($_.Exception.Message)"
+            Write-Warning "Telegram bot will still run; voice messages will be ignored."
+        }
+    }
+}
+
+if (-not $NoTts -and -not $Once) {
+    # TTS is auto-spun-up when the operator set PROTOAGI_TTS_ENABLED=1.
+    # First run installs piper-tts in runs\tts-venv and downloads the
+    # Piper UA model. Failure is non-fatal - the bot still ships text.
+    $TtsEnabled = [string]($DotEnv["PROTOAGI_TTS_ENABLED"])
+    $TtsBaseUrl = [string]($DotEnv["PROTOAGI_TTS_BASE_URL"])
+    $TtsTruthy = $TtsEnabled -match "^(1|true|yes|on)$"
+    if ($TtsTruthy -and `
+        $TtsBaseUrl -match "^https?://(127\.0\.0\.1|localhost):(?<port>\d+)(/|$)") {
+        # Without ffmpeg we can still send TTS - just as a plain wav
+        # audio bubble instead of an opus voice waveform. Pin the
+        # response format here so both TTS server and bot agree before
+        # either of them starts.
+        $HasFfmpeg = [bool](Get-Command ffmpeg -ErrorAction SilentlyContinue)
+        $UserPickedFormat = -not [string]::IsNullOrWhiteSpace([string]($DotEnv["PROTOAGI_TTS_RESPONSE_FORMAT"]))
+        if (-not $HasFfmpeg -and -not $UserPickedFormat) {
+            Write-Host "ffmpeg not on PATH - TTS will use wav (audio bubble)." `
+                "Install via 'winget install Gyan.FFmpeg' for opus voice waveforms."
+            $env:PROTOAGI_TTS_RESPONSE_FORMAT = "wav"
+        }
+        $TtsPort = [int]$Matches["port"]
+        try {
+            $TtsArgs = @{ Port = $TtsPort }
+            if ($TtsCpu) { $TtsArgs.Cpu = $true }
+            & (Join-Path $PSScriptRoot "start-tts-server.ps1") @TtsArgs
+        } catch {
+            Write-Warning "TTS server failed to start: $($_.Exception.Message)"
+            Write-Warning "Telegram bot will still run; voice replies will be skipped."
+        }
+    }
+}
+
+if (-not $NoAdmin -and -not $Once) {
+    # Admin panel is auto-built/started alongside the bot so the operator
+    # always has a UI without having to remember a separate npm/python
+    # incantation. Failures here are non-fatal: we still want the bot up
+    # even if node is missing or the build fails.
+    try {
+        $AdminArgs = @{ Port = $AdminPort }
+        if ($ForceAdminRebuild) { $AdminArgs.ForceRebuild = $true }
+        & (Join-Path $PSScriptRoot "start-admin-server.ps1") @AdminArgs
+    } catch {
+        Write-Warning "Admin server failed to start: $($_.Exception.Message)"
+        Write-Warning "Telegram bot will still run; restart admin manually with .\scripts\start-admin-server.ps1"
+    }
+}
+
 if (-not $KeepExistingTelegram -and -not $Once) {
     & (Join-Path $PSScriptRoot "stop-nikola.ps1") -Quiet
 }
@@ -209,6 +287,35 @@ if ($DropPendingUpdates) {
 
 } finally {
     & (Join-Path $PSScriptRoot "stop-nikola.ps1") -Quiet
+    if (-not $NoAdmin) {
+        try {
+            & (Join-Path $PSScriptRoot "start-admin-server.ps1") -Stop -Port $AdminPort | Out-Null
+        } catch {
+            # Stop is best-effort; user can kill the process manually.
+        }
+    }
+    if (-not $NoVoice -and -not $KeepServers) {
+        # Voice server is a downstream of the bot, so we stop it when
+        # the bot exits unless the operator asked to keep servers.
+        $VoiceBaseUrl = [string]($DotEnv["PROTOAGI_VOICE_BASE_URL"])
+        if ($VoiceBaseUrl -match ":(?<port>\d+)(/|$)") {
+            try {
+                & (Join-Path $PSScriptRoot "start-voice-server.ps1") -Stop -Port ([int]$Matches["port"]) | Out-Null
+            } catch {
+                # Best-effort.
+            }
+        }
+    }
+    if (-not $NoTts -and -not $KeepServers) {
+        $TtsBaseUrl = [string]($DotEnv["PROTOAGI_TTS_BASE_URL"])
+        if ($TtsBaseUrl -match ":(?<port>\d+)(/|$)") {
+            try {
+                & (Join-Path $PSScriptRoot "start-tts-server.ps1") -Stop -Port ([int]$Matches["port"]) | Out-Null
+            } catch {
+                # Best-effort.
+            }
+        }
+    }
     if (-not $KeepServers) {
         $PortsToStop = @($Port)
         if ($VisionPort) {

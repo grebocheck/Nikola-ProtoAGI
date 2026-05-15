@@ -23,6 +23,10 @@ dist/
 venv/
 env/
 
+# Admin panel React bundle / npm artifacts.
+node_modules/
+src/protoagi/admin_panel/web/dist/
+
 # Local model/runtime artifacts
 *.gguf
 *.safetensors

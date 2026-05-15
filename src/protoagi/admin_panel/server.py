@@ -1,45 +1,70 @@
-"""Tiny localhost admin server for inspecting ProtoAGI state.
+"""Localhost admin server for ProtoAGI.
 
-The server is intentionally minimal: stdlib ``http.server`` only, no
-authentication beyond binding to localhost by default. It exposes a small
-HTML dashboard at ``/`` plus JSON endpoints under ``/api/``:
+JSON API plus optional static-file serving for the React SPA built from
+``admin_panel/web/``. The server is intentionally minimal: stdlib
+``http.server`` only, no auth beyond binding to localhost.
 
-- ``GET  /api/stats``                — counts and last-reflection timestamp
-- ``GET  /api/memories?limit=...``   — recent memory items (any scope)
-- ``GET  /api/reminders``            — pending reminders
-- ``GET  /api/chats``                — Telegram chats
-- ``POST /api/memories/<id>/delete`` — delete a memory item
-- ``POST /api/memories/prune``       — run the prune pass (dry_run optional)
-- ``POST /api/memories/*/preview``   — dry-run prune/consolidate with plans
+API surface
+-----------
 
-The dashboard is single-file, server-rendered, no external assets, so it
-works offline.
+GET endpoints:
+
+- ``/api/health`` — counts (memory active/superseded, conflicts, goals,
+  user_state) for the admin overview.
+- ``/api/stats`` — legacy compatibility snapshot (used by the old
+  dashboard; kept so deployments mid-migration don't break).
+- ``/api/memories?limit=N&kind=...&scope=...&persona=...&search=...&pinned=true|false``
+- ``/api/memory-graph?...``
+- ``/api/goals?status=open|completed|abandoned|all&persona=...&limit=N``
+- ``/api/conflicts?status=unresolved|superseded|kept_both|dismissed|all&persona=...&limit=N``
+- ``/api/user_state?persona=...``
+- ``/api/reminders``
+- ``/api/chats``
+- ``/api/reasoning`` (overview), ``/api/reasoning/<chat_id>?limit=N`` (entries)
+- ``/api/style``
+- ``/api/media/<file_id>`` — raw blob bytes (image/voice)
+
+POST endpoints:
+
+- ``/api/memories/<id>/delete`` ``/pin`` ``/edit``
+- ``/api/memories/prune[/preview]`` ``/api/memories/consolidate[/preview]``
+- ``/api/goals/<id>/update`` (status / priority / text / due_at)
+- ``/api/conflicts/<id>/resolve`` (status, optional winner_id)
+
+Static serving: when ``admin_panel/web/dist/`` exists the server hands
+out its assets and falls back to ``index.html`` for any path that does
+not start with ``/api/`` so the React router owns client-side routes.
+Dev mode runs Vite on a separate port and proxies ``/api/*`` here.
 """
 
 from __future__ import annotations
 
-import html
 import json
+import mimetypes
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from socketserver import ThreadingMixIn
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .data import (
+    list_conflicts,
+    list_goals,
+    list_user_states,
     memory_graph,
     reasoning_entries,
     reasoning_overview,
+    serialize_goal,
     serialize_memory,
     stats,
     style_report,
-    style_signals_cell,
-    style_trials_cell,
 )
 from ..storage.memory import MemoryStore
 from ..storage.service import MemoryService
 
 
-_stats = stats
+_WEB_DIST = Path(__file__).resolve().parent / "web" / "dist"
+_STATIC_ROOT = _WEB_DIST if _WEB_DIST.exists() else None
 
 
 class _ThreadingServer(ThreadingMixIn, HTTPServer):
@@ -47,22 +72,23 @@ class _ThreadingServer(ThreadingMixIn, HTTPServer):
     allow_reuse_address = True
 
 
+def _cors_headers(handler: BaseHTTPRequestHandler) -> None:
+    # CORS is enabled across the board so the Vite dev server (on a
+    # different port) can hit the API directly. Production is same-origin
+    # so this is harmless.
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    handler.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+
 def _json_response(handler: BaseHTTPRequestHandler, payload: Any, status: int = 200) -> None:
     body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
+    _cors_headers(handler)
     handler.end_headers()
     handler.wfile.write(body)
-
-
-def _html_response(handler: BaseHTTPRequestHandler, body: str) -> None:
-    encoded = body.encode("utf-8")
-    handler.send_response(200)
-    handler.send_header("Content-Type", "text/html; charset=utf-8")
-    handler.send_header("Content-Length", str(len(encoded)))
-    handler.end_headers()
-    handler.wfile.write(encoded)
 
 
 def _bytes_response(
@@ -74,459 +100,191 @@ def _bytes_response(
     handler.send_response(200)
     handler.send_header("Content-Type", content_type)
     handler.send_header("Content-Length", str(len(data)))
+    _cors_headers(handler)
     handler.end_headers()
     handler.wfile.write(data)
 
 
-def _dashboard_html(memory: MemoryStore) -> str:
-    stats_payload = stats(memory)
-    style = style_report(memory)
-    reasoning_chats = reasoning_overview(memory, limit=15)
-    items = memory.list_memories(limit=20)
-    chats = []
-    with memory.connect() as conn:
-        rows = conn.execute(
-            "SELECT chat_id, display_name, chat_type, last_user_message_at, last_bot_message_at "
-            "FROM telegram_chats ORDER BY last_seen_at DESC LIMIT 20"
-        ).fetchall()
-        for row in rows:
-            chats.append(
-                {
-                    "chat_id": row["chat_id"],
-                    "display_name": row["display_name"],
-                    "chat_type": row["chat_type"],
-                    "last_user_message_at": row["last_user_message_at"],
-                    "last_bot_message_at": row["last_bot_message_at"],
-                }
-            )
-    reminders = memory.due_reminders("9999-12-31T23:59:59+00:00", limit=20)
-    rows_html = "".join(
-        f"<tr data-id=\"{item.id}\" class=\"{'pinned' if item.pinned else ''}\">"
-        f"<td>{item.id}</td>"
-        f"<td>{html.escape(item.kind)}</td>"
-        f"<td>{html.escape(item.scope)}</td>"
-        f"<td><input class=\"imp\" type=\"number\" min=\"0\" max=\"1\" step=\"0.05\" "
-        f"value=\"{item.importance:.2f}\"></td>"
-        f"<td><textarea class=\"txt\" rows=\"2\">{html.escape(item.text)}</textarea></td>"
-        f"<td>{html.escape(item.created_at)}</td>"
-        f"<td class=\"actions\">"
-        f"<button data-act=\"save\">save</button>"
-        f"<button data-act=\"pin\">{('unpin' if item.pinned else 'pin')}</button>"
-        f"<button data-act=\"delete\" class=\"danger\">delete</button>"
-        f"</td></tr>"
-        for item in items
-    )
-    chat_rows = "".join(
-        f"<tr><td>{html.escape(str(chat['chat_id']))}</td>"
-        f"<td>{html.escape(chat['display_name'] or '')}</td>"
-        f"<td>{html.escape(chat['chat_type'])}</td>"
-        f"<td>{html.escape(chat['last_user_message_at'] or '')}</td>"
-        f"<td>{html.escape(chat['last_bot_message_at'] or '')}</td></tr>"
-        for chat in chats
-    )
-    reminder_rows = "".join(
-        f"<tr><td>{rem.id}</td><td>{html.escape(rem.text)}</td>"
-        f"<td>{html.escape(rem.trigger_at)}</td>"
-        f"<td>{html.escape(rem.chat_id or '')}</td>"
-        f"<td>{html.escape(rem.persona_key or '')}</td></tr>"
-        for rem in reminders
-    )
-    style_rows = "".join(
-        "<tr>"
-        f"<td>{html.escape(row['chat_id'])}</td>"
-        f"<td>{html.escape(str(row.get('display_name') or ''))}</td>"
-        f"<td>{html.escape(str(row.get('active_arm') or 'balanced'))}</td>"
-        f"<td>{html.escape(style_trials_cell(row.get('arms', {})))}</td>"
-        f"<td>{html.escape(style_signals_cell(row.get('signals', {})))}</td>"
-        f"<td>{html.escape(str(row.get('updated_at') or ''))}</td>"
-        "</tr>"
-        for row in style["chats"]
-    )
-    aggregate_rows = "".join(
-        "<tr>"
-        f"<td>{html.escape(arm)}</td>"
-        f"<td>{stats['trials']}</td>"
-        f"<td>{stats['successes']}</td>"
-        f"<td>{stats['success_rate']}</td>"
-        "</tr>"
-        for arm, stats in style["aggregate"].items()
-    )
-    reasoning_rows = "".join(
-        "<tr>"
-        f"<td><button data-act=\"reasoning\" data-chat=\"{html.escape(str(row['chat_id']))}\">"
-        f"{html.escape(str(row['chat_id']))}</button></td>"
-        f"<td>{html.escape(str(row.get('display_name') or ''))}</td>"
-        f"<td>{html.escape(str(row.get('chat_type') or ''))}</td>"
-        f"<td>{int(row.get('entries', 0))}</td>"
-        f"<td>{html.escape(str(row.get('last_decision_kind') or ''))}</td>"
-        f"<td>{html.escape(str(row.get('updated_at') or ''))}</td>"
-        "</tr>"
-        for row in reasoning_chats
-    )
-    stats_html = "".join(
-        f"<dt>{html.escape(str(key))}</dt><dd>{html.escape(str(value))}</dd>"
-        for key, value in stats_payload.items()
-    )
-    return f"""<!doctype html>
-<html lang=\"en\">
-<head>
-<meta charset=\"utf-8\">
-<title>ProtoAGI admin</title>
-<style>
- body {{ font-family: ui-sans-serif, system-ui, sans-serif; margin: 24px; max-width: 1100px; color:#222; }}
- h1, h2 {{ font-weight: 600; }}
- dl {{ display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; }}
- dt {{ color: #666; }}
- table {{ border-collapse: collapse; width: 100%; margin-bottom: 16px; }}
- th, td {{ text-align: left; padding: 6px 10px; border-bottom: 1px solid #eee; vertical-align: top; font-size: 14px; }}
- th {{ background: #f8f8f8; }}
- .pill {{ display: inline-block; padding: 1px 8px; border-radius: 12px; background:#eef; font-size: 12px; }}
- a {{ color: #2255cc; }}
- details {{ margin: 12px 0; }}
- tr.pinned {{ background: #fff8e1; }}
- .actions button {{ margin-right: 4px; padding: 2px 8px; cursor: pointer; }}
- .actions button.danger {{ color: #b00020; }}
- .imp {{ width: 64px; }}
- .txt {{ width: 100%; min-width: 280px; font-family: inherit; font-size: 13px; }}
- .flash {{ position: fixed; top: 12px; right: 12px; padding: 8px 14px;
-          background: #2e7d32; color: white; border-radius: 4px;
-          opacity: 0; transition: opacity .2s; }}
- .flash.show {{ opacity: 1; }}
- .flash.error {{ background: #b00020; }}
- .controls {{ display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 8px 0 12px; }}
- .controls label {{ color: #555; font-size: 13px; }}
- .controls select, .controls input {{ margin-left: 4px; padding: 3px 6px; }}
-</style>
-</head>
-<body>
-<h1>ProtoAGI <span class=\"pill\">admin</span></h1>
-<p>JSON endpoints: <a href=\"/api/stats\">/api/stats</a>,
-<a href=\"/api/memories\">/api/memories</a>,
-<a href=\"/api/reminders\">/api/reminders</a>,
-<a href=\"/api/chats\">/api/chats</a>,
-<a href=\"/api/style\">/api/style</a>,
-<a href=\"/api/memory-graph\">/api/memory-graph</a>.</p>
-<h2>Stats</h2>
-<dl>{stats_html}</dl>
-<h2>Recent memory (top 20)</h2>
-<table><thead><tr><th>id</th><th>kind</th><th>scope</th><th>imp</th><th>text</th><th>created</th><th></th></tr></thead>
-<tbody id=\"memory-tbody\">{rows_html}</tbody></table>
-<h2>Pending reminders</h2>
-<table><thead><tr><th>id</th><th>text</th><th>trigger</th><th>chat</th><th>persona</th></tr></thead>
-<tbody>{reminder_rows or '<tr><td colspan=5>—</td></tr>'}</tbody></table>
-<h2>Telegram chats</h2>
-<table><thead><tr><th>chat_id</th><th>name</th><th>type</th><th>last user msg</th><th>last bot msg</th></tr></thead>
-<tbody>{chat_rows or '<tr><td colspan=5>—</td></tr>'}</tbody></table>
-<h2>Style</h2>
-<table><thead><tr><th>arm</th><th>trials</th><th>successes</th><th>rate</th></tr></thead>
-<tbody>{aggregate_rows}</tbody></table>
-<table><thead><tr><th>chat_id</th><th>name</th><th>active arm</th><th>trials</th><th>signals</th><th>updated</th></tr></thead>
-<tbody id=\"style-tbody\">{style_rows or '<tr><td colspan=6>—</td></tr>'}</tbody></table>
-<h2>Reasoning capture</h2>
-<p style=\"color:#666;font-size:13px;margin:0 0 8px\">
-Opt-in chain-of-thought log. Set <code>PROTOAGI_CAPTURE_REASONING=1</code> to populate it.
-</p>
-<table><thead><tr><th>chat_id</th><th>name</th><th>type</th><th>entries</th><th>last kind</th><th>updated</th></tr></thead>
-<tbody id=\"reasoning-tbody\">{reasoning_rows or '<tr><td colspan=6>—</td></tr>'}</tbody></table>
-<details id=\"reasoning-detail\" style=\"display:none\"><summary id=\"reasoning-summary\">Reasoning entries</summary>
-<div id=\"reasoning-body\"></div></details>
-<h2>Memory graph</h2>
-<div class=\"controls\">
-  <label>scope
-    <select id=\"graph-scope\">
-      <option value=\"\">all</option>
-      <option value=\"global\">global</option>
-      <option value=\"user\">user</option>
-      <option value=\"chat\">chat</option>
-      <option value=\"persona\">persona</option>
-    </select>
-  </label>
-  <label>persona <input id=\"graph-persona\" type=\"text\" placeholder=\"mykola\"></label>
-  <label>limit
-    <select id=\"graph-limit\">
-      <option>50</option>
-      <option selected>80</option>
-      <option>120</option>
-      <option>200</option>
-      <option>500</option>
-    </select>
-  </label>
-</div>
-<canvas id=\"memory-graph\" width=\"1040\" height=\"420\" style=\"width:100%;height:420px;border:1px solid #eee;background:#fff\"></canvas>
-<div id=\"flash\" class=\"flash\"></div>
-<script>
-const flash = (msg, isError) => {{
-  const el = document.getElementById('flash');
-  el.textContent = msg;
-  el.classList.toggle('error', !!isError);
-  el.classList.add('show');
-  setTimeout(() => el.classList.remove('show'), 1800);
-}};
-const post = async (path, body) => {{
-  const resp = await fetch(path, {{
-    method: 'POST',
-    headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify(body || {{}}),
-  }});
-  if (!resp.ok) throw new Error(await resp.text());
-  return resp.json();
-}};
-document.getElementById('memory-tbody').addEventListener('click', async (event) => {{
-  const button = event.target.closest('button[data-act]');
-  if (!button) return;
-  const tr = button.closest('tr');
-  const id = tr.dataset.id;
-  try {{
-    if (button.dataset.act === 'save') {{
-      const text = tr.querySelector('.txt').value;
-      const importance = parseFloat(tr.querySelector('.imp').value);
-      await post(`/api/memories/${{id}}/edit`, {{text, importance}});
-      flash('saved');
-    }} else if (button.dataset.act === 'pin') {{
-      const result = await post(`/api/memories/${{id}}/pin`, {{}});
-      tr.classList.toggle('pinned', result.pinned);
-      button.textContent = result.pinned ? 'unpin' : 'pin';
-      flash(result.pinned ? 'pinned' : 'unpinned');
-    }} else if (button.dataset.act === 'delete') {{
-      if (!confirm('Delete this memory?')) return;
-      await post(`/api/memories/${{id}}/delete`, {{}});
-      tr.remove();
-      flash('deleted');
-    }}
-  }} catch (err) {{
-    flash(err.message || 'error', true);
-  }}
-}});
-const escapeHtml = (text) => String(text).replace(/[&<>"']/g, ch => ({{
-  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-}}[ch]));
-const renderReasoningEntries = (entries, chatId) => {{
-  const detail = document.getElementById('reasoning-detail');
-  const body = document.getElementById('reasoning-body');
-  document.getElementById('reasoning-summary').textContent = `Reasoning entries — chat ${{chatId}} (${{entries.length}})`;
-  if (!entries.length) {{
-    body.innerHTML = '<p style="color:#666">no captured reasoning for this chat</p>';
-  }} else {{
-    body.innerHTML = entries.map(entry => `
-      <div style="margin:8px 0;padding:8px 10px;border:1px solid #eee;border-radius:4px">
-        <div style="font-size:12px;color:#666">
-          ${{escapeHtml(entry.captured_at || '')}} · ${{escapeHtml(entry.decision_kind || '')}}
-          · message_id ${{escapeHtml(entry.message_id ?? '—')}}
-        </div>
-        <div style="font-size:13px;margin-top:4px"><b>incoming:</b> ${{escapeHtml(entry.incoming_text || '')}}</div>
-        <div style="font-size:13px;margin-top:4px"><b>reply:</b> ${{escapeHtml(entry.reply_excerpt || '—')}}</div>
-        <pre style="white-space:pre-wrap;background:#fafafa;padding:6px;margin:6px 0 0;font-size:12px;border-radius:3px">${{escapeHtml(entry.reasoning || '')}}</pre>
-      </div>
-    `).join('');
-  }}
-  detail.style.display = 'block';
-  detail.open = true;
-}};
-const reasoningTbody = document.getElementById('reasoning-tbody');
-if (reasoningTbody) {{
-  reasoningTbody.addEventListener('click', async (event) => {{
-    const button = event.target.closest('button[data-act="reasoning"]');
-    if (!button) return;
-    const chatId = button.dataset.chat;
-    try {{
-      const entries = await fetch(`/api/reasoning/${{encodeURIComponent(chatId)}}`).then(r => r.json());
-      renderReasoningEntries(entries, chatId);
-    }} catch (err) {{
-      flash(err.message || 'error', true);
-    }}
-  }});
-}}
-const drawGraph = async () => {{
-  const canvas = document.getElementById('memory-graph');
-  const ctx = canvas.getContext('2d');
-  const params = new URLSearchParams();
-  const scope = document.getElementById('graph-scope').value;
-  const persona = document.getElementById('graph-persona').value.trim();
-  const limit = document.getElementById('graph-limit').value;
-  if (scope) params.set('scope', scope);
-  if (persona) params.set('persona', persona);
-  params.set('limit', limit || '80');
-  const graph = await fetch(`/api/memory-graph?${{params.toString()}}`).then(r => r.json());
-  const nodes = graph.nodes.map((node, index) => ({{
-    ...node,
-    x: canvas.width / 2 + Math.cos(index) * 160,
-    y: canvas.height / 2 + Math.sin(index * 1.7) * 130,
-    vx: 0,
-    vy: 0,
-  }}));
-  const byId = Object.fromEntries(nodes.map(node => [node.id, node]));
-  const edges = graph.edges.filter(edge => byId[edge.source] && byId[edge.target]);
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  if (!nodes.length) {{
-    ctx.fillStyle = '#666';
-    ctx.font = '13px ui-sans-serif, system-ui, sans-serif';
-    ctx.fillText('no graph data for current filters', 20, 32);
-    return;
-  }}
-  for (let step = 0; step < 160; step++) {{
-    for (let i = 0; i < nodes.length; i++) {{
-      for (let j = i + 1; j < nodes.length; j++) {{
-        const a = nodes[i], b = nodes[j];
-        const dx = a.x - b.x, dy = a.y - b.y;
-        const dist2 = Math.max(80, dx * dx + dy * dy);
-        const force = 1600 / dist2;
-        a.vx += dx * force; a.vy += dy * force;
-        b.vx -= dx * force; b.vy -= dy * force;
-      }}
-    }}
-    for (const edge of edges) {{
-      const a = byId[edge.source], b = byId[edge.target];
-      const dx = b.x - a.x, dy = b.y - a.y;
-      a.vx += dx * 0.002; a.vy += dy * 0.002;
-      b.vx -= dx * 0.002; b.vy -= dy * 0.002;
-    }}
-    for (const node of nodes) {{
-      node.vx *= 0.82; node.vy *= 0.82;
-      node.x = Math.max(18, Math.min(canvas.width - 18, node.x + node.vx));
-      node.y = Math.max(18, Math.min(canvas.height - 18, node.y + node.vy));
-    }}
-  }}
-  ctx.font = '12px ui-sans-serif, system-ui, sans-serif';
-  for (const edge of edges) {{
-    const a = byId[edge.source], b = byId[edge.target];
-    ctx.strokeStyle = edge.kind === 'tagged' ? '#d8d8d8' : '#8aa0d8';
-    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
-  }}
-  for (const node of nodes) {{
-    const isTag = node.kind === 'tag';
-    ctx.fillStyle = isTag ? '#f3f5f7' : '#e7f0ff';
-    ctx.strokeStyle = isTag ? '#adb5bd' : '#5b7cba';
-    ctx.beginPath(); ctx.arc(node.x, node.y, isTag ? 8 : 12, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-    ctx.fillStyle = '#202124';
-    ctx.fillText(String(node.label).slice(0, 24), node.x + 14, node.y + 4);
-  }}
-}};
-for (const id of ['graph-scope', 'graph-persona', 'graph-limit']) {{
-  document.getElementById(id).addEventListener('change', () => drawGraph().catch(() => {{}}));
-}}
-document.getElementById('graph-persona').addEventListener('input', () => drawGraph().catch(() => {{}}));
-drawGraph().catch(() => {{}});
-</script>
-</body></html>
-"""
+def _send_error_json(
+    handler: BaseHTTPRequestHandler,
+    status: int,
+    message: str,
+) -> None:
+    _json_response(handler, {"error": message}, status=status)
+
+
+def _serve_static(handler: BaseHTTPRequestHandler, request_path: str) -> bool:
+    """Try to serve a file from the bundled SPA. Returns ``True`` if handled.
+
+    For anything that isn't a real file but isn't under ``/api/``, we
+    return ``index.html`` so client-side routing works. When the build
+    hasn't been produced yet we return ``False`` so the caller can fall
+    back to a 404 (or to the legacy in-tree dashboard, if any).
+    """
+
+    if _STATIC_ROOT is None:
+        return False
+    clean = request_path.lstrip("/")
+    if clean.startswith("api/") or clean == "api":
+        return False
+    target = _STATIC_ROOT / clean if clean else _STATIC_ROOT / "index.html"
+    if target.is_dir():
+        target = target / "index.html"
+    if not target.exists() or not target.is_file():
+        # SPA fallback so React Router can render unknown routes.
+        target = _STATIC_ROOT / "index.html"
+        if not target.exists():
+            return False
+    mime, _ = mimetypes.guess_type(str(target))
+    data = target.read_bytes()
+    _bytes_response(handler, data, content_type=mime or "application/octet-stream")
+    return True
 
 
 def make_handler(memory: MemoryStore, service: MemoryService) -> type[BaseHTTPRequestHandler]:
     class AdminHandler(BaseHTTPRequestHandler):
-        server_version = "ProtoAGIAdmin/0.1"
+        server_version = "ProtoAGIAdmin/0.2"
 
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
-            # Quiet by default; admin server is intended for local dev.
             return None
 
-        def do_GET(self) -> None:  # noqa: N802 - http.server interface
+        def do_OPTIONS(self) -> None:  # noqa: N802
+            self.send_response(204)
+            _cors_headers(self)
+            self.end_headers()
+
+        def do_GET(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
-            if parsed.path in ("/", "/index.html"):
-                _html_response(self, _dashboard_html(memory))
+            path = parsed.path
+            query = parse_qs(parsed.query)
+
+            # JSON endpoints first; static serving is the fallback so
+            # /api/* never hits the file system.
+            if path == "/api/health":
+                _json_response(self, service.memory_health(
+                    persona_key=str(query.get("persona", [""])[0]).strip() or None
+                ))
                 return
-            if parsed.path == "/api/stats":
-                _json_response(self, _stats(memory))
+            if path == "/api/stats":
+                _json_response(self, stats(memory))
                 return
-            if parsed.path == "/api/style":
+            if path == "/api/style":
                 _json_response(self, style_report(memory))
                 return
-            if parsed.path == "/api/memories":
-                params = parse_qs(parsed.query)
-                limit = int(params.get("limit", ["50"])[0])
-                items = memory.list_memories(limit=limit)
-                _json_response(self, [serialize_memory(item) for item in items])
+            if path == "/api/memories":
+                _json_response(self, _query_memories(memory, query))
                 return
-            if parsed.path == "/api/reasoning":
+            if path == "/api/goals":
+                _json_response(self, list_goals(
+                    memory,
+                    status=str(query.get("status", ["open"])[0]) or "open",
+                    persona_key=str(query.get("persona", [""])[0]).strip() or None,
+                    limit=_query_int(query, "limit", 100),
+                ))
+                return
+            if path == "/api/conflicts":
+                _json_response(self, list_conflicts(
+                    memory,
+                    status=str(query.get("status", ["unresolved"])[0]) or "unresolved",
+                    persona_key=str(query.get("persona", [""])[0]).strip() or None,
+                    limit=_query_int(query, "limit", 100),
+                ))
+                return
+            if path == "/api/user_state":
+                _json_response(self, list_user_states(
+                    memory,
+                    persona_key=str(query.get("persona", [""])[0]).strip() or None,
+                ))
+                return
+            if path == "/api/reasoning":
                 _json_response(self, reasoning_overview(memory))
                 return
-            if parsed.path.startswith("/api/reasoning/"):
-                chat_id = parsed.path[len("/api/reasoning/") :].strip()
+            if path.startswith("/api/reasoning/"):
+                chat_id = path[len("/api/reasoning/") :].strip()
                 if not chat_id:
-                    self.send_error(400, "missing chat_id")
+                    _send_error_json(self, 400, "missing chat_id")
                     return
-                params = parse_qs(parsed.query)
-                limit = int(params.get("limit", ["20"])[0])
-                _json_response(self, reasoning_entries(memory, chat_id, limit=limit))
+                _json_response(self, reasoning_entries(
+                    memory, chat_id, limit=_query_int(query, "limit", 20)
+                ))
                 return
-            if parsed.path == "/api/memory-graph":
-                params = parse_qs(parsed.query)
-                limit = int(params.get("limit", ["120"])[0])
-                scope = str(params.get("scope", [""])[0]).strip() or None
-                persona = str(params.get("persona", [""])[0]).strip() or None
-                _json_response(
-                    self,
-                    memory_graph(
-                        memory,
-                        limit=limit,
-                        scope=scope,
-                        persona_key=persona,
-                    ),
-                )
+            if path == "/api/memory-graph":
+                _json_response(self, memory_graph(
+                    memory,
+                    limit=_query_int(query, "limit", 120),
+                    scope=str(query.get("scope", [""])[0]).strip() or None,
+                    persona_key=str(query.get("persona", [""])[0]).strip() or None,
+                ))
                 return
-            if parsed.path.startswith("/api/media/"):
-                media_id = parsed.path.split("/api/media/", 1)[1]
+            if path.startswith("/api/media/"):
+                media_id = path.split("/api/media/", 1)[1]
                 item = memory.get_media_blob(media_id)
                 if item is None:
-                    self.send_error(404, "media not found")
+                    _send_error_json(self, 404, "media not found")
                     return
                 _bytes_response(self, item.bytes, content_type=item.mime)
                 return
-            if parsed.path == "/api/reminders":
+            if path == "/api/reminders":
                 items = memory.due_reminders("9999-12-31T23:59:59+00:00", limit=200)
-                _json_response(
-                    self,
-                    [
-                        {
-                            "id": rem.id,
-                            "text": rem.text,
-                            "trigger_at": rem.trigger_at,
-                            "chat_id": rem.chat_id,
-                            "user_id": rem.user_id,
-                            "persona_key": rem.persona_key,
-                            "status": rem.status,
-                            "created_at": rem.created_at,
-                        }
-                        for rem in items
-                    ],
-                )
+                _json_response(self, [
+                    {
+                        "id": rem.id,
+                        "text": rem.text,
+                        "trigger_at": rem.trigger_at,
+                        "chat_id": rem.chat_id,
+                        "user_id": rem.user_id,
+                        "persona_key": rem.persona_key,
+                        "status": rem.status,
+                        "created_at": rem.created_at,
+                    }
+                    for rem in items
+                ])
                 return
-            if parsed.path == "/api/chats":
+            if path == "/api/chats":
                 with memory.connect() as conn:
                     rows = conn.execute(
                         "SELECT chat_id, display_name, chat_type, reply_mode, "
                         "proactive_enabled, last_seen_at, last_user_message_at, "
-                        "last_bot_message_at FROM telegram_chats ORDER BY last_seen_at DESC"
+                        "last_bot_message_at FROM telegram_chats "
+                        "ORDER BY last_seen_at DESC"
                     ).fetchall()
-                _json_response(
-                    self,
-                    [
-                        {
-                            "chat_id": row["chat_id"],
-                            "display_name": row["display_name"],
-                            "chat_type": row["chat_type"],
-                            "reply_mode": row["reply_mode"],
-                            "proactive_enabled": bool(row["proactive_enabled"]),
-                            "last_seen_at": row["last_seen_at"],
-                            "last_user_message_at": row["last_user_message_at"],
-                            "last_bot_message_at": row["last_bot_message_at"],
-                        }
-                        for row in rows
-                    ],
-                )
+                _json_response(self, [
+                    {
+                        "chat_id": row["chat_id"],
+                        "display_name": row["display_name"],
+                        "chat_type": row["chat_type"],
+                        "reply_mode": row["reply_mode"],
+                        "proactive_enabled": bool(row["proactive_enabled"]),
+                        "last_seen_at": row["last_seen_at"],
+                        "last_user_message_at": row["last_user_message_at"],
+                        "last_bot_message_at": row["last_bot_message_at"],
+                    }
+                    for row in rows
+                ])
                 return
-            self.send_error(404, "not found")
+
+            # /api/* with no match → JSON 404 (keeps the SPA fallback
+            # from masking a typo in the front-end's fetch URL).
+            if path.startswith("/api/"):
+                _send_error_json(self, 404, "unknown api endpoint")
+                return
+
+            if _serve_static(self, path):
+                return
+            _send_error_json(self, 404, "not found")
 
         def do_POST(self) -> None:  # noqa: N802
             parsed = urlparse(self.path)
+            path = parsed.path
             length = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(length) if length else b""
             try:
                 payload = json.loads(raw.decode("utf-8")) if raw else {}
             except json.JSONDecodeError:
-                self.send_error(400, "invalid json")
+                _send_error_json(self, 400, "invalid json")
                 return
 
-            if parsed.path == "/api/memories/prune":
+            if path == "/api/memories/prune":
                 result = service.prune(
                     scope=payload.get("scope"),
                     persona_key=payload.get("persona_key"),
@@ -539,7 +297,7 @@ def make_handler(memory: MemoryStore, service: MemoryService) -> type[BaseHTTPRe
                 _json_response(self, result)
                 return
 
-            if parsed.path == "/api/memories/prune/preview":
+            if path == "/api/memories/prune/preview":
                 result = service.prune(
                     scope=payload.get("scope"),
                     persona_key=payload.get("persona_key"),
@@ -552,42 +310,41 @@ def make_handler(memory: MemoryStore, service: MemoryService) -> type[BaseHTTPRe
                 _json_response(self, result)
                 return
 
-            if parsed.path.startswith("/api/memories/") and parsed.path.endswith("/delete"):
+            if path.startswith("/api/memories/") and path.endswith("/delete"):
                 try:
-                    memory_id = int(parsed.path.split("/")[-2])
+                    memory_id = int(path.split("/")[-2])
                 except ValueError:
-                    self.send_error(400, "invalid id")
+                    _send_error_json(self, 400, "invalid id")
                     return
                 memory.delete_memory(memory_id)
                 _json_response(self, {"deleted": memory_id})
                 return
 
-            if parsed.path.startswith("/api/memories/") and parsed.path.endswith("/pin"):
+            if path.startswith("/api/memories/") and path.endswith("/pin"):
                 try:
-                    memory_id = int(parsed.path.split("/")[-2])
+                    memory_id = int(path.split("/")[-2])
                 except ValueError:
-                    self.send_error(400, "invalid id")
+                    _send_error_json(self, 400, "invalid id")
                     return
-                # Toggle by default; honor an explicit boolean if supplied.
                 pinned_value = payload.get("pinned")
                 if pinned_value is None:
                     current = memory.get_memory(memory_id)
                     if current is None:
-                        self.send_error(404, "memory not found")
+                        _send_error_json(self, 404, "memory not found")
                         return
                     pinned_value = not current.pinned
                 updated = memory.set_pinned(memory_id, bool(pinned_value))
                 if updated is None:
-                    self.send_error(404, "memory not found")
+                    _send_error_json(self, 404, "memory not found")
                     return
                 _json_response(self, {"id": memory_id, "pinned": updated.pinned})
                 return
 
-            if parsed.path.startswith("/api/memories/") and parsed.path.endswith("/edit"):
+            if path.startswith("/api/memories/") and path.endswith("/edit"):
                 try:
-                    memory_id = int(parsed.path.split("/")[-2])
+                    memory_id = int(path.split("/")[-2])
                 except ValueError:
-                    self.send_error(400, "invalid id")
+                    _send_error_json(self, 400, "invalid id")
                     return
                 tags = payload.get("tags")
                 try:
@@ -602,15 +359,15 @@ def make_handler(memory: MemoryStore, service: MemoryService) -> type[BaseHTTPRe
                         tags=tags if isinstance(tags, list) else None,
                     )
                 except ValueError as exc:
-                    self.send_error(400, str(exc))
+                    _send_error_json(self, 400, str(exc))
                     return
                 if updated is None:
-                    self.send_error(404, "memory not found")
+                    _send_error_json(self, 404, "memory not found")
                     return
                 _json_response(self, serialize_memory(updated))
                 return
 
-            if parsed.path == "/api/memories/consolidate":
+            if path == "/api/memories/consolidate":
                 result = service.consolidate(
                     scope=payload.get("scope"),
                     persona_key=payload.get("persona_key"),
@@ -621,7 +378,7 @@ def make_handler(memory: MemoryStore, service: MemoryService) -> type[BaseHTTPRe
                 _json_response(self, result if isinstance(result, dict) else {"merged": result})
                 return
 
-            if parsed.path == "/api/memories/consolidate/preview":
+            if path == "/api/memories/consolidate/preview":
                 result = service.consolidate(
                     scope=payload.get("scope"),
                     persona_key=payload.get("persona_key"),
@@ -632,9 +389,126 @@ def make_handler(memory: MemoryStore, service: MemoryService) -> type[BaseHTTPRe
                 _json_response(self, result)
                 return
 
-            self.send_error(404, "not found")
+            # ---------- Goals ----------
+            if path.startswith("/api/goals/") and path.endswith("/update"):
+                try:
+                    goal_id = int(path.split("/")[-2])
+                except ValueError:
+                    _send_error_json(self, 400, "invalid id")
+                    return
+                kwargs: dict[str, Any] = {}
+                if "status" in payload:
+                    kwargs["status"] = str(payload["status"]).strip()
+                if "text" in payload and payload["text"] is not None:
+                    kwargs["text"] = str(payload["text"])
+                if "priority" in payload and payload["priority"] is not None:
+                    kwargs["priority"] = float(payload["priority"])
+                if "due_at" in payload:
+                    raw_due = payload["due_at"]
+                    kwargs["due_at"] = (
+                        str(raw_due) if isinstance(raw_due, str) and raw_due.strip() else None
+                    )
+                try:
+                    updated = memory.update_goal(goal_id, **kwargs)
+                except ValueError as exc:
+                    _send_error_json(self, 400, str(exc))
+                    return
+                if updated is None:
+                    _send_error_json(self, 404, "goal not found")
+                    return
+                _json_response(self, serialize_goal(updated))
+                return
+
+            # ---------- Conflicts ----------
+            if path.startswith("/api/conflicts/") and path.endswith("/resolve"):
+                try:
+                    conflict_id = int(path.split("/")[-2])
+                except ValueError:
+                    _send_error_json(self, 400, "invalid id")
+                    return
+                status_value = str(payload.get("status") or "").strip()
+                if not status_value:
+                    _send_error_json(self, 400, "status required")
+                    return
+                winner_raw = payload.get("winner_id")
+                winner_id = int(winner_raw) if isinstance(winner_raw, int) else None
+                try:
+                    updated = memory.resolve_conflict(
+                        conflict_id,
+                        status=status_value,
+                        winner_id=winner_id,
+                    )
+                except ValueError as exc:
+                    _send_error_json(self, 400, str(exc))
+                    return
+                if updated is None:
+                    _send_error_json(self, 404, "conflict not found")
+                    return
+                # If the operator superseded one side, mirror that in
+                # memory_items so the loser stops appearing in recall.
+                if status_value == "superseded" and winner_id is not None:
+                    loser = (
+                        updated.memory_b_id if winner_id == updated.memory_a_id
+                        else updated.memory_a_id
+                    )
+                    memory.supersede(loser, winner_id)
+                _json_response(self, {
+                    "id": updated.id,
+                    "status": updated.resolution_status,
+                    "winner_id": updated.resolution_winner_id,
+                    "resolved_at": updated.resolved_at,
+                })
+                return
+
+            _send_error_json(self, 404, "unknown endpoint")
 
     return AdminHandler
+
+
+def _query_int(query: dict[str, list[str]], key: str, default: int) -> int:
+    try:
+        raw = query.get(key, [str(default)])[0]
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _query_memories(memory: MemoryStore, query: dict[str, list[str]]) -> list[dict[str, Any]]:
+    limit = _query_int(query, "limit", 100)
+    kind = str(query.get("kind", [""])[0]).strip() or None
+    scope = str(query.get("scope", [""])[0]).strip() or None
+    persona = str(query.get("persona", [""])[0]).strip() or None
+    search = str(query.get("search", [""])[0]).strip()
+    pinned_raw = str(query.get("pinned", [""])[0]).strip().lower()
+    pinned_filter: bool | None = None
+    if pinned_raw in ("1", "true", "yes"):
+        pinned_filter = True
+    elif pinned_raw in ("0", "false", "no"):
+        pinned_filter = False
+
+    if search:
+        items = memory.fts_candidates(search, limit=limit * 2)
+    else:
+        items = memory.list_memories(
+            scope=scope,
+            persona_key=persona,
+            kind=kind,
+            limit=limit * 2,
+        )
+    out: list[dict[str, Any]] = []
+    for item in items:
+        if kind and item.kind != kind:
+            continue
+        if scope and item.scope != scope:
+            continue
+        if persona and item.persona_key != persona:
+            continue
+        if pinned_filter is not None and bool(item.pinned) != pinned_filter:
+            continue
+        out.append(serialize_memory(item))
+        if len(out) >= limit:
+            break
+    return out
 
 
 def serve(

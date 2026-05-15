@@ -238,17 +238,25 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         return me
 
     def _warn_about_unreachable_endpoints(self) -> None:
-        """Print a one-line warning when an optional helper endpoint is configured
-        but does not respond. We do not want to abort startup — the features
-        gracefully degrade — but the operator should know before someone sends
-        a voice message and gets nothing back. Disable by setting
-        ``PROTOAGI_BOOTSTRAP_PROBE=0`` (used in unit tests)."""
+        """Quick socket probe of optional helper endpoints.
+
+        We do not want to abort startup — features degrade gracefully —
+        but the operator should know before someone sends a voice
+        message and gets nothing back. Probing with HTTP timed out on
+        Windows when the port was closed (somewhere between 1-3 s per
+        endpoint waiting for a SYN that never came back); a raw socket
+        ``connect_ex`` gives an immediate ``connection refused`` so the
+        bootstrap stays snappy. Disable entirely with
+        ``PROTOAGI_BOOTSTRAP_PROBE=0`` (used in unit tests).
+        """
 
         import os
-        from urllib.error import URLError
-        from urllib.request import urlopen
+        import socket
+        from urllib.parse import urlparse
 
-        if os.environ.get("PROTOAGI_BOOTSTRAP_PROBE", "1").strip().lower() in ("0", "false", "no", "off"):
+        if os.environ.get("PROTOAGI_BOOTSTRAP_PROBE", "1").strip().lower() in (
+            "0", "false", "no", "off",
+        ):
             return
 
         targets: list[tuple[str, str, str]] = []
@@ -259,16 +267,22 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             targets.append(("voice", cfg.voice_base_url, cfg.voice_model))
         if cfg.tts_enabled and cfg.tts_base_url and cfg.tts_model:
             targets.append(("tts", cfg.tts_base_url, cfg.tts_model))
+
         for label, base_url, model in targets:
-            probe_url = base_url.rstrip("/") + "/models"
-            try:
-                with urlopen(probe_url, timeout=1):
-                    pass
-            except (URLError, OSError) as exc:
+            parsed = urlparse(base_url)
+            host = parsed.hostname or "127.0.0.1"
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            reachable = False
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(0.3)
+                try:
+                    reachable = sock.connect_ex((host, port)) == 0
+                except OSError:
+                    reachable = False
+            if not reachable:
                 print(
-                    f"[bootstrap] {label} endpoint configured ({model} @ {base_url}) "
-                    f"but probe failed: {exc}. Feature will silently degrade until "
-                    f"the server is reachable.",
+                    f"[bootstrap] {label} server not running at {base_url} "
+                    f"(model={model}). Feature disabled until you start it.",
                     flush=True,
                 )
 

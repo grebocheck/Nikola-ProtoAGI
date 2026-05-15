@@ -1,103 +1,40 @@
+"""ProtoAGI CLI — minimal surface.
+
+Only two commands are exposed:
+
+- ``protoagi telegram`` — run the Telegram conversation bot.
+- ``protoagi admin``    — run the local admin web UI.
+
+Everything else (bench / chat / serve / memory-* / backup / federation /
+init-config) was retired together with the experimental loops that
+produced them. Use the admin UI for memory introspection and the
+PowerShell scripts under ``scripts/`` for server lifecycle.
+"""
+
 from __future__ import annotations
 
 import argparse
-import json
-import os
-from pathlib import Path
 import sys
-from typing import Any
+from pathlib import Path
 
 from .admin_panel.server import serve as serve_admin
-from .agent_tools.core import default_registry
-from .agent import ProtoAgent
-from .config import AgentConfig, DEFAULT_CONFIG_PATH, DEFAULT_MODEL_PATH, LlamaServerProfile, PROJECT_ROOT
-from .evals.bench import bench_endpoint, endpoint_results_to_json, run_llama_bench
-from .evals.memory import DEFAULT_CORPUS_PATH, run_eval
-from .embedding import EmbeddingClient, EmbeddingConfig
-from .storage.backup import BackupError, backup_database, default_backup_path, restore_database
-from .storage.federation import (
-    MemoryFederationError,
-    export_memory_bundle,
-    import_memory_bundle,
-)
+from .config import AgentConfig
+from .openai_compat import OpenAICompatError
 from .storage.memory import MemoryStore
 from .storage.service import MemoryService
-from .openai_compat import OpenAICompatibleClient, OpenAICompatError
-from .runtime import run_server_foreground, status_report
-from .telegram.json_io import DECISION_JSON_SCHEMA, extract_json_object
-from .telegram.tool_runner import TelegramToolRunner
-from .telegram import AsyncBotRunner, BotRunner, TelegramApiError, TelegramConfig, build_nikola_bot, is_telegram_polling_conflict
+from .telegram import (
+    AsyncBotRunner,
+    BotRunner,
+    TelegramApiError,
+    TelegramConfig,
+    build_nikola_bot,
+    is_telegram_polling_conflict,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="protoagi", description="Local ProtoAGI experiment CLI")
+    parser = argparse.ArgumentParser(prog="protoagi")
     sub = parser.add_subparsers(dest="command", required=True)
-
-    status = sub.add_parser("status", help="Show runtime and server status")
-    status.add_argument("--base-url", default=None)
-
-    serve = sub.add_parser("serve", help="Run llama-server in the foreground")
-    add_server_args(serve)
-
-    chat = sub.add_parser("chat", help="Run one prompt or an interactive agent chat")
-    chat.add_argument("--prompt", "-p", default=None)
-    chat.add_argument("--thread-id", default=None)
-    chat.add_argument("--max-steps", type=int, default=8)
-    chat.add_argument("--base-url", default=None)
-    chat.add_argument("--model", default=None)
-    chat.add_argument("--allow-write", action="store_true")
-    chat.add_argument("--deny-write", action="store_true")
-    chat.add_argument("--allow-shell", action="store_true")
-    chat.add_argument("--allow-unsafe-shell", action="store_true")
-    chat.add_argument("--max-tokens", type=int, default=None)
-    chat.add_argument("--temperature", type=float, default=None)
-    chat.add_argument("--top-p", type=float, default=None)
-    chat.add_argument(
-        "--stream",
-        action="store_true",
-        help="Stream a one-off plain reply (no tools). Useful for quick sanity checks.",
-    )
-
-    bench = sub.add_parser("bench", help="Benchmark the running OpenAI-compatible endpoint")
-    bench.add_argument("--prompt", default="In three bullet points, explain what makes a good local agent.")
-    bench.add_argument("--rounds", type=int, default=3)
-    bench.add_argument("--max-tokens", type=int, default=256)
-    bench.add_argument("--base-url", default=None)
-    bench.add_argument("--model", default=None)
-
-    bench_tools = sub.add_parser(
-        "bench-tools",
-        help="Measure whether tools+response_format emits tool_calls or tool_request.",
-    )
-    bench_tools.add_argument(
-        "--prompt",
-        default="Use the recall tool to find what you remember about coffee.",
-    )
-    bench_tools.add_argument("--rounds", type=int, default=3)
-    bench_tools.add_argument("--max-tokens", type=int, default=512)
-    bench_tools.add_argument("--base-url", default=None)
-    bench_tools.add_argument("--model", default=None)
-    bench_tools.add_argument(
-        "--output",
-        default=None,
-        help="Write the full JSON report to this path (default: stdout only).",
-    )
-    bench_tools.add_argument(
-        "--summary",
-        action="store_true",
-        help="Print only a one-line summary to stdout; useful with --output.",
-    )
-
-    llama_bench = sub.add_parser("bench-llama", help="Run llama-bench against the local GGUF")
-    add_server_args(llama_bench)
-    llama_bench.add_argument("--output", default="runs/llama-bench.jsonl")
-    llama_bench.add_argument("--n-cpu-moe", default="0,4,8,12")
-    llama_bench.add_argument("--prompt-tokens", type=int, default=512)
-    llama_bench.add_argument("--gen-tokens", type=int, default=128)
-    llama_bench.add_argument("--repetitions", type=int, default=2)
-
-    init = sub.add_parser("init-config", help="Create config/protoagi.json from defaults")
-    init.add_argument("--force", action="store_true")
 
     telegram = sub.add_parser("telegram", help="Run the Telegram conversation bot")
     telegram.add_argument("--token", default=None, help="Telegram bot token, defaults to TELEGRAM_BOT_TOKEN")
@@ -127,369 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     telegram.add_argument("--max-concurrent-updates", type=int, default=2)
 
-    memory_eval = sub.add_parser(
-        "memory-eval",
-        help="Run the memory recall benchmark against a fact corpus.",
-    )
-    memory_eval.add_argument("--corpus", default=str(DEFAULT_CORPUS_PATH))
-    memory_eval.add_argument("--k", default="1,3,5")
-    memory_eval.add_argument("--with-embeddings", action="store_true")
-    memory_eval.add_argument("--json", action="store_true", help="Print full JSON report.")
-
-    memory_stats = sub.add_parser("memory-stats", help="Print memory store counters.")
-    memory_stats.add_argument("--db", default=None)
-
-    memory_prune = sub.add_parser("memory-prune", help="Forget low-value memory items.")
-    memory_prune.add_argument("--db", default=None)
-    memory_prune.add_argument("--scope", default=None)
-    memory_prune.add_argument("--persona", default=None)
-    memory_prune.add_argument("--score-threshold", type=float, default=0.12)
-    memory_prune.add_argument("--keep-newer-than-days", type=float, default=30.0)
-    memory_prune.add_argument("--dry-run", action="store_true")
-    memory_prune.add_argument("--json", action="store_true", help="Print full JSON including dry-run plan.")
-
-    memory_consolidate = sub.add_parser(
-        "memory-consolidate",
-        help="Run the consolidation pass to supersede near-duplicate memories.",
-    )
-    memory_consolidate.add_argument("--db", default=None)
-    memory_consolidate.add_argument("--scope", default=None)
-    memory_consolidate.add_argument("--persona", default=None)
-    memory_consolidate.add_argument("--dry-run", action="store_true")
-    memory_consolidate.add_argument("--json", action="store_true", help="Print full JSON including dry-run plan.")
-
-    memory_rescope = sub.add_parser(
-        "memory-rescope",
-        help="One-shot migration for legacy Telegram memory scopes.",
-    )
-    memory_rescope.add_argument("--db", default=None)
-    memory_rescope.add_argument("--to", choices=["user"], required=True)
-    memory_rescope.add_argument("--dry-run", action="store_true")
-    memory_rescope.add_argument("--json", action="store_true")
-
-    memory_export = sub.add_parser(
-        "memory-export",
-        help="Export a signed curated memory bundle for federation.",
-    )
-    memory_export.add_argument("--db", default=None)
-    memory_export.add_argument("--to", required=True)
-    memory_export.add_argument("--secret", default=None)
-    memory_export.add_argument("--secret-env", default="PROTOAGI_FEDERATION_SECRET")
-    memory_export.add_argument("--source", default="protoagi")
-    memory_export.add_argument("--scope", default=None)
-    memory_export.add_argument("--tag", action="append", default=[])
-    memory_export.add_argument("--limit", type=int, default=1000)
-    memory_export.add_argument("--since", default=None, help="Only export items changed since this ISO timestamp; includes deletion tombstones.")
-
-    memory_import = sub.add_parser(
-        "memory-import",
-        help="Verify and import a signed federated memory bundle.",
-    )
-    memory_import.add_argument("--db", default=None)
-    memory_import.add_argument("--from", dest="from_path", required=True)
-    memory_import.add_argument("--secret", default=None)
-    memory_import.add_argument("--secret-env", default="PROTOAGI_FEDERATION_SECRET")
-
-    backup = sub.add_parser("backup", help="Create an online SQLite backup.")
-    backup.add_argument("--db", default=None)
-    backup.add_argument("--to", default=None, help="Target .sqlite3 path; defaults to data/backups/<timestamp>.sqlite3")
-
-    restore = sub.add_parser("restore", help="Validate and restore a SQLite backup.")
-    restore.add_argument("--db", default=None)
-    restore.add_argument("--from", dest="from_path", required=True, help="Backup .sqlite3 path to restore from.")
-
     admin = sub.add_parser("admin", help="Run the local admin web UI.")
     admin.add_argument("--db", default=None)
     admin.add_argument("--host", default="127.0.0.1")
     admin.add_argument("--port", type=int, default=8765)
 
     return parser
-
-
-def add_server_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--model-path", default=str(DEFAULT_MODEL_PATH))
-    parser.add_argument("--llama-dir", default=str(PROJECT_ROOT / "tools" / "llama.cpp"))
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8080)
-    parser.add_argument("--ctx-size", type=int, default=8192)
-    parser.add_argument("--batch-size", type=int, default=1024)
-    parser.add_argument("--ubatch-size", type=int, default=1024)
-    parser.add_argument("--cpu-moe", type=int, default=4)
-    parser.add_argument("--full-gpu", action="store_true")
-    parser.add_argument("--flash-attn", default="on", choices=["on", "off", "auto"])
-    parser.add_argument("--no-jinja", action="store_true")
-
-
-def profile_from_args(args: argparse.Namespace) -> LlamaServerProfile:
-    return LlamaServerProfile(
-        model_path=Path(args.model_path).resolve(),
-        llama_dir=Path(args.llama_dir).resolve(),
-        host=args.host,
-        port=args.port,
-        ctx_size=args.ctx_size,
-        batch_size=args.batch_size,
-        ubatch_size=args.ubatch_size,
-        n_cpu_moe=None if args.full_gpu else args.cpu_moe,
-        flash_attn=args.flash_attn,
-        jinja=not args.no_jinja,
-    )
-
-
-def make_agent(args: argparse.Namespace) -> ProtoAgent:
-    config = AgentConfig.load().with_cli_overrides(
-        base_url=getattr(args, "base_url", None),
-        model=getattr(args, "model", None),
-        allow_write=False if getattr(args, "deny_write", False) else (True if getattr(args, "allow_write", False) else None),
-        allow_shell=True if getattr(args, "allow_shell", False) else None,
-        allow_unsafe_shell=True if getattr(args, "allow_unsafe_shell", False) else None,
-        max_tokens=getattr(args, "max_tokens", None),
-        temperature=getattr(args, "temperature", None),
-        top_p=getattr(args, "top_p", None),
-    )
-    memory = MemoryStore(config.database_path)
-    tools = default_registry(memory, config.tool_policy)
-    client = OpenAICompatibleClient(config.base_url, config.model)
-    embedding_config = EmbeddingConfig(
-        base_url=config.embedding.base_url,
-        model=config.embedding.model,
-        timeout_seconds=config.embedding.timeout_seconds,
-        request_dimensions=config.embedding.request_dimensions,
-    )
-    embedding_client = EmbeddingClient(embedding_config) if embedding_config.enabled else None
-    memory_service = MemoryService(
-        memory,
-        embedding_client=embedding_client,
-        embedding_backend=config.embedding.backend,
-        importance_client=client if config.llm_importance else None,
-        llm_importance=config.llm_importance,
-    )
-    return ProtoAgent(
-        config=config,
-        client=client,
-        memory=memory,
-        tools=tools,
-        memory_service=memory_service,
-    )
-
-
-def cmd_status(args: argparse.Namespace) -> int:
-    config = AgentConfig.load()
-    base_url = args.base_url or config.base_url
-    profile = LlamaServerProfile()
-    report = status_report(profile, base_url=base_url)
-    print(json.dumps(report, indent=2, ensure_ascii=False))
-    return 0
-
-
-def cmd_serve(args: argparse.Namespace) -> int:
-    profile = profile_from_args(args)
-    print("Starting llama-server:")
-    print(" ".join(profile.server_command()))
-    return run_server_foreground(profile)
-
-
-def cmd_chat(args: argparse.Namespace) -> int:
-    if args.stream and args.prompt:
-        return _cmd_chat_stream(args)
-    agent = make_agent(args)
-    if args.prompt:
-        run = agent.run(args.prompt, thread_id=args.thread_id, max_steps=args.max_steps)
-        print(run.final)
-        if run.tool_events:
-            print(f"\n[tool events: {len(run.tool_events)} | thread: {run.thread_id}]")
-        return 0
-
-    print("ProtoAGI interactive chat. Ctrl+C or empty line to exit.")
-    thread_id = args.thread_id
-    while True:
-        try:
-            prompt = input("\nYou> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return 0
-        if not prompt:
-            return 0
-        try:
-            run = agent.run(prompt, thread_id=thread_id, max_steps=args.max_steps)
-        except OpenAICompatError as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            return 2
-        thread_id = run.thread_id
-        print(f"\nProtoAGI> {run.final}")
-        if run.tool_events:
-            print(f"[tool events: {len(run.tool_events)} | thread: {run.thread_id}]")
-
-
-def _cmd_chat_stream(args: argparse.Namespace) -> int:
-    config = AgentConfig.load().with_cli_overrides(
-        base_url=getattr(args, "base_url", None),
-        model=getattr(args, "model", None),
-        max_tokens=getattr(args, "max_tokens", None),
-        temperature=getattr(args, "temperature", None),
-        top_p=getattr(args, "top_p", None),
-    )
-    client = OpenAICompatibleClient(config.base_url, config.model)
-    messages = [
-        {"role": "system", "content": "You are ProtoAGI, answering directly without tool calls."},
-        {"role": "user", "content": str(args.prompt)},
-    ]
-    try:
-        for chunk in client.chat_completion_stream(
-            messages,
-            temperature=config.temperature,
-            top_p=config.top_p,
-            max_tokens=config.max_tokens,
-        ):
-            print(chunk, end="", flush=True)
-        print()
-        return 0
-    except OpenAICompatError as exc:
-        print(f"streaming error: {exc}", file=sys.stderr)
-        return 2
-
-
-def cmd_bench(args: argparse.Namespace) -> int:
-    config = AgentConfig.load().with_cli_overrides(base_url=args.base_url, model=args.model)
-    client = OpenAICompatibleClient(config.base_url, config.model)
-    results = bench_endpoint(
-        client,
-        prompt=args.prompt,
-        rounds=args.rounds,
-        max_tokens=args.max_tokens,
-    )
-    print(endpoint_results_to_json(results))
-    return 0
-
-
-def cmd_bench_tools(args: argparse.Namespace) -> int:
-    config = AgentConfig.load().with_cli_overrides(base_url=args.base_url, model=args.model)
-    client = OpenAICompatibleClient(config.base_url, config.model)
-    counts = {"tool_calls": 0, "tool_request": 0, "both": 0, "neither": 0}
-    rounds = max(1, int(args.rounds))
-    results: list[dict[str, Any]] = []
-    for index in range(rounds):
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "Return Telegram decision JSON. If the user asks what is remembered, "
-                    "use the recall tool instead of guessing."
-                ),
-            },
-            {"role": "user", "content": str(args.prompt)},
-        ]
-        response = client.chat_completion(
-            messages,
-            tools=TelegramToolRunner.schemas(),
-            temperature=0.0,
-            top_p=1.0,
-            max_tokens=int(args.max_tokens),
-            response_format=DECISION_JSON_SCHEMA,
-        )
-        message = response.get("choices", [{}])[0].get("message", {})
-        classification = classify_tool_response_message(message)
-        counts[classification] += 1
-        results.append(
-            {
-                "round": index + 1,
-                "classification": classification,
-                "has_tool_calls": bool(message.get("tool_calls")),
-                "content_preview": str(message.get("content") or "")[:500],
-            }
-        )
-    canonical = _tool_canonical_hint(counts)
-    report = {
-        "rounds": rounds,
-        "model": config.model,
-        "base_url": config.base_url,
-        "prompt": str(args.prompt),
-        "counts": counts,
-        "canonical_path_hint": canonical,
-        "results": results,
-    }
-    if args.output:
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(
-            json.dumps(report, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        print(f"wrote {output_path}")
-    if args.summary:
-        print(
-            f"rounds={rounds} canonical={canonical} "
-            f"tool_calls={counts['tool_calls']} tool_request={counts['tool_request']} "
-            f"both={counts['both']} neither={counts['neither']}"
-        )
-    elif not args.output:
-        print(json.dumps(report, ensure_ascii=False, indent=2))
-    return 0
-
-
-def classify_tool_response_message(message: dict[str, Any]) -> str:
-    has_tool_calls = bool(message.get("tool_calls"))
-    content = str(message.get("content") or "")
-    payload = extract_json_object(content) if content else {}
-    tool_request = payload.get("tool_request") if isinstance(payload, dict) else None
-    has_tool_request = isinstance(tool_request, dict) and bool(tool_request.get("name"))
-    if has_tool_calls and has_tool_request:
-        return "both"
-    if has_tool_calls:
-        return "tool_calls"
-    if has_tool_request:
-        return "tool_request"
-    return "neither"
-
-
-def _tool_canonical_hint(counts: dict[str, int]) -> str:
-    if counts.get("tool_calls", 0) + counts.get("both", 0) > counts.get("tool_request", 0):
-        return "tool_calls"
-    if counts.get("tool_request", 0) + counts.get("both", 0) > 0:
-        return "tool_request"
-    return "unverified"
-
-
-def cmd_bench_llama(args: argparse.Namespace) -> int:
-    profile = profile_from_args(args)
-    values = [int(part.strip()) for part in args.n_cpu_moe.split(",") if part.strip()]
-    returncode = run_llama_bench(
-        profile,
-        output_path=(PROJECT_ROOT / args.output).resolve(),
-        n_cpu_moe_values=values,
-        prompt_tokens=args.prompt_tokens,
-        gen_tokens=args.gen_tokens,
-        repetitions=args.repetitions,
-    )
-    print(f"llama-bench exit code: {returncode}")
-    print(f"output: {(PROJECT_ROOT / args.output).resolve()}")
-    return returncode
-
-
-def cmd_init_config(args: argparse.Namespace) -> int:
-    if DEFAULT_CONFIG_PATH.exists() and not args.force:
-        print(f"Already exists: {DEFAULT_CONFIG_PATH}")
-        return 0
-    DEFAULT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    data = {
-        "base_url": "http://127.0.0.1:8080/v1",
-        "model": "gpt-oss-20b-MXFP4",
-        "database_path": "data/protoagi.sqlite3",
-        "temperature": 0.6,
-        "top_p": 1.0,
-        "max_tokens": 1536,
-        "llm_importance": False,
-        "plan_reflect": True,
-        "plan_call_limit": 2,
-        "tool_policy": {
-            "allow_write": True,
-            "allow_shell": False,
-            "allow_unsafe_shell": False,
-            "command_timeout_seconds": 30,
-        },
-    }
-    DEFAULT_CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    print(f"Wrote {DEFAULT_CONFIG_PATH}")
-    return 0
 
 
 def cmd_telegram(args: argparse.Namespace) -> int:
@@ -516,11 +96,17 @@ def cmd_telegram(args: argparse.Namespace) -> int:
     if args.proactive_cooldown_seconds is not None:
         telegram_config.proactive_cooldown_seconds = args.proactive_cooldown_seconds
     if not telegram_config.token:
-        print("TELEGRAM_BOT_TOKEN is not set. Create a bot with @BotFather and set the token.", file=sys.stderr)
+        print(
+            "TELEGRAM_BOT_TOKEN is not set. Create a bot with @BotFather and set the token.",
+            file=sys.stderr,
+        )
         return 2
 
     bot = build_nikola_bot(agent_config=agent_config, telegram_config=telegram_config)
-    me = bot.bootstrap(delete_webhook=args.delete_webhook, drop_pending_updates=args.drop_pending_updates)
+    me = bot.bootstrap(
+        delete_webhook=args.delete_webhook,
+        drop_pending_updates=args.drop_pending_updates,
+    )
     print(
         f"{telegram_config.bot_name} online as @{me.get('username', 'unknown')} | "
         f"persona={telegram_config.persona_key} | reply_mode={telegram_config.reply_mode} | "
@@ -552,239 +138,13 @@ def cmd_telegram(args: argparse.Namespace) -> int:
     return 0
 
 
-def _resolve_db_path(args: argparse.Namespace) -> Path:
-    config = AgentConfig.load()
-    raw = getattr(args, "db", None)
-    if raw:
-        return Path(raw).resolve()
-    return config.database_path
-
-
-def _build_memory_service(db_path: Path) -> tuple[MemoryStore, MemoryService]:
-    config = AgentConfig.load()
-    store = MemoryStore(db_path)
-    embedding_config = EmbeddingConfig(
-        base_url=config.embedding.base_url,
-        model=config.embedding.model,
-        timeout_seconds=config.embedding.timeout_seconds,
-        request_dimensions=config.embedding.request_dimensions,
-    )
-    embedding_client = EmbeddingClient(embedding_config) if embedding_config.enabled else None
-    importance_client = (
-        OpenAICompatibleClient(config.base_url, config.model)
-        if config.llm_importance
-        else None
-    )
-    service = MemoryService(
-        store,
-        embedding_client=embedding_client,
-        embedding_backend=config.embedding.backend,
-        importance_client=importance_client,
-        llm_importance=config.llm_importance,
-    )
-    return store, service
-
-
-def cmd_memory_eval(args: argparse.Namespace) -> int:
-    k_values = tuple(int(v.strip()) for v in args.k.split(",") if v.strip())
-    config = AgentConfig.load()
-    embedding_client: EmbeddingClient | None = None
-    if args.with_embeddings:
-        embedding_config = EmbeddingConfig(
-            base_url=config.embedding.base_url,
-            model=config.embedding.model,
-            timeout_seconds=config.embedding.timeout_seconds,
-            request_dimensions=config.embedding.request_dimensions,
-        )
-        if not embedding_config.enabled:
-            print(
-                "PROTOAGI_EMBED_MODEL is not configured; running FTS-only.",
-                file=sys.stderr,
-            )
-        else:
-            embedding_client = EmbeddingClient(embedding_config)
-    report = run_eval(
-        corpus_path=Path(args.corpus).resolve(),
-        embedding_client=embedding_client,
-        k_values=k_values,
-    )
-    if args.json:
-        print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2))
-    else:
-        print(f"queries: {len(report.queries)}")
-        for k, value in sorted(report.recall_at_k.items()):
-            print(f"recall@{k}: {value:.3f}")
-        print(f"MRR: {report.mrr:.3f}")
-        if report.section_metrics:
-            print("\nSections:")
-            for name, metrics in report.section_metrics.items():
-                recall = metrics.get("recall_at_k", {})
-                recall_bits = " ".join(
-                    f"recall@{k}:{float(value):.3f}"
-                    for k, value in sorted(recall.items(), key=lambda item: int(item[0]))
-                )
-                print(
-                    f"  - {name}: queries={metrics.get('queries', 0)} "
-                    f"mrr={float(metrics.get('mrr', 0.0)):.3f} {recall_bits}"
-                )
-        misses = [item for item in report.queries if item.rank is None]
-        if misses:
-            print("\nMisses:")
-            for miss in misses:
-                print(f"  - {miss.query!r}: expected one of {miss.retrieved[:3]}")
-    return 0
-
-
-def cmd_memory_stats(args: argparse.Namespace) -> int:
-    db_path = _resolve_db_path(args)
-    if not db_path.exists():
-        print(f"no database at {db_path}", file=sys.stderr)
-        return 2
-    store, _ = _build_memory_service(db_path)
-    from .admin_panel.server import _stats
-
-    print(json.dumps(_stats(store), ensure_ascii=False, indent=2))
-    return 0
-
-
-def cmd_memory_prune(args: argparse.Namespace) -> int:
-    db_path = _resolve_db_path(args)
-    if not db_path.exists():
-        print(f"no database at {db_path}", file=sys.stderr)
-        return 2
-    _, service = _build_memory_service(db_path)
-    result = service.prune(
-        scope=args.scope,
-        persona_key=args.persona,
-        score_threshold=args.score_threshold,
-        keep_newer_than_days=args.keep_newer_than_days,
-        dry_run=args.dry_run,
-        return_plan=bool(args.json),
-    )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0
-
-
-def cmd_memory_consolidate(args: argparse.Namespace) -> int:
-    db_path = _resolve_db_path(args)
-    if not db_path.exists():
-        print(f"no database at {db_path}", file=sys.stderr)
-        return 2
-    _, service = _build_memory_service(db_path)
-    result = service.consolidate(
-        scope=args.scope,
-        persona_key=args.persona,
-        dry_run=args.dry_run,
-        return_plan=bool(args.json),
-    )
-    if isinstance(result, dict):
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        print(json.dumps({"merged": result}, ensure_ascii=False, indent=2))
-    return 0
-
-
-def cmd_memory_rescope(args: argparse.Namespace) -> int:
-    db_path = _resolve_db_path(args)
-    if not db_path.exists():
-        print(f"no database at {db_path}", file=sys.stderr)
-        return 2
-    store = MemoryStore(db_path)
-    result = store.rescope_telegram_memories(to_scope=args.to, dry_run=args.dry_run)
-    if args.json:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        print(
-            "rescope {matched} matched, {updated} updated, {skipped_no_user_tag} skipped".format(
-                **result
-            )
-        )
-    return 0
-
-
-def cmd_memory_export(args: argparse.Namespace) -> int:
-    db_path = _resolve_db_path(args)
-    if not db_path.exists():
-        print(f"no database at {db_path}", file=sys.stderr)
-        return 2
-    secret = _federation_secret(args)
-    store = MemoryStore(db_path)
-    result = export_memory_bundle(
-        store,
-        Path(args.to).resolve(),
-        secret=secret,
-        source=args.source,
-        scope=args.scope,
-        require_tags=args.tag,
-        limit=args.limit,
-        since=args.since,
-    )
-    print(
-        json.dumps(
-            {
-                "path": str(result.path),
-                "exported": result.exported,
-                "deleted": result.deleted,
-                "since": result.since,
-                "created_at": result.created_at,
-                "signature": result.signature,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
-    return 0
-
-
-def cmd_memory_import(args: argparse.Namespace) -> int:
-    db_path = _resolve_db_path(args)
-    secret = _federation_secret(args)
-    store = MemoryStore(db_path)
-    result = import_memory_bundle(store, Path(args.from_path).resolve(), secret=secret)
-    print(
-        json.dumps(
-            {
-                "source": result.source,
-                "imported": result.imported,
-                "skipped": result.skipped,
-                "deleted": result.deleted,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-    )
-    return 0
-
-
-def _federation_secret(args: argparse.Namespace) -> str:
-    secret = str(getattr(args, "secret", None) or "").strip()
-    if secret:
-        return secret
-    env_name = str(getattr(args, "secret_env", "PROTOAGI_FEDERATION_SECRET"))
-    return os.environ.get(env_name, "").strip()
-
-
-def cmd_backup(args: argparse.Namespace) -> int:
-    db_path = _resolve_db_path(args)
-    to_path = Path(args.to).resolve() if args.to else default_backup_path(db_path)
-    written = backup_database(db_path, to_path)
-    print(json.dumps({"backup": str(written)}, ensure_ascii=False, indent=2))
-    return 0
-
-
-def cmd_restore(args: argparse.Namespace) -> int:
-    db_path = _resolve_db_path(args)
-    restored = restore_database(db_path, Path(args.from_path).resolve())
-    print(json.dumps({"restored": str(restored)}, ensure_ascii=False, indent=2))
-    return 0
-
-
 def cmd_admin(args: argparse.Namespace) -> int:
     db_path = _resolve_db_path(args)
     if not db_path.exists():
         print(f"no database at {db_path}", file=sys.stderr)
         return 2
-    store, service = _build_memory_service(db_path)
+    store = MemoryStore(db_path)
+    service = MemoryService(store=store)
     server = serve_admin(store, service, host=args.host, port=args.port)
     url = f"http://{args.host}:{args.port}"
     print(f"ProtoAGI admin listening on {url}")
@@ -797,45 +157,21 @@ def cmd_admin(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_db_path(args: argparse.Namespace) -> Path:
+    config = AgentConfig.load()
+    raw = getattr(args, "db", None)
+    if raw:
+        return Path(raw).resolve()
+    return config.database_path
+
+
 def main(argv: list[str] | None = None) -> int:
     _prefer_utf8_console()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        if args.command == "status":
-            return cmd_status(args)
-        if args.command == "serve":
-            return cmd_serve(args)
-        if args.command == "chat":
-            return cmd_chat(args)
-        if args.command == "bench":
-            return cmd_bench(args)
-        if args.command == "bench-tools":
-            return cmd_bench_tools(args)
-        if args.command == "bench-llama":
-            return cmd_bench_llama(args)
-        if args.command == "init-config":
-            return cmd_init_config(args)
         if args.command == "telegram":
             return cmd_telegram(args)
-        if args.command == "memory-eval":
-            return cmd_memory_eval(args)
-        if args.command == "memory-stats":
-            return cmd_memory_stats(args)
-        if args.command == "memory-prune":
-            return cmd_memory_prune(args)
-        if args.command == "memory-consolidate":
-            return cmd_memory_consolidate(args)
-        if args.command == "memory-rescope":
-            return cmd_memory_rescope(args)
-        if args.command == "memory-export":
-            return cmd_memory_export(args)
-        if args.command == "memory-import":
-            return cmd_memory_import(args)
-        if args.command == "backup":
-            return cmd_backup(args)
-        if args.command == "restore":
-            return cmd_restore(args)
         if args.command == "admin":
             return cmd_admin(args)
     except OpenAICompatError as exc:
@@ -844,7 +180,8 @@ def main(argv: list[str] | None = None) -> int:
     except TelegramApiError as exc:
         if is_telegram_polling_conflict(exc):
             print(
-                "Telegram polling conflict: another Telegram bot instance is already running for this token.",
+                "Telegram polling conflict: another Telegram bot instance is "
+                "already running for this token.",
                 file=sys.stderr,
             )
             print("Stop the other instance before starting a new one.", file=sys.stderr)
@@ -853,12 +190,6 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except FileNotFoundError as exc:
         print(f"Missing file: {exc}", file=sys.stderr)
-        return 2
-    except BackupError as exc:
-        print(f"Backup error: {exc}", file=sys.stderr)
-        return 2
-    except MemoryFederationError as exc:
-        print(f"Memory federation error: {exc}", file=sys.stderr)
         return 2
     return 1
 
@@ -869,7 +200,7 @@ def _prefer_utf8_console() -> None:
         if callable(reconfigure):
             try:
                 reconfigure(encoding="utf-8")
-            except OSError:
+            except (TypeError, ValueError, OSError):
                 pass
 
 

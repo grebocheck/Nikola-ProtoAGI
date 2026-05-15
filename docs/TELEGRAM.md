@@ -112,18 +112,12 @@ the sender is known, and recall only returns facts for the current Telegram
 user. Chat-scoped system facts remain available inside the originating chat.
 
 If you previously ran the bot with global Telegram memory and then switch
-`PROTOAGI_TELEGRAM_GLOBAL_MEMORY=0`, migrate legacy rows once so old facts
-tagged with `user:<id>` remain visible to that same user:
-
-```powershell
-$env:PYTHONPATH="src"
-python -m protoagi memory-rescope --db data/protoagi.sqlite3 --to user --dry-run --json
-python -m protoagi memory-rescope --db data/protoagi.sqlite3 --to user
-```
-
-The migration only touches rows that still have `scope=global` and a
-`user:<id>` tag. It copies `source_chat:<id>` into `chat_id` when available,
-so future privacy-mode recall can keep the original Telegram context.
+`PROTOAGI_TELEGRAM_GLOBAL_MEMORY=0`, legacy rows can be rescoped by
+calling `MemoryStore.rescope_telegram_memories(to_scope='user')` from a
+Python shell. The migration only touches rows that still have
+`scope=global` and a `user:<id>` tag — it copies `source_chat:<id>`
+into `chat_id` when available, so future privacy-mode recall keeps the
+original Telegram context.
 
 ## Profiles
 
@@ -396,8 +390,7 @@ The Telegram decision loop can also request bounded tools directly. The first
 wired tools are `recall` and `remind_me`: if the model returns a
 `tool_request` inside the constrained decision JSON, the bot executes up to
 four tool steps and asks the profile to revise the final decision with the tool
-results. Native OpenAI-style `tool_calls` are still measurable through
-`protoagi bench-tools`, but Telegram production decisions pin the schema-native
+results. Telegram production decisions pin the schema-native
 `tool_request` path for local llama.cpp compatibility.
 This lets questions like "what do you remember about me?" quote real memory
 instead of guessing from the current prompt.

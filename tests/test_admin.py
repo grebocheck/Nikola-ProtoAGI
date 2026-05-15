@@ -56,24 +56,29 @@ class AdminServerTests(unittest.TestCase):
         with urllib.request.urlopen(request, timeout=2) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
-    def test_dashboard_renders(self) -> None:
-        self.memory.set_kv(
-            "telegram:style:123",
-            json.dumps(
-                {
-                    "last_choice": "concise",
-                    "arms": {"concise": {"trials": 2, "successes": 1.0}},
-                    "signals": {"reply": 1},
-                    "updated_at": "2026-05-03T00:00:00+00:00",
-                }
-            ),
-        )
-        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/", timeout=2) as resp:
-            body = resp.read().decode("utf-8")
-        self.assertIn("ProtoAGI", body)
-        self.assertIn("alpha fact", body)
-        self.assertIn("Style", body)
-        self.assertIn("concise", body)
+    def test_root_serves_spa_when_built(self) -> None:
+        # The legacy inline dashboard is gone — once admin_panel/web/dist
+        # exists the server hands out the React bundle. In dev without
+        # a build the request is a 404 (we don't synthesise a placeholder
+        # so the missing build is obvious).
+        import urllib.error  # local import; not always exercised
+
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{self.port}/", timeout=2
+            ) as resp:
+                self.assertEqual(resp.status, 200)
+                self.assertIn("text/html", resp.headers.get("Content-Type", ""))
+        except urllib.error.HTTPError as exc:
+            # No SPA build available — that's an acceptable state.
+            self.assertEqual(exc.code, 404)
+
+    def test_api_404_returns_json(self) -> None:
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{self.port}/api/no-such-thing", timeout=2
+            )
+        self.assertEqual(ctx.exception.code, 404)
 
     def test_stats_endpoint(self) -> None:
         data = self._get_json("/api/stats")

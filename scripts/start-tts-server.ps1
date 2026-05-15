@@ -99,10 +99,28 @@ if (-not (Test-Path $VenvPy)) {
     Write-Host "Creating TTS venv at $VenvDir ..."
     & $SystemPy.Source -m venv $VenvDir
     if ($LASTEXITCODE -ne 0) { throw "venv creation failed" }
-
-    Write-Host "Installing piper-tts + fastapi + uvicorn ..."
     & $VenvPy -m pip install --upgrade pip wheel 2>&1 | Out-Host
-    & $VenvPy -m pip install "piper-tts>=1.2" "fastapi>=0.110" "uvicorn[standard]>=0.27" 2>&1 | Out-Host
+}
+
+# Self-heal: an older run might have created the venv without all
+# dependencies (e.g. the install was added after the venv was first
+# bootstrapped). Probe with a real import and reinstall if anything
+# critical is missing — this is the same idea as ``npm ci``.
+# PS 5.1 routes native stderr through the error stream, and our
+# top-level ``$ErrorActionPreference = "Stop"`` would treat the expected
+# ImportError as fatal. Localise the preference to ``Continue`` and
+# check ``$LASTEXITCODE`` instead.
+$PrevEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    & $VenvPy -c "import fastapi, piper.voice" *> $null
+    $DepProbeExit = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $PrevEAP
+}
+if ($DepProbeExit -ne 0) {
+    Write-Host "TTS venv is missing required packages; installing ..."
+    & $VenvPy -m pip install "piper-tts>=1.2" "fastapi>=0.110" "uvicorn[standard]>=0.27" | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
 }
 

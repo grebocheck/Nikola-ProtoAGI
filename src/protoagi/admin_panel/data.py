@@ -60,6 +60,7 @@ def serialize_memory(item: Any) -> dict[str, Any]:
         "scope": item.scope,
         "tags": list(item.tags),
         "importance": item.importance,
+        "confidence": item.confidence,
         "user_id": item.user_id,
         "chat_id": item.chat_id,
         "persona_key": item.persona_key,
@@ -68,7 +69,218 @@ def serialize_memory(item: Any) -> dict[str, Any]:
         "updated_at": item.updated_at,
         "access_count": item.access_count,
         "pinned": item.pinned,
+        "origin_message_id": getattr(item, "origin_message_id", None),
+        "expires_at": getattr(item, "expires_at", None),
+        "superseded_by": item.superseded_by,
+        "supersedes_id": item.supersedes_id,
+        "source": item.source,
     }
+
+
+def serialize_goal(goal: Any) -> dict[str, Any]:
+    return {
+        "id": goal.id,
+        "persona_key": goal.persona_key,
+        "text": goal.text,
+        "status": goal.status,
+        "priority": goal.priority,
+        "chat_id": goal.chat_id,
+        "user_id": goal.user_id,
+        "origin_message_id": goal.origin_message_id,
+        "due_at": goal.due_at,
+        "last_touched_at": goal.last_touched_at,
+        "created_at": goal.created_at,
+        "updated_at": goal.updated_at,
+        "closed_at": goal.closed_at,
+        "metadata": goal.metadata,
+    }
+
+
+def serialize_conflict(conflict: Any, *, items: dict[int, Any] | None = None) -> dict[str, Any]:
+    """Conflict row + (optionally) snippets of both sides for the UI.
+
+    When ``items`` is supplied (the caller has already batched a fetch
+    for ``memory_a_id``/``memory_b_id``), we attach ``memory_a`` /
+    ``memory_b`` previews. Otherwise the IDs are returned alone and the
+    front-end can request details on demand.
+    """
+
+    payload: dict[str, Any] = {
+        "id": conflict.id,
+        "memory_a_id": conflict.memory_a_id,
+        "memory_b_id": conflict.memory_b_id,
+        "similarity": conflict.similarity,
+        "persona_key": conflict.persona_key,
+        "detected_at": conflict.detected_at,
+        "resolution_status": conflict.resolution_status,
+        "resolution_winner_id": conflict.resolution_winner_id,
+        "resolved_at": conflict.resolved_at,
+        "metadata": conflict.metadata,
+    }
+    if items is not None:
+        side_a = items.get(conflict.memory_a_id)
+        side_b = items.get(conflict.memory_b_id)
+        if side_a is not None:
+            payload["memory_a"] = _conflict_side_view(side_a)
+        if side_b is not None:
+            payload["memory_b"] = _conflict_side_view(side_b)
+    return payload
+
+
+def _conflict_side_view(item: Any) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "text": item.text,
+        "kind": item.kind,
+        "scope": item.scope,
+        "tags": list(item.tags),
+        "created_at": item.created_at,
+        "origin_message_id": getattr(item, "origin_message_id", None),
+        "importance": item.importance,
+        "superseded_by": item.superseded_by,
+    }
+
+
+def serialize_user_state(state: Any) -> dict[str, Any]:
+    return {
+        "user_id": state.user_id,
+        "persona_key": state.persona_key,
+        "mood": state.mood,
+        "themes": list(state.themes),
+        "open_questions": list(state.open_questions),
+        "preferences": dict(state.preferences),
+        "summary": state.summary,
+        "confidence": state.confidence,
+        "last_updated_at": state.last_updated_at,
+        "messages_at_last_update": state.messages_at_last_update,
+        "metadata": dict(state.metadata),
+    }
+
+
+def list_goals(
+    memory: MemoryStore,
+    *,
+    status: str = "open",
+    persona_key: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Read goals for the admin UI.
+
+    ``status="all"`` returns everything; otherwise filters by status.
+    ``open`` goals come back ordered by ``list_open_goals`` (due first,
+    then priority). Other statuses are listed reverse-chronologically by
+    ``last_touched_at`` so the most recent decisions are on top.
+    """
+
+    if status == "open":
+        goals = memory.list_open_goals(persona_key=persona_key or "", limit=limit) if persona_key else _all_open_goals(memory, limit)
+        return [serialize_goal(goal) for goal in goals]
+    clauses: list[str] = []
+    params: list[Any] = []
+    if status != "all":
+        clauses.append("status = ?")
+        params.append(status)
+    if persona_key:
+        clauses.append("persona_key = ?")
+        params.append(persona_key)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params.append(int(limit))
+    with memory.connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM goals
+            {where}
+            ORDER BY COALESCE(closed_at, last_touched_at) DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [serialize_goal(memory._goal_from_row(row)) for row in rows]
+
+
+def _all_open_goals(memory: MemoryStore, limit: int) -> list[Any]:
+    """List open goals across all personas (used when persona filter is empty)."""
+
+    with memory.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM goals
+            WHERE status = 'open'
+            ORDER BY
+                CASE WHEN due_at IS NULL THEN 1 ELSE 0 END,
+                due_at ASC,
+                priority DESC,
+                last_touched_at DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+    return [memory._goal_from_row(row) for row in rows]
+
+
+def list_conflicts(
+    memory: MemoryStore,
+    *,
+    status: str = "unresolved",
+    persona_key: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """List conflict pairs with both sides' content attached."""
+
+    if status == "unresolved":
+        rows_conflicts = memory.list_unresolved_conflicts(
+            persona_key=persona_key, limit=limit
+        )
+    else:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status != "all":
+            clauses.append("resolution_status = ?")
+            params.append(status)
+        if persona_key:
+            clauses.append("persona_key = ?")
+            params.append(persona_key)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(int(limit))
+        with memory.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM memory_conflicts
+                {where}
+                ORDER BY COALESCE(resolved_at, detected_at) DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        rows_conflicts = [memory._conflict_from_row(row) for row in rows]
+    member_ids: set[int] = set()
+    for conflict in rows_conflicts:
+        member_ids.add(conflict.memory_a_id)
+        member_ids.add(conflict.memory_b_id)
+    items = memory.get_memories(sorted(member_ids)) if member_ids else {}
+    return [serialize_conflict(conflict, items=items) for conflict in rows_conflicts]
+
+
+def list_user_states(
+    memory: MemoryStore,
+    *,
+    persona_key: str | None = None,
+) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if persona_key:
+        clauses.append("persona_key = ?")
+        params.append(persona_key)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    with memory.connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM user_state {where}
+            ORDER BY last_updated_at DESC
+            """,
+            tuple(params),
+        ).fetchall()
+        return [serialize_user_state(memory._user_state_from_row(row)) for row in rows]
 
 
 def style_report(memory: MemoryStore) -> dict[str, Any]:
