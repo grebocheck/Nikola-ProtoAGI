@@ -1731,36 +1731,75 @@ class MemoryStore:
         self,
         *,
         set_name: str | None = None,
+        sticker_id: str | None = None,
+        sticker_ids: Iterable[str] | None = None,
         only_failed: bool = True,
+        clear_descriptions: bool = False,
     ) -> int:
-        """Zero out ``attempt_count`` on stickers so the worker retries them.
+        """Zero out ``attempt_count`` so the worker retries the stickers.
 
-        Useful after a configuration change (vision endpoint, prompt,
-        ffmpeg installed) — operators don't need to drop and rebuild
-        the database. ``only_failed`` (default) keeps rows that already
-        have a description untouched. Returns the number of rows reset.
+        ``only_failed=True`` (default) keeps rows that already have a
+        description untouched — useful after a config change so the
+        worker re-tries the broken stickers without wasting tokens on
+        the good ones. ``clear_descriptions=True`` blanks the description
+        field too, forcing a full re-caption (combine with
+        ``only_failed=False`` for "redescribe everything"). Returns the
+        number of rows that were updated.
         """
 
         clauses: list[str] = []
         params: list[Any] = []
+        if sticker_id is not None:
+            clauses.append("sticker_id = ?")
+            params.append(sticker_id)
+        if sticker_ids is not None:
+            # Explicit selection always overrides set_name + only_failed.
+            id_list = [str(value) for value in sticker_ids if str(value).strip()]
+            if not id_list:
+                return 0
+            placeholders = ",".join("?" for _ in id_list)
+            clauses.append(f"sticker_id IN ({placeholders})")
+            params.extend(id_list)
         if set_name is not None:
             clauses.append("set_name = ?")
             params.append(set_name)
-        if only_failed:
+        if only_failed and sticker_ids is None and sticker_id is None:
+            # When the operator picked specific stickers we trust them
+            # to override the "only failed" guard.
             clauses.append("description = ''")
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        set_clauses = [
+            "attempt_count = 0",
+            "failure_reason = NULL",
+            "updated_at = ?",
+        ]
+        update_params: list[Any] = [utc_now()]
+        if clear_descriptions:
+            # Wiping the description and embedding makes the row eligible
+            # for ``list_undescribed_stickers`` again on the next pass.
+            set_clauses.insert(0, "description = ''")
+            set_clauses.insert(1, "embedding = NULL")
+            set_clauses.insert(2, "embedding_model = NULL")
         with self.connect() as conn:
             cur = conn.execute(
                 f"""
                 UPDATE sticker_descriptions
-                SET attempt_count = 0,
-                    failure_reason = NULL,
-                    updated_at = ?
+                SET {', '.join(set_clauses)}
                 {where}
                 """,
-                tuple([utc_now(), *params]),
+                tuple([*update_params, *params]),
             )
         return max(0, int(cur.rowcount))
+
+    def list_sticker_packs(self) -> list[str]:
+        """Distinct set_names that have any row in sticker_descriptions."""
+
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT set_name FROM sticker_descriptions "
+                "ORDER BY set_name"
+            ).fetchall()
+        return [str(row["set_name"]) for row in rows]
 
     def count_sticker_descriptions(
         self,

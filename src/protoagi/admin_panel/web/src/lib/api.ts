@@ -270,11 +270,30 @@ export const api = {
   stickerThumbnailUrl: (stickerId: string) =>
     `/api/sticker_thumbnail/${encodeURIComponent(stickerId)}`,
 
-  resetStickers: (body?: { pack?: string; only_failed?: boolean }) =>
-    http<{ reset: number; pack: string | null; only_failed: boolean }>(
-      "/api/stickers/reset",
-      { method: "POST", body: JSON.stringify(body ?? { only_failed: true }) }
+  resetStickers: (body?: {
+    pack?: string;
+    sticker_ids?: string[];
+    only_failed?: boolean;
+    clear_descriptions?: boolean;
+  }) =>
+    http<{
+      reset: number;
+      pack: string | null;
+      only_failed: boolean;
+      clear_descriptions: boolean;
+      sticker_ids_count: number;
+    }>("/api/stickers/reset", {
+      method: "POST",
+      body: JSON.stringify(body ?? { only_failed: true }),
+    }),
+
+  redescribeSticker: (stickerId: string) =>
+    http<{ sticker_id: string; queued: boolean }>(
+      `/api/stickers/${encodeURIComponent(stickerId)}/redescribe`,
+      { method: "POST", body: "{}" }
     ),
+
+  stickerPacks: () => http<string[]>("/api/stickers/packs"),
 
   chats: () => http<TelegramChat[]>("/api/chats"),
 

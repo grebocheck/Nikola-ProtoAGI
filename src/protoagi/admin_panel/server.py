@@ -206,6 +206,9 @@ def make_handler(memory: MemoryStore, service: MemoryService) -> type[BaseHTTPRe
                     limit=_query_int(query, "limit", 1000),
                 ))
                 return
+            if path == "/api/stickers/packs":
+                _json_response(self, memory.list_sticker_packs())
+                return
             if path.startswith("/api/sticker_thumbnail/"):
                 sticker_id = path.split("/api/sticker_thumbnail/", 1)[1]
                 if not sticker_id:
@@ -444,11 +447,50 @@ def make_handler(memory: MemoryStore, service: MemoryService) -> type[BaseHTTPRe
             if path == "/api/stickers/reset":
                 pack = str(payload.get("pack") or "").strip() or None
                 only_failed = bool(payload.get("only_failed", True))
+                clear_descriptions = bool(payload.get("clear_descriptions", False))
+                # Optional explicit list of stickers the operator picked
+                # in the UI. When the ``sticker_ids`` key is present we
+                # use it verbatim — even if empty (which means "nothing
+                # selected, do not reset anything"). When the key is
+                # missing entirely we fall through to pack + only_failed.
+                sticker_ids: list[str] | None = None
+                if "sticker_ids" in payload and isinstance(payload["sticker_ids"], list):
+                    sticker_ids = [
+                        str(item)
+                        for item in payload["sticker_ids"]
+                        if str(item).strip()
+                    ]
                 reset = memory.reset_sticker_describer_attempts(
                     set_name=pack,
+                    sticker_ids=sticker_ids,
                     only_failed=only_failed,
+                    clear_descriptions=clear_descriptions,
                 )
-                _json_response(self, {"reset": reset, "pack": pack, "only_failed": only_failed})
+                _json_response(self, {
+                    "reset": reset,
+                    "pack": pack,
+                    "only_failed": only_failed,
+                    "clear_descriptions": clear_descriptions,
+                    "sticker_ids_count": len(sticker_ids) if sticker_ids else 0,
+                })
+                return
+            if path.startswith("/api/stickers/") and path.endswith("/redescribe"):
+                # Per-sticker re-caption: clear this row's description
+                # and reset its attempt_count so the describer worker
+                # picks it up on its next polling cycle.
+                sticker_id = path[len("/api/stickers/"):-len("/redescribe")]
+                if not sticker_id:
+                    _send_error_json(self, 400, "missing sticker_id")
+                    return
+                if memory.get_sticker_description(sticker_id) is None:
+                    _send_error_json(self, 404, "sticker not found")
+                    return
+                reset = memory.reset_sticker_describer_attempts(
+                    sticker_id=sticker_id,
+                    only_failed=False,
+                    clear_descriptions=True,
+                )
+                _json_response(self, {"sticker_id": sticker_id, "queued": reset > 0})
                 return
 
             # ---------- Conflicts ----------
