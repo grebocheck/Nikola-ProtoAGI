@@ -30,6 +30,8 @@ class TelegramConfig:
     decision_max_tokens: int = 2560
     reply_max_tokens: int = 2048
     reflection_max_tokens: int = 768
+    llm_context_size: int = 8192
+    prompt_context_max_chars: int = 6500
     max_reply_messages: int = 3
     # Default policy is "low": stickers feel like a punctuation mark, not a
     # filler. Cooldown is measured in user messages between stickers.
@@ -67,6 +69,9 @@ class TelegramConfig:
 
     def __post_init__(self) -> None:
         self.set_persona(self.persona_key)
+        if self.llm_context_size < 8192:
+            scaled = max(1200, int(self.llm_context_size * 0.75))
+            self.prompt_context_max_chars = min(self.prompt_context_max_chars, scaled)
 
     def set_persona(self, persona_key: str) -> None:
         self.persona_key = resolve_persona_key(persona_key)
@@ -93,6 +98,8 @@ class TelegramConfig:
             decision_max_tokens=env_int("PROTOAGI_DECISION_MAX_TOKENS", 2560),
             reply_max_tokens=env_int("PROTOAGI_REPLY_MAX_TOKENS", 2048),
             reflection_max_tokens=env_int("PROTOAGI_REFLECTION_MAX_TOKENS", 768),
+            llm_context_size=env_int("PROTOAGI_CONTEXT_SIZE", 8192),
+            prompt_context_max_chars=env_int("PROTOAGI_TELEGRAM_CONTEXT_MAX_CHARS", 6500),
             sticker_frequency=sticker_frequency,
             sticker_cooldown_messages=env_int("NIKOLA_STICKER_COOLDOWN_MESSAGES", 6),
             sticker_max_reply_chars=env_int("NIKOLA_STICKER_MAX_REPLY_CHARS", 180),

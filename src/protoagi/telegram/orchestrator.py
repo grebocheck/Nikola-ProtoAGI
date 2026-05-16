@@ -551,7 +551,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         response = self.llm.chat_completion(
             [
                 {"role": "system", "content": prompt},
-                {"role": "user", "content": json.dumps(context_payload, ensure_ascii=False)},
+                {"role": "user", "content": self._prompt_json(context_payload)},
             ],
             temperature=0.4,
             top_p=0.95,
@@ -618,7 +618,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             response = self.llm.chat_completion(
                 [
                     {"role": "system", "content": conflict_resolution_system_prompt(self.persona)},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                    {"role": "user", "content": self._prompt_json(payload)},
                 ],
                 temperature=0.2,
                 top_p=0.9,
@@ -773,7 +773,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                     {"role": "system", "content": user_state_system_prompt(self.persona)},
                     {
                         "role": "user",
-                        "content": json.dumps(context_payload, ensure_ascii=False),
+                        "content": self._prompt_json(context_payload),
                     },
                 ],
                 temperature=0.3,
@@ -1117,7 +1117,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         facts = self._search_chat_memory(chat, incoming_text, user_id=user_id)
         persona_self_memory = self._persona_self_context(incoming_text)
         context_payload = {
-            "persona": self.persona.payload(),
+            "persona": self._persona_context_payload(),
             "fictional_self_enabled": self.telegram_config.fictional_self_enabled,
             "persona_self_lore": list(self.persona.self_lore)
             if self.telegram_config.fictional_self_enabled
@@ -1148,7 +1148,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             {"role": "system", "content": self._decision_system_prompt()},
             {
                 "role": "user",
-                "content": json.dumps(context_payload, ensure_ascii=False),
+                "content": self._prompt_json(context_payload),
             },
         ]
         response = self.llm.chat_completion(
@@ -1253,7 +1253,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         response = self.llm.chat_completion(
             [
                 {"role": "system", "content": self._decision_system_prompt()},
-                {"role": "user", "content": json.dumps(merge_payload, ensure_ascii=False)},
+                {"role": "user", "content": self._prompt_json(merge_payload)},
             ],
             temperature=self.agent_config.temperature,
             top_p=self.agent_config.top_p,
@@ -1362,28 +1362,26 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         recent = self._recent_compact_messages(chat)
         facts = self._search_chat_memory(chat, incoming_text)
         persona_self_memory = self._persona_self_context(incoming_text)
+        reply_payload = {
+            "persona": self._persona_context_payload(),
+            "fictional_self_enabled": self.telegram_config.fictional_self_enabled,
+            "persona_self_lore": list(self.persona.self_lore)
+            if self.telegram_config.fictional_self_enabled
+            else [],
+            "chat": {"type": chat.chat_type, "display_name": chat.display_name},
+            "sender": sender,
+            "incoming_text": incoming_text,
+            "recent_messages": recent,
+            "relevant_memory": [fact.text for fact in facts],
+            "known_persona_self_memory": [fact.text for fact in persona_self_memory],
+            "adaptive_reply_style": self._style_payload(chat),
+        }
         response = self.llm.chat_completion(
             [
                 {"role": "system", "content": self._reply_system_prompt()},
                 {
                     "role": "user",
-                    "content": json.dumps(
-                        {
-                            "persona": self.persona.payload(),
-                            "fictional_self_enabled": self.telegram_config.fictional_self_enabled,
-                            "persona_self_lore": list(self.persona.self_lore)
-                            if self.telegram_config.fictional_self_enabled
-                            else [],
-                            "chat": {"type": chat.chat_type, "display_name": chat.display_name},
-                            "sender": sender,
-                            "incoming_text": incoming_text,
-                            "recent_messages": recent,
-                            "relevant_memory": [fact.text for fact in facts],
-                            "known_persona_self_memory": [fact.text for fact in persona_self_memory],
-                            "adaptive_reply_style": self._style_payload(chat),
-                        },
-                        ensure_ascii=False,
-                    ),
+                    "content": self._prompt_json(reply_payload),
                 },
             ],
             temperature=self.agent_config.temperature,
@@ -1446,37 +1444,35 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         persona_self_memory = self._persona_self_context(chat.display_name)
         open_goals = self._open_goals_payload(chat)
         due_goals = self._due_goals_payload(chat)
+        initiative_payload = {
+            "persona": self._persona_context_payload(),
+            "fictional_self_enabled": self.telegram_config.fictional_self_enabled,
+            "persona_self_lore": list(self.persona.self_lore)
+            if self.telegram_config.fictional_self_enabled
+            else [],
+            "chat": {
+                "id": chat.chat_id,
+                "type": chat.chat_type,
+                "display_name": chat.display_name,
+                "last_user_message_at": chat.last_user_message_at,
+                "last_bot_message_at": chat.last_bot_message_at,
+                "last_initiative_at": chat.last_initiative_at,
+            },
+            "recent_messages": recent,
+            "recent_telegram_messages": recent_telegram,
+            "memory": [fact.text for fact in facts],
+            "known_persona_self_memory": [fact.text for fact in persona_self_memory],
+            "adaptive_reply_style": self._style_payload(chat),
+            "available_sticker_packs": STICKER_PACKS,
+            "open_goals": open_goals,
+            "due_goals": due_goals,
+        }
         response = self.llm.chat_completion(
             [
                 {"role": "system", "content": self._initiative_system_prompt()},
                 {
                     "role": "user",
-                    "content": json.dumps(
-                        {
-                            "persona": self.persona.payload(),
-                            "fictional_self_enabled": self.telegram_config.fictional_self_enabled,
-                            "persona_self_lore": list(self.persona.self_lore)
-                            if self.telegram_config.fictional_self_enabled
-                            else [],
-                            "chat": {
-                                "id": chat.chat_id,
-                                "type": chat.chat_type,
-                                "display_name": chat.display_name,
-                                "last_user_message_at": chat.last_user_message_at,
-                                "last_bot_message_at": chat.last_bot_message_at,
-                                "last_initiative_at": chat.last_initiative_at,
-                            },
-                            "recent_messages": recent,
-                            "recent_telegram_messages": recent_telegram,
-                            "memory": [fact.text for fact in facts],
-                            "known_persona_self_memory": [fact.text for fact in persona_self_memory],
-                            "adaptive_reply_style": self._style_payload(chat),
-                            "available_sticker_packs": STICKER_PACKS,
-                            "open_goals": open_goals,
-                            "due_goals": due_goals,
-                        },
-                        ensure_ascii=False,
-                    ),
+                    "content": self._prompt_json(initiative_payload),
                 },
             ],
             temperature=self.agent_config.temperature,
@@ -2425,7 +2421,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             if role == "assistant":
                 content = self._clean_reply_text(content)
             if content:
-                cleaned.append({"role": role, "content": content})
+                cleaned.append({"role": role, "content": _clip_text(content, 700)})
         return cleaned
 
     def _recent_telegram_messages(self, chat_id: str | int) -> list[dict[str, Any]]:
@@ -2435,10 +2431,18 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         )
         cleaned: list[dict[str, Any]] = []
         for item in messages:
-            copied = dict(item)
-            if copied.get("role") == "assistant":
-                copied["text"] = self._clean_reply_text(str(copied.get("text", "")))
-            cleaned.append(copied)
+            text = str(item.get("text", ""))
+            if item.get("role") == "assistant":
+                text = self._clean_reply_text(text)
+            cleaned.append(
+                {
+                    "message_id": int(item["message_id"]),
+                    "role": str(item.get("role", "")),
+                    "sender_name": str(item.get("sender_name", "")),
+                    "text": _clip_text(text, 360),
+                    "created_at": str(item.get("created_at", "")),
+                }
+            )
         return cleaned
 
     @staticmethod
@@ -2461,6 +2465,45 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             ],
         )
         return strip_assistanty_phrases(cleaned)
+
+    def _persona_context_payload(self) -> dict[str, Any]:
+        """Small persona identity for user JSON.
+
+        The system prompt already contains the full persona profile, so
+        duplicating the long policy blocks in every user payload only
+        burns context.
+        """
+
+        return {
+            "key": self.persona.key,
+            "display_name": self.persona.display_name,
+            "aliases": list(self.persona.aliases),
+        }
+
+    def _prompt_json(self, payload: dict[str, Any]) -> str:
+        """Serialize a compact, bounded JSON payload for LLM prompts."""
+
+        max_chars = max(1200, int(self.telegram_config.prompt_context_max_chars))
+        for level in range(5):
+            compact = _compact_prompt_payload(payload, level=level)
+            text = json.dumps(compact, ensure_ascii=False)
+            if len(text) <= max_chars:
+                return text
+        compact = _compact_prompt_payload(payload, level=9)
+        text = json.dumps(compact, ensure_ascii=False)
+        if len(text) <= max_chars:
+            return text
+        minimal = _minimal_prompt_payload(payload)
+        text = json.dumps(minimal, ensure_ascii=False)
+        if len(text) <= max_chars:
+            return text
+        return json.dumps(
+            {
+                "incoming_text": _clip_text(str(payload.get("incoming_text", "")), 240),
+                "context_truncated": True,
+            },
+            ensure_ascii=False,
+        )
 
     @staticmethod
     def _is_generic_sticker_filler(text: str) -> bool:
@@ -2687,6 +2730,230 @@ def _first_reply_excerpt(decision: Decision) -> str:
         if text:
             return text
     return ""
+
+
+_PROMPT_LEVELS: tuple[dict[str, int], ...] = (
+    {
+        "text": 700,
+        "incoming": 1400,
+        "history": 10,
+        "telegram": 10,
+        "memory": 6,
+        "self": 6,
+        "goals": 5,
+        "tools": 4,
+    },
+    {
+        "text": 520,
+        "incoming": 1000,
+        "history": 8,
+        "telegram": 8,
+        "memory": 5,
+        "self": 4,
+        "goals": 4,
+        "tools": 3,
+    },
+    {
+        "text": 360,
+        "incoming": 760,
+        "history": 6,
+        "telegram": 6,
+        "memory": 4,
+        "self": 3,
+        "goals": 3,
+        "tools": 2,
+    },
+    {
+        "text": 240,
+        "incoming": 520,
+        "history": 4,
+        "telegram": 4,
+        "memory": 2,
+        "self": 2,
+        "goals": 2,
+        "tools": 1,
+    },
+    {
+        "text": 160,
+        "incoming": 320,
+        "history": 2,
+        "telegram": 2,
+        "memory": 1,
+        "self": 1,
+        "goals": 1,
+        "tools": 1,
+    },
+)
+
+_PROMPT_TEXT_KEYS = {
+    "content",
+    "display_name",
+    "incoming_text",
+    "message",
+    "reason",
+    "reasoning",
+    "reply",
+    "sender",
+    "sender_name",
+    "summary",
+    "text",
+    "with_text",
+}
+_PROMPT_LAST_ITEMS = {
+    "recent_messages",
+    "recent_telegram_messages",
+    "recent_user_facts",
+    "recent_self_memories",
+}
+_PROMPT_FIRST_ITEMS = {
+    "due_goals",
+    "goals",
+    "known_persona_self_memory",
+    "memory",
+    "open_goals",
+    "persona_self_lore",
+    "relevant_memory",
+    "reminders",
+    "tool_results",
+}
+
+
+def _compact_prompt_payload(value: Any, *, level: int) -> Any:
+    limits = _prompt_limits(level)
+    if isinstance(value, dict):
+        compact: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text == "metadata":
+                continue
+            if key_text == "persona":
+                compact[key_text] = _compact_persona_payload(item)
+                continue
+            if key_text == "original_context":
+                compact[key_text] = _compact_prompt_payload(item, level=level + 1)
+                continue
+            if key_text == "tool_results":
+                compact[key_text] = _compact_prompt_list(
+                    key_text,
+                    item,
+                    level=level + 1,
+                    limits=limits,
+                )
+                continue
+            if key_text == "incoming_text":
+                compact[key_text] = _clip_text(str(item or ""), limits["incoming"])
+                continue
+            if key_text in _PROMPT_TEXT_KEYS and isinstance(item, str):
+                compact[key_text] = _clip_text(item, limits["text"])
+                continue
+            if isinstance(item, list):
+                compact[key_text] = _compact_prompt_list(
+                    key_text,
+                    item,
+                    level=level,
+                    limits=limits,
+                )
+                continue
+            compact[key_text] = _compact_prompt_payload(item, level=level)
+        if level >= 4:
+            compact["context_truncated"] = True
+        return compact
+    if isinstance(value, list):
+        return [_compact_prompt_payload(item, level=level) for item in value[: limits["memory"]]]
+    if isinstance(value, str):
+        return _clip_text(value, limits["text"])
+    return value
+
+
+def _compact_prompt_list(
+    key: str,
+    value: Any,
+    *,
+    level: int,
+    limits: dict[str, int],
+) -> list[Any]:
+    if not isinstance(value, list):
+        return []
+    if key in _PROMPT_LAST_ITEMS:
+        cap = limits["history"] if key != "recent_telegram_messages" else limits["telegram"]
+        selected = value[-cap:]
+    elif key in _PROMPT_FIRST_ITEMS:
+        if key in {"open_goals", "due_goals", "goals", "reminders"}:
+            cap = limits["goals"]
+        elif key == "tool_results":
+            cap = limits["tools"]
+        elif key in {"known_persona_self_memory", "persona_self_lore", "recent_self_memories"}:
+            cap = limits["self"]
+        else:
+            cap = limits["memory"]
+        selected = value[:cap]
+    else:
+        selected = value[: limits["memory"]]
+    return [_compact_prompt_payload(item, level=level) for item in selected]
+
+
+def _prompt_limits(level: int) -> dict[str, int]:
+    if level < 0:
+        level = 0
+    if level >= len(_PROMPT_LEVELS):
+        return _PROMPT_LEVELS[-1]
+    return _PROMPT_LEVELS[level]
+
+
+def _clip_text(text: str, max_chars: int) -> str:
+    text = str(text or "")
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 16:
+        return text[:max_chars]
+    return text[: max_chars - 13].rstrip() + "...[trimmed]"
+
+
+def _compact_persona_payload(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    compact: dict[str, Any] = {}
+    for key in ("key", "display_name", "aliases"):
+        if key in value:
+            compact[key] = value[key]
+    return compact or value
+
+
+def _minimal_prompt_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Last-resort valid JSON when an operator sets a tiny prompt budget."""
+
+    compact = _compact_prompt_payload(payload, level=9)
+    if not isinstance(compact, dict):
+        return {"payload": compact, "context_truncated": True}
+    minimal: dict[str, Any] = {"context_truncated": True}
+    for key in (
+        "persona",
+        "fictional_self_enabled",
+        "chat",
+        "sender",
+        "incoming_text",
+        "adaptive_reply_style",
+        "available_tools",
+        "available_sticker_packs",
+    ):
+        if key in compact:
+            minimal[key] = compact[key]
+    for key in ("recent_messages", "recent_telegram_messages"):
+        items = compact.get(key)
+        if isinstance(items, list) and items:
+            minimal[key] = items[-1:]
+    for key in ("relevant_memory", "memory", "known_persona_self_memory", "open_goals", "due_goals"):
+        items = compact.get(key)
+        if isinstance(items, list) and items:
+            minimal[key] = items[:1]
+    state = compact.get("known_user_state")
+    if isinstance(state, dict):
+        minimal["known_user_state"] = {
+            name: state[name]
+            for name in ("summary", "mood", "confidence", "age_hours")
+            if name in state
+        }
+    return minimal
 
 
 __all__ = ["NikolaBot", "build_nikola_bot"]

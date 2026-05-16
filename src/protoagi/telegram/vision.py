@@ -89,6 +89,17 @@ class VisionDescriber:
     def describe(self, image: ImageAttachment, *, caption: str = "") -> str:
         if self.vision_llm is None and self.memory is None:
             return "опис недоступний"
+        if image.mime_type.lower() == "image/gif":
+            description = "GIF received; no still frame available"
+            try:
+                file_info = self.telegram.get_file(image.file_id)
+                file_path = str(file_info.get("file_path") or "")
+                if file_path:
+                    data = self.telegram.download_file(file_path, max_bytes=self.max_bytes)
+                    self._store_media(image, data, description)
+            except (TelegramApiError, OSError, ValueError) as exc:
+                print(f"vision GIF persistence failed: {exc}", flush=True)
+            return description
         try:
             file_info = self.telegram.get_file(image.file_id)
             file_path = str(file_info.get("file_path") or "")

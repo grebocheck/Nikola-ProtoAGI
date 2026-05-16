@@ -4,7 +4,8 @@ param(
     [switch]$Foreground,
     [switch]$Stop,
     [switch]$Logs,
-    [switch]$Reinstall
+    [switch]$Reinstall,
+    [switch]$Cpu
 )
 
 # Ukrainian Piper TTS server for ProtoAGI.
@@ -19,7 +20,7 @@ param(
 # - Installs piper-tts + fastapi + uvicorn on first run
 # - Downloads the Piper model to config\tts\models\ (~63 MB)
 # - Exposes OpenAI-compatible /v1/audio/speech on http://127.0.0.1:$Port
-# - Requires ffmpeg in PATH for opus/mp3/aac transcoding (Telegram voice)
+# - Bootstraps a local ffmpeg under runs\ffmpeg when opus/mp3/aac transcoding is requested
 
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
@@ -135,8 +136,16 @@ if (-not (Test-Path $ModelOnnx) -or -not (Test-Path $ModelJson)) {
     }
 }
 
-if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
-    Write-Warning "ffmpeg not found in PATH. Opus/mp3 transcoding will fail. Install ffmpeg or set PROTOAGI_TTS_RESPONSE_FORMAT=wav."
+$RequestedFormat = [string]($env:PROTOAGI_TTS_RESPONSE_FORMAT)
+if ([string]::IsNullOrWhiteSpace($RequestedFormat)) {
+    $RequestedFormat = "opus"
+}
+$RequestedFormat = $RequestedFormat.Trim().ToLowerInvariant()
+if ($RequestedFormat -notin @("wav", "pcm")) {
+    . (Join-Path $PSScriptRoot "ensure-ffmpeg.ps1") -Root $Root
+}
+if ($RequestedFormat -notin @("wav", "pcm") -and -not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+    Write-Warning "ffmpeg not found. Opus/mp3/aac transcoding will fail. Set PROTOAGI_TTS_RESPONSE_FORMAT=wav if the local bootstrap cannot download it."
 }
 
 $Args = @(

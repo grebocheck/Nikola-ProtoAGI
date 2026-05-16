@@ -1163,6 +1163,97 @@ class TelegramBotTests(unittest.TestCase):
             self.assertNotIn("vision model", payload)
             self.assertNotIn("не налаштована", payload)
 
+    def test_raw_gif_document_skips_vision_llm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": true, "reply": "GIF accepted", '
+                '"stickers": [], "memories": [], "next_check_minutes": 60}'
+            )
+            vision = FakeVisionLLM("should not be called")
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(token="token", persona_key="solomiya", vision_model="vision-test"),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.vision_llm = vision
+            bot.bootstrap()
+            processed = bot.process_update(
+                {
+                    "update_id": 237,
+                    "message": {
+                        "message_id": 917,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "document": {
+                            "file_id": "GIF_DOC_RAW",
+                            "mime_type": "image/gif",
+                            "file_name": "meme.gif",
+                        },
+                    },
+                }
+            )
+            self.assertTrue(processed)
+            self.assertEqual(vision.messages, [])
+            payload = llm.messages[0][1]["content"]
+            self.assertIn("GIF received; no still frame available", payload)
+            self.assertIsNotNone(memory.get_media_blob("GIF_DOC_RAW"))
+
+    def test_decision_prompt_compacts_large_history_and_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": true, "reply": "ok", '
+                '"stickers": [], "memories": [], "next_check_minutes": 60}'
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(
+                    token="token",
+                    prompt_context_max_chars=2500,
+                    max_history_messages=20,
+                ),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.bootstrap()
+            thread = bot.thread_id(123)
+            for index in range(12):
+                memory.log_message(thread, "user", f"old message {index} " + ("x" * 1200))
+                memory.log_telegram_message(
+                    chat_id=123,
+                    message_id=index + 1,
+                    persona_key=bot.persona.key,
+                    role="user",
+                    sender_id=123,
+                    sender_name="Vadim",
+                    text=f"telegram old {index} " + ("y" * 1200),
+                    metadata={"message": {"huge": "z" * 15000}},
+                )
+
+            processed = bot.process_update(
+                {
+                    "update_id": 238,
+                    "message": {
+                        "message_id": 918,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "text": "hello " + ("q" * 3000),
+                    },
+                }
+            )
+            self.assertTrue(processed)
+            payload = llm.messages[0][1]["content"]
+            self.assertLessEqual(len(payload), 2500)
+            self.assertNotIn("metadata", payload)
+            self.assertNotIn("self_model", payload)
+            self.assertIn("context_truncated", payload)
+
     def test_incoming_sticker_is_not_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             memory = MemoryStore(Path(tmp) / "memory.sqlite3")

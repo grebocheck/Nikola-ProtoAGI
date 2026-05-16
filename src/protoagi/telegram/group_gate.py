@@ -15,12 +15,12 @@ would otherwise pay the same cost only to have the model decide to stay silent.
 
 When the gate skips, the orchestrator stays silent without running the LLM.
 The gate is intentionally side-effect free except for the cooldown stamps it
-records in ``kv``; tests inject a fake clock and a fake random source.
+records in ``kv``; tests inject a fake clock and a fake sampler.
 """
 
 from __future__ import annotations
 
-import random
+import hashlib
 import re
 import time
 import unicodedata
@@ -58,7 +58,7 @@ class GroupReactivityGate:
         self.memory = memory
         self.config = config
         self._clock = clock or time.time
-        self._sampler = sampler or random.random
+        self._sampler = sampler
         self._keyword_patterns = tuple(_compile_keyword(kw) for kw in config.trigger_keywords)
 
     def evaluate(
@@ -81,7 +81,7 @@ class GroupReactivityGate:
             return GateDecision(False, "cooldown")
         if self.config.passive_reply_ratio <= 0.0:
             return GateDecision(False, "passive_disabled")
-        roll = self._sampler()
+        roll = self._sampler() if self._sampler is not None else _deterministic_roll(chat_id, text)
         if roll >= self.config.passive_reply_ratio:
             return GateDecision(False, "passive_skip")
         self._record_passive(chat_id, now)
@@ -108,6 +108,12 @@ class GroupReactivityGate:
 
 def _normalize_text(text: str) -> str:
     return unicodedata.normalize("NFKC", text or "").casefold()
+
+
+def _deterministic_roll(chat_id: str, text: str) -> float:
+    key = f"{chat_id}\0{_normalize_text(text)}".encode("utf-8", errors="replace")
+    digest = hashlib.sha256(key).digest()
+    return int.from_bytes(digest[:8], "big") / float(1 << 64)
 
 
 def _compile_keyword(raw: str) -> "re.Pattern[str]":

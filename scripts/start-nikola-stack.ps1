@@ -33,6 +33,7 @@
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $ServerUrl = "http://127.0.0.1:$Port/v1/models"
+$env:PROTOAGI_CONTEXT_SIZE = [string]$CtxSize
 
 function Read-ProtoAgiDotEnv {
     param([string]$Path)
@@ -218,15 +219,24 @@ if (-not $NoTts -and -not $Once) {
     $TtsTruthy = $TtsEnabled -match "^(1|true|yes|on)$"
     if ($TtsTruthy -and `
         $TtsBaseUrl -match "^https?://(127\.0\.0\.1|localhost):(?<port>\d+)(/|$)") {
-        # Without ffmpeg we can still send TTS - just as a plain wav
-        # audio bubble instead of an opus voice waveform. Pin the
-        # response format here so both TTS server and bot agree before
-        # either of them starts.
+        # Opus/mp3/aac need ffmpeg. Prefer a local self-contained
+        # bootstrap under runs\ffmpeg, then fall back to wav so the bot
+        # still starts even if the download host is unavailable.
+        $TtsFormat = [string]($env:PROTOAGI_TTS_RESPONSE_FORMAT)
+        if ([string]::IsNullOrWhiteSpace($TtsFormat)) {
+            $TtsFormat = [string]($DotEnv["PROTOAGI_TTS_RESPONSE_FORMAT"])
+        }
+        if ([string]::IsNullOrWhiteSpace($TtsFormat)) {
+            $TtsFormat = "opus"
+        }
+        $TtsFormat = $TtsFormat.Trim().ToLowerInvariant()
+        if ($TtsFormat -notin @("wav", "pcm")) {
+            . (Join-Path $PSScriptRoot "ensure-ffmpeg.ps1") -Root $Root
+        }
         $HasFfmpeg = [bool](Get-Command ffmpeg -ErrorAction SilentlyContinue)
-        $UserPickedFormat = -not [string]::IsNullOrWhiteSpace([string]($DotEnv["PROTOAGI_TTS_RESPONSE_FORMAT"]))
-        if (-not $HasFfmpeg -and -not $UserPickedFormat) {
-            Write-Host "ffmpeg not on PATH - TTS will use wav (audio bubble)." `
-                "Install via 'winget install Gyan.FFmpeg' for opus voice waveforms."
+        if (-not $HasFfmpeg -and $TtsFormat -notin @("wav", "pcm")) {
+            Write-Host "ffmpeg is unavailable after bootstrap - TTS will use wav (audio bubble)." `
+                "Set PROTOAGI_FFMPEG_URL to a reachable ffmpeg zip if you want opus voice waveforms."
             $env:PROTOAGI_TTS_RESPONSE_FORMAT = "wav"
         }
         $TtsPort = [int]$Matches["port"]

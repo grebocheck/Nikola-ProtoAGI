@@ -149,7 +149,10 @@ photo-oriented recall; otherwise they fall back to caption/text recall.
 
 Optional voice transcription and TTS are configured through `.env` with
 OpenAI-compatible `/audio/transcriptions` and `/audio/speech` endpoints. The
-project does not bundle voice or TTS model weights.
+project does not bundle voice or TTS model weights. On Windows, TTS startup can
+bootstrap a local `ffmpeg` into `runs\ffmpeg` for Telegram Opus voice replies;
+if that download is unavailable, it falls back to WAV audio bubbles instead of
+blocking the bot.
 
 More details: [docs/TELEGRAM.md](docs/TELEGRAM.md).
 

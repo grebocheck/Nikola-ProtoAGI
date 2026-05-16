@@ -254,6 +254,10 @@ model into the llama.cpp/Hugging Face cache. Use `scripts\start-vision-server.ps
 directly if you want to warm the cache before starting Telegram.
 Vision requests include the llama.cpp multimodal marker internally so uploaded
 Telegram images are paired with the image bytes instead of failing tokenization.
+Animated GIFs use Telegram's still-frame thumbnail when one is available. If a
+GIF arrives as a raw `image/gif` document without a thumbnail, the bot stores it
+as media but does not send the full animation through the vision LLM; that keeps
+large GIF payloads from overflowing the main 8k context.
 
 Incoming stickers are also treated as conversational messages with emoji and
 pack metadata, so the model can react to them instead of ignoring them.
@@ -310,10 +314,12 @@ the `uk_UA-ukrainian_tts-medium` model (~63 MB) into `config\tts\models\`,
 and starts the OpenAI-compatible TTS bridge [scripts/tts-server-uk.py](../scripts/tts-server-uk.py).
 
 The bridge transcodes Piper's WAV output through `ffmpeg` into OGG/Opus so
-Telegram receives a proper voice waveform via `sendVoice`. `ffmpeg` must
-be available in `PATH`. Without ffmpeg, set
-`PROTOAGI_TTS_RESPONSE_FORMAT=wav`, which skips transcoding (Telegram will
-deliver it via `sendAudio` instead).
+Telegram receives a proper voice waveform via `sendVoice`. On Windows the
+startup scripts first look for `ffmpeg` in `PATH`, then bootstrap a local copy
+under `runs\ffmpeg` using `scripts\ensure-ffmpeg.ps1`. Override the download
+source with `PROTOAGI_FFMPEG_URL` if needed. If ffmpeg is still unavailable,
+`run-nikola.bat` falls back to `PROTOAGI_TTS_RESPONSE_FORMAT=wav`, which skips
+transcoding and delivers the result via `sendAudio` instead.
 
 [config/tts/voice_map.json](../config/tts/voice_map.json) maps persona
 voice keys to Piper UA speakers (the model ships with three speakers
