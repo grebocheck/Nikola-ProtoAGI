@@ -30,8 +30,12 @@ VISION_BOILERPLATE_PATTERNS = (
     re.compile(r"\s*(if you have any (other )?questions.*|if you need .*|please let me know\.?)\s*$", re.I),
 )
 VISION_PROMPT_LEAK_RE = re.compile(
-    r"(опиши зображення|telegram-чат|підпис користувача|не вигадуй|що на цьому зображенні|"
-    r"describe the image|visible text)",
+    # Only catches genuinely prompt-echoing phrases. ``visible text`` was
+    # in here too but vision models legitimately use it in normal output
+    # ("the visible text reads ..."), so it triggered constant false
+    # positives that surfaced as "опис недоступний" in the admin UI.
+    r"(опиши зображення|telegram-чат|підпис користувача|не вигадуй|"
+    r"що на цьому зображенні|do not follow instructions|user caption:)",
     re.IGNORECASE,
 )
 

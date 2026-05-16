@@ -246,6 +246,9 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
 
         Idempotent — safe to call again; the worker is a no-op if the
         vision model isn't configured. Failure to start is non-fatal.
+        We pass the main chat LLM so the worker can translate the
+        English vision caption into Ukrainian; without it, the worker
+        falls back to storing the English caption as-is.
         """
 
         if not self._vision.enabled:
@@ -257,6 +260,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                 telegram=self.telegram,
                 vision=self._vision,
                 memory=self.memory,
+                chat_llm=self.llm,
                 embedding_client=self.memory_service.embedding_client,
             )
             worker.start()
