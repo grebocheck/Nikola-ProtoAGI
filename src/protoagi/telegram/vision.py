@@ -22,7 +22,7 @@ from ..harmony import clean_model_content
 from ..openai_compat import OpenAICompatError, OpenAICompatibleClient
 from ..storage.memory import MemoryStore
 from .api import TelegramApi, TelegramApiError
-from .json_io import ImageAttachment
+from .json_io import ImageAttachment, StickerAttachment
 
 
 VISION_BOILERPLATE_PATTERNS = (
@@ -114,6 +114,32 @@ class VisionDescriber:
         except (OpenAICompatError, TelegramApiError, OSError, ValueError) as exc:
             return f"зображення отримано, але опис не вдався: {exc}"
 
+    def describe_sticker(self, sticker: StickerAttachment) -> str:
+        if self.vision_llm is None:
+            return ""
+        file_id = sticker.thumbnail_file_id or sticker.file_id
+        try:
+            file_info = self.telegram.get_file(file_id)
+            file_path = str(file_info.get("file_path") or "")
+            if not file_path:
+                return ""
+            data = self.telegram.download_file(file_path, max_bytes=self.max_bytes)
+            if sticker.thumbnail_file_id:
+                return self._describe_bytes(
+                    data,
+                    mime_type=_mime_from_file_path(file_path),
+                    caption="Telegram sticker thumbnail",
+                )
+            frame = _extract_still_frame(data)
+            if frame:
+                return self._describe_bytes(frame, mime_type="image/jpeg", caption="Telegram sticker")
+            mime_type = _mime_from_file_path(file_path)
+            if mime_type.startswith("image/"):
+                return self._describe_bytes(data, mime_type=mime_type, caption="Telegram sticker")
+        except (OpenAICompatError, TelegramApiError, OSError, ValueError):
+            return ""
+        return ""
+
     def _describe_gif(self, data: bytes, *, caption: str = "") -> str:
         if self.vision_llm is None:
             return "GIF отримано, опис недоступний"
@@ -191,6 +217,10 @@ class VisionDescriber:
 
 
 def _extract_gif_still_frame(data: bytes) -> bytes | None:
+    return _extract_still_frame(data)
+
+
+def _extract_still_frame(data: bytes) -> bytes | None:
     ffmpeg = _ffmpeg_executable()
     if not ffmpeg:
         return None
@@ -225,6 +255,23 @@ def _extract_gif_still_frame(data: bytes) -> bytes | None:
     return proc.stdout
 
 
+def _mime_from_file_path(file_path: str) -> str:
+    value = str(file_path or "").lower().split("?", 1)[0]
+    if value.endswith((".jpg", ".jpeg")):
+        return "image/jpeg"
+    if value.endswith(".png"):
+        return "image/png"
+    if value.endswith(".webp"):
+        return "image/webp"
+    if value.endswith(".gif"):
+        return "image/gif"
+    if value.endswith(".webm"):
+        return "video/webm"
+    if value.endswith(".tgs"):
+        return "application/x-tgsticker"
+    return "application/octet-stream"
+
+
 def _ffmpeg_executable() -> str | None:
     found = shutil.which("ffmpeg")
     if found:
@@ -241,4 +288,5 @@ __all__ = [
     "VisionDescriber",
     "clean_vision_description",
     "_extract_gif_still_frame",
+    "_extract_still_frame",
 ]

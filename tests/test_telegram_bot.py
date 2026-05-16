@@ -1524,9 +1524,83 @@ class TelegramBotTests(unittest.TestCase):
             )
             self.assertTrue(processed)
             payload = llm.messages[0][1]["content"]
-            self.assertIn("[стікер: sticker, 🙂", payload)
+            self.assertIn("[стікер: sticker, emoji=🙂", payload)
             self.assertEqual(telegram.sent[0]["text"], "ахах, прийнято")
             self.assertEqual(telegram.stickers[0]["sticker"], "SenkoSan:smile")
+
+    def test_incoming_sticker_uses_visual_description_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": true, "reply": "бачу сонний настрій", '
+                '"stickers": [], "memories": [], "next_check_minutes": 60}'
+            )
+            vision = FakeVisionLLM("sleepy fox wrapped in a blanket")
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(token="token", persona_key="solomiya", vision_model="vision-test"),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.vision_llm = vision
+            bot.bootstrap()
+            processed = bot.process_update(
+                {
+                    "update_id": 933,
+                    "message": {
+                        "message_id": 933,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "sticker": {
+                            "file_id": "sticker-file",
+                            "emoji": "🧃",
+                            "set_name": "RandomPack",
+                            "is_animated": False,
+                            "is_video": False,
+                            "thumbnail": {"file_id": "sticker-thumb"},
+                        },
+                    },
+                }
+            )
+            self.assertTrue(processed)
+            self.assertTrue(vision.messages)
+            payload = llm.messages[0][1]["content"]
+            self.assertIn("sleepy fox wrapped in a blanket", payload)
+            self.assertIn("emoji=🧃", payload)
+            recent = memory.recent_telegram_messages(123, limit=1)[0]
+            self.assertEqual(recent["metadata"]["sticker"]["visual_description"], "sleepy fox wrapped in a blanket")
+
+    def test_typing_action_is_sent_while_processing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": true, "reply": "я тут", '
+                '"stickers": [], "memories": [], "next_check_minutes": 60}'
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(token="token", persona_key="solomiya"),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.bootstrap()
+            processed = bot.process_update(
+                {
+                    "update_id": 934,
+                    "message": {
+                        "message_id": 934,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "text": "ти тут?",
+                    },
+                }
+            )
+            self.assertTrue(processed)
+            self.assertTrue(any(item["action"] == "typing" for item in telegram.actions))
 
     def test_assistanty_phrases_are_removed_from_outgoing_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -261,8 +261,11 @@ JPEG frame for the vision LLM. If no frame can be extracted, the current turn
 gets a neutral GIF marker but no long-term media memory is written from an
 `опис недоступний` placeholder.
 
-Incoming stickers are also treated as conversational messages with emoji and
-pack metadata, so the model can react to them instead of ignoring them.
+Incoming stickers are also treated as conversational messages. When vision is
+enabled, the bot describes the sticker thumbnail or a locally extracted still
+frame and passes that `visual=` caption to the chat model; emoji and pack names
+are kept only as secondary metadata because Telegram sticker emoji are often
+noisy.
 
 Image bytes are stored in `media_blobs` with their caption and linked from a
 memory item via `media_id`. This lets later recall surface old photo captions;

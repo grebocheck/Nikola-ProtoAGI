@@ -93,11 +93,16 @@ class TelegramAttachmentMixin:
             kind = "animated sticker"
         else:
             kind = "sticker"
+        thumb = sticker.get("thumbnail")
+        if not isinstance(thumb, dict):
+            thumb = sticker.get("thumb")
+        thumbnail_file_id = str(thumb.get("file_id") or "") if isinstance(thumb, dict) else ""
         return StickerAttachment(
             file_id=file_id,
             emoji=str(sticker.get("emoji") or ""),
             set_name=str(sticker.get("set_name") or ""),
             kind=kind,
+            thumbnail_file_id=thumbnail_file_id,
         )
 
     @staticmethod

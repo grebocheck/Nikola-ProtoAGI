@@ -64,6 +64,8 @@ class StickerAttachment:
     emoji: str
     set_name: str
     kind: str
+    thumbnail_file_id: str = ""
+    visual_description: str = ""
 
 
 _MAX_PARSE_SIZE = 64_000
@@ -570,12 +572,17 @@ def image_to_payload(image: ImageAttachment | None) -> dict[str, str] | None:
 def sticker_to_payload(sticker: StickerAttachment | None) -> dict[str, str] | None:
     if sticker is None:
         return None
-    return {
+    payload = {
         "file_id": sticker.file_id,
         "emoji": sticker.emoji,
         "set_name": sticker.set_name,
         "kind": sticker.kind,
     }
+    if sticker.thumbnail_file_id:
+        payload["thumbnail_file_id"] = sticker.thumbnail_file_id
+    if sticker.visual_description:
+        payload["visual_description"] = sticker.visual_description
+    return payload
 
 
 def _optional_int(value: Any) -> int | None:

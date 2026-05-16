@@ -10,7 +10,9 @@ from __future__ import annotations
 import json
 import time
 import traceback
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+import threading
 from typing import Any
 
 from ..config import AgentConfig, PROJECT_ROOT
@@ -292,6 +294,32 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                     f"(model={model}). Feature disabled until you start it.",
                     flush=True,
                 )
+
+    def _send_chat_action_safely(self, chat_id: str | int, action: str = "typing") -> None:
+        try:
+            self.telegram.send_chat_action(chat_id, action)
+        except TelegramApiError:
+            pass
+
+    @contextmanager
+    def _chat_action_loop(self, chat: TelegramChat, action: str = "typing", *, enabled: bool = True):
+        if not enabled:
+            yield
+            return
+        stop = threading.Event()
+        self._send_chat_action_safely(chat.chat_id, action)
+
+        def keepalive() -> None:
+            while not stop.wait(4.0):
+                self._send_chat_action_safely(chat.chat_id, action)
+
+        worker = threading.Thread(target=keepalive, daemon=True)
+        worker.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            worker.join(timeout=0.2)
 
     def run_forever(self) -> None:
         while True:
@@ -933,13 +961,25 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         self.memory.mark_telegram_user_message(chat_id)
         self._upsert_user_profile(user)
         self._style_tuner.record_incoming_reply(chat_id)
+        addressed = self._is_addressed(text, message)
 
         current_message_id = int(message.get("message_id", 0))
         thread_id = self.thread_id(chat_id)
         display = display_sender(user)
-        image_description = self._vision.describe(image, caption=text) if image is not None else ""
-        voice_result = self._transcribe_voice(voice) if voice is not None else VoiceTranscriptionResult()
+        with self._chat_action_loop(
+            chat_state,
+            enabled=chat_state.chat_type == "private" or addressed,
+        ):
+            image_description = self._vision.describe(image, caption=text) if image is not None else ""
+            voice_result = self._transcribe_voice(voice) if voice is not None else VoiceTranscriptionResult()
+            sticker_description = (
+                self._vision.describe_sticker(incoming_sticker)
+                if incoming_sticker is not None
+                else ""
+            )
         voice_transcript = voice_result.text
+        if incoming_sticker is not None:
+            incoming_sticker.visual_description = sticker_description
         incoming_text = self._incoming_text_with_media(
             text,
             image,
@@ -995,7 +1035,6 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             )
             return True
 
-        addressed = self._is_addressed(text, message)
         if self._should_skip_without_llm(chat_state, addressed):
             return True
         gate = self._group_gate.evaluate(
@@ -1159,13 +1198,14 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                 "content": self._prompt_json(context_payload),
             },
         ]
-        response = self.llm.chat_completion(
-            messages,
-            temperature=self.agent_config.temperature,
-            top_p=self.agent_config.top_p,
-            max_tokens=self.telegram_config.decision_max_tokens,
-            response_format=DECISION_JSON_SCHEMA,
-        )
+        with self._chat_action_loop(chat):
+            response = self.llm.chat_completion(
+                messages,
+                temperature=self.agent_config.temperature,
+                top_p=self.agent_config.top_p,
+                max_tokens=self.telegram_config.decision_max_tokens,
+                response_format=DECISION_JSON_SCHEMA,
+            )
         llm_calls += 1
         message = response.get("choices", [{}])[0].get("message", {})
         content = clean_model_content(message.get("content", ""))
@@ -1258,16 +1298,17 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                 "Do not request another tool."
             ),
         }
-        response = self.llm.chat_completion(
-            [
-                {"role": "system", "content": self._decision_system_prompt()},
-                {"role": "user", "content": self._prompt_json(merge_payload)},
-            ],
-            temperature=self.agent_config.temperature,
-            top_p=self.agent_config.top_p,
-            max_tokens=self.telegram_config.decision_max_tokens,
-            response_format=DECISION_JSON_SCHEMA,
-        )
+        with self._chat_action_loop(chat):
+            response = self.llm.chat_completion(
+                [
+                    {"role": "system", "content": self._decision_system_prompt()},
+                    {"role": "user", "content": self._prompt_json(merge_payload)},
+                ],
+                temperature=self.agent_config.temperature,
+                top_p=self.agent_config.top_p,
+                max_tokens=self.telegram_config.decision_max_tokens,
+                response_format=DECISION_JSON_SCHEMA,
+            )
         message = response.get("choices", [{}])[0].get("message", {})
         content = clean_model_content(message.get("content", ""))
         revised = decision_from_payload(extract_json_object(content))
@@ -1384,18 +1425,19 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             "known_persona_self_memory": [fact.text for fact in persona_self_memory],
             "adaptive_reply_style": self._style_payload(chat),
         }
-        response = self.llm.chat_completion(
-            [
-                {"role": "system", "content": self._reply_system_prompt()},
-                {
-                    "role": "user",
-                    "content": self._prompt_json(reply_payload),
-                },
-            ],
-            temperature=self.agent_config.temperature,
-            top_p=self.agent_config.top_p,
-            max_tokens=self.telegram_config.reply_max_tokens,
-        )
+        with self._chat_action_loop(chat):
+            response = self.llm.chat_completion(
+                [
+                    {"role": "system", "content": self._reply_system_prompt()},
+                    {
+                        "role": "user",
+                        "content": self._prompt_json(reply_payload),
+                    },
+                ],
+                temperature=self.agent_config.temperature,
+                top_p=self.agent_config.top_p,
+                max_tokens=self.telegram_config.reply_max_tokens,
+            )
         content = clean_model_content(response.get("choices", [{}])[0].get("message", {}).get("content", ""))
         return self._clean_reply_text(content)
 
@@ -1525,10 +1567,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         if stickers and len(messages) == 1 and self._is_generic_sticker_filler(messages[0]):
             messages = []
         if messages:
-            try:
-                self.telegram.send_chat_action(chat.chat_id, "typing")
-            except TelegramApiError:
-                pass
+            self._send_chat_action_safely(chat.chat_id, "typing")
         tts_delivery = self.telegram_config.tts_delivery
         sent_text = False
         text_messages = messages
@@ -1592,10 +1631,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             file_id = self._select_sticker_file_id(sticker_choice, chat.chat_id)
             if not file_id:
                 continue
-            try:
-                self.telegram.send_chat_action(chat.chat_id, "choose_sticker")
-            except TelegramApiError:
-                pass
+            self._send_chat_action_safely(chat.chat_id, "choose_sticker")
             sent = self.telegram.send_sticker(
                 chat.chat_id,
                 file_id,
@@ -2630,8 +2666,11 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                 parts.append(f"[зображення: {description or image_label}]")
         if sticker is not None:
             bits = [sticker.kind]
+            visual = sticker.visual_description.strip()
+            if visual and not _is_unavailable_media_description(visual):
+                bits.append(f"visual={visual}")
             if sticker.emoji:
-                bits.append(sticker.emoji)
+                bits.append(f"emoji={sticker.emoji}")
             if sticker.set_name:
                 bits.append(f"pack={sticker.set_name}")
             parts.append("[стікер: " + ", ".join(bits) + "]")
