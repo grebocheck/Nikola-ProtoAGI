@@ -1,4 +1,5 @@
 param(
+    [ValidateRange(1, 65535)]
     [int]$Port = 8084,
     [string]$Model = "uk_UA-ukrainian_tts-medium",
     [switch]$Foreground,
@@ -184,6 +185,10 @@ foreach ($i in 1..120) {
 }
 
 if (-not $Ready) {
+    if (-not $Proc.HasExited) {
+        Stop-Process -Id $Proc.Id -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path $PidFile) { Remove-Item $PidFile -Force -ErrorAction SilentlyContinue }
     throw "TTS server did not respond within 120s. Tail with: .\scripts\start-tts-server.ps1 -Logs"
 }
 

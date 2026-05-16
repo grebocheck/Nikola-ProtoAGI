@@ -219,6 +219,7 @@ if (-not $NoTts -and -not $Once) {
     $TtsTruthy = $TtsEnabled -match "^(1|true|yes|on)$"
     if ($TtsTruthy -and `
         $TtsBaseUrl -match "^https?://(127\.0\.0\.1|localhost):(?<port>\d+)(/|$)") {
+        $TtsPort = [int]$Matches["port"]
         # Opus/mp3/aac need ffmpeg. Prefer a local self-contained
         # bootstrap under runs\ffmpeg, then fall back to wav so the bot
         # still starts even if the download host is unavailable.
@@ -239,7 +240,6 @@ if (-not $NoTts -and -not $Once) {
                 "Set PROTOAGI_FFMPEG_URL to a reachable ffmpeg zip if you want opus voice waveforms."
             $env:PROTOAGI_TTS_RESPONSE_FORMAT = "wav"
         }
-        $TtsPort = [int]$Matches["port"]
         try {
             $TtsArgs = @{ Port = $TtsPort }
             if ($TtsCpu) { $TtsArgs.Cpu = $true }
