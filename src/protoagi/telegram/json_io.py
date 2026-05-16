@@ -74,11 +74,15 @@ _MAX_PARSE_SIZE = 64_000
 _STICKER_ITEM_SCHEMA = {
     "type": "object",
     "properties": {
+        "sticker_id": {"type": "string"},
         "pack": {"type": "string"},
         "emoji": {"type": "string"},
         "reason": {"type": "string"},
     },
-    "required": ["pack"],
+    # ``sticker_id`` (preferred — picks an exact described sticker) and
+    # legacy ``pack`` (server randomises within pack) are both accepted.
+    # We don't make either ``required`` so an old client doesn't get
+    # rejected by the JSON schema validator.
     "additionalProperties": False,
 }
 
@@ -530,6 +534,14 @@ def normalize_reply_messages(value: Any) -> list[str]:
 
 
 def normalize_sticker_choices(value: Any) -> list[dict[str, str]]:
+    """Accept either ``sticker_id`` (preferred) or ``pack`` (legacy).
+
+    An item with ``sticker_id`` set names an exact described sticker
+    and bypasses the pack-randomisation path. Items with only ``pack``
+    fall back to the older behaviour for backward compat / packs that
+    haven't been described yet.
+    """
+
     if isinstance(value, dict):
         items = [value]
     elif isinstance(value, list):
@@ -540,16 +552,20 @@ def normalize_sticker_choices(value: Any) -> list[dict[str, str]]:
     for item in items:
         if not isinstance(item, dict):
             continue
-        pack = normalize_sticker_pack(str(item.get("pack", "")))
-        if not pack:
+        sticker_id = str(item.get("sticker_id") or "").strip()
+        pack_raw = str(item.get("pack", "") or "").strip()
+        pack = normalize_sticker_pack(pack_raw) if pack_raw else None
+        if not sticker_id and not pack:
             continue
-        choices.append(
-            {
-                "pack": pack,
-                "emoji": str(item.get("emoji", "") or ""),
-                "reason": str(item.get("reason", "") or ""),
-            }
-        )
+        entry: dict[str, str] = {
+            "emoji": str(item.get("emoji", "") or ""),
+            "reason": str(item.get("reason", "") or ""),
+        }
+        if sticker_id:
+            entry["sticker_id"] = sticker_id
+        if pack:
+            entry["pack"] = pack
+        choices.append(entry)
     return choices[:2]
 
 

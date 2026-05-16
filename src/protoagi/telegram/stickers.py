@@ -5,10 +5,18 @@ from __future__ import annotations
 import re
 
 
+# Pack metadata is only a hint for ambient classification (e.g.
+# auto-reactions on laughter). The real selection signal now comes from
+# the per-sticker descriptions populated by the vision describer.
 STICKER_PACKS = {
     "Bocchi_the_Rock_sticker_pack2": "expressive awkward, shy, funny, surprised anime reactions",
     "SenkoSan": "warm, caring, cozy, gentle reactions",
     "M1ku_Hatsune": "playful, energetic, music-like, cheerful reactions",
+    "Bambuko_debilizm_UA": "Ukrainian meme stickers with text, ironic and absurd reactions",
+    "cringeperekladpak_by_fStikBot": "ironic mistranslated meme pack with Ukrainian text overlays",
+    "omnvrtEminenceInShadow": "anime stickers in Eminence in Shadow universe — dramatic, edgy, smug reactions",
+    "HeridiumPack": "personal custom pack used by the operator's circle",
+    "pomoyka_vid_mene": "personal trash-folder pack with assorted reactions",
 }
 STICKER_ALIASES = {
     "bocchi": "Bocchi_the_Rock_sticker_pack2",
@@ -18,6 +26,14 @@ STICKER_ALIASES = {
     "miku": "M1ku_Hatsune",
     "hatsune": "M1ku_Hatsune",
     "m1ku": "M1ku_Hatsune",
+    "bambuko": "Bambuko_debilizm_UA",
+    "debilizm": "Bambuko_debilizm_UA",
+    "cringe": "cringeperekladpak_by_fStikBot",
+    "cringeperekladpak": "cringeperekladpak_by_fStikBot",
+    "eminence": "omnvrtEminenceInShadow",
+    "shadow": "omnvrtEminenceInShadow",
+    "heridium": "HeridiumPack",
+    "pomoyka": "pomoyka_vid_mene",
 }
 
 

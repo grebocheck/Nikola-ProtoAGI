@@ -238,7 +238,31 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         self.memory.set_kv("telegram:bot_username", self.bot_username)
         self.memory.set_kv("telegram:bot_id", str(me.get("id", "")))
         self._warn_about_unreachable_endpoints()
+        self._start_sticker_describer()
         return me
+
+    def _start_sticker_describer(self) -> None:
+        """Kick off the background sticker description pass.
+
+        Idempotent — safe to call again; the worker is a no-op if the
+        vision model isn't configured. Failure to start is non-fatal.
+        """
+
+        if not self._vision.enabled:
+            return
+        try:
+            from .sticker_describer import StickerDescriberWorker
+
+            worker = StickerDescriberWorker(
+                telegram=self.telegram,
+                vision=self._vision,
+                memory=self.memory,
+                embedding_client=self.memory_service.embedding_client,
+            )
+            worker.start()
+            self._sticker_describer = worker
+        except Exception as exc:  # noqa: BLE001 - non-fatal
+            print(f"[sticker_describer] failed to start: {exc}", flush=True)
 
     def _warn_about_unreachable_endpoints(self) -> None:
         """Quick socket probe of optional helper endpoints.
@@ -1187,6 +1211,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             ],
             "adaptive_reply_style": self._style_payload(chat),
             "available_sticker_packs": STICKER_PACKS,
+            "available_stickers": self._available_stickers_payload(incoming_text),
             "available_tools": self._available_tool_names(),
             "open_goals": self._open_goals_payload(chat),
             "known_user_state": self._user_state_payload(user_id),
@@ -2085,6 +2110,79 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                 )
             if tensions:
                 result[fact_id] = tensions
+        return result
+
+    def _available_stickers_payload(
+        self,
+        query_text: str,
+        *,
+        limit: int = 12,
+    ) -> list[dict[str, Any]]:
+        """Top-K relevant stickers for the model to choose from.
+
+        Ranking strategy:
+        - If both the conversation embedding and most stickers have
+          embeddings, do cosine similarity.
+        - Otherwise (fresh deploys, vision still seeding) fall back to a
+          deterministic-but-mixed sample: a few per pack so the model at
+          least sees a variety to choose from.
+
+        Skips rows that haven't been described yet — sending an empty
+        description to the model just wastes tokens.
+        """
+
+        rows = self.memory.list_sticker_descriptions(only_described=True, limit=500)
+        if not rows:
+            return []
+        ranked = self._rank_stickers(rows, query_text=query_text)[:limit]
+        return [
+            {
+                "sticker_id": row.sticker_id,
+                "pack": row.set_name,
+                "emoji": row.emoji,
+                "description": row.description,
+            }
+            for row in ranked
+        ]
+
+    def _rank_stickers(self, rows, query_text: str):
+        from ..storage.memory import cosine_similarity
+
+        client = self.memory_service.embedding_client
+        if (
+            client is not None
+            and client.config.enabled
+            and any(row.embedding for row in rows)
+        ):
+            try:
+                query_vec = client.embed(query_text or "")
+            except Exception:  # noqa: BLE001
+                query_vec = None
+            if query_vec:
+                scored: list[tuple[float, Any]] = []
+                for row in rows:
+                    if not row.embedding:
+                        continue
+                    score = cosine_similarity(query_vec, row.embedding)
+                    scored.append((score, row))
+                if scored:
+                    scored.sort(key=lambda item: item[0], reverse=True)
+                    return [row for _, row in scored]
+        # Heuristic fallback — round-robin by pack so every pack is
+        # represented when embeddings are missing.
+        by_pack: dict[str, list[Any]] = {}
+        for row in rows:
+            by_pack.setdefault(row.set_name, []).append(row)
+        result: list[Any] = []
+        while by_pack:
+            for pack_name in list(by_pack.keys()):
+                bucket = by_pack[pack_name]
+                if not bucket:
+                    del by_pack[pack_name]
+                    continue
+                result.append(bucket.pop(0))
+                if not bucket:
+                    del by_pack[pack_name]
         return result
 
     def _user_state_payload(self, user_id: str | None) -> dict[str, Any] | None:

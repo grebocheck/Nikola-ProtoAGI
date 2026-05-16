@@ -111,9 +111,36 @@ class TelegramStickerMixin:
         return 0
 
     def _select_sticker_file_id(self, choice: dict[str, str], chat_id: str) -> str | None:
+        # New path: model picked an exact sticker by id from
+        # ``available_stickers`` context. We trust that and skip pack
+        # randomisation entirely. ``mark_sticker_used`` lets later code
+        # surface "recently used" if we want it.
+        sticker_id = str(choice.get("sticker_id") or "").strip()
+        if sticker_id:
+            try:
+                self.memory.mark_sticker_used(sticker_id)
+            except Exception:  # noqa: BLE001
+                pass
+            return sticker_id
+
+        # Legacy path: model named only a pack. Try to surface a
+        # described sticker from that pack first (so even old prompts
+        # benefit from cached captions); fall back to the previous
+        # emoji-filter heuristic if nothing has been described yet.
         pack = normalize_sticker_pack(choice.get("pack", ""))
         if not pack:
             return None
+        try:
+            described = self.memory.list_sticker_descriptions(
+                set_name=pack, only_described=True, limit=200
+            )
+        except Exception:  # noqa: BLE001
+            described = []
+        if described:
+            seed = f"{chat_id}:{pack}:{choice.get('emoji', '')}:{choice.get('reason', '')}".encode("utf-8")
+            digest = hashlib.sha256(seed).digest()
+            index = int.from_bytes(digest[:4], "big") % len(described)
+            return described[index].sticker_id
         stickers = self._load_sticker_pack(pack)
         if not stickers:
             return None

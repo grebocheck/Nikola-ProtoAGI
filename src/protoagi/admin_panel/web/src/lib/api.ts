@@ -113,19 +113,16 @@ export interface TelegramChat {
   last_bot_message_at: string | null;
 }
 
-export interface ReasoningOverview {
-  chats: Array<{
-    chat_id: string;
-    display_name: string | null;
-    chat_type: string | null;
-    last_decision_kind: string | null;
-    updated_at: string | null;
-    count: number;
-  }>;
+export interface ReasoningOverviewItem {
+  chat_id: string;
+  display_name: string | null;
+  chat_type: string | null;
+  last_decision_kind: string | null;
+  updated_at: string | null;
+  entries: number;
 }
 
 export interface ReasoningEntry {
-  chat_id: string;
   decision_kind: string;
   incoming_text: string;
   reasoning_text: string;
@@ -245,10 +242,11 @@ export const api = {
 
   chats: () => http<TelegramChat[]>("/api/chats"),
 
-  reasoningOverview: () => http<ReasoningOverview>("/api/reasoning"),
+  reasoningOverview: () =>
+    http<ReasoningOverviewItem[]>("/api/reasoning"),
 
   reasoningEntries: (chatId: string, limit = 20) =>
-    http<{ chat_id: string; entries: ReasoningEntry[] }>(
+    http<ReasoningEntry[]>(
       `/api/reasoning/${encodeURIComponent(chatId)}`,
       { params: { limit } }
     ),

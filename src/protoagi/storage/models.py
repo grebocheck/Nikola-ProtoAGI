@@ -139,6 +139,30 @@ class Reminder:
 
 
 @dataclass(slots=True)
+class StickerDescription:
+    """Cached vision-model description of a Telegram sticker.
+
+    Generated once per sticker (background pass on bot startup), then
+    reused for sticker selection. ``embedding`` is the optional dense
+    vector we use to retrieve relevant stickers per turn. ``failure_reason``
+    captures the last describer error so we can skip repeatedly-broken
+    stickers without retrying them every restart.
+    """
+
+    sticker_id: str
+    set_name: str
+    emoji: str
+    description: str
+    embedding: list[float] | None
+    embedding_model: str | None
+    failure_reason: str | None
+    attempt_count: int
+    last_used_at: str | None
+    created_at: str
+    updated_at: str | None
+
+
+@dataclass(slots=True)
 class MemoryConflict:
     """A pair of memory items the system thinks might be in tension.
 
@@ -311,6 +335,7 @@ __all__ = [
     "SCOPE_GLOBAL",
     "SCOPE_PERSONA",
     "SCOPE_USER",
+    "StickerDescription",
     "TelegramChat",
     "TelegramMessage",
     "UserProfile",

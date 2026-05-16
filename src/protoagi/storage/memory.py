@@ -55,6 +55,7 @@ from .models import (
     SCOPE_GLOBAL,
     SCOPE_PERSONA,
     SCOPE_USER,
+    StickerDescription,
     TelegramChat,
     TelegramMessage,
     UserProfile,
@@ -94,6 +95,7 @@ __all__ = [
     "SCOPE_GLOBAL",
     "SCOPE_PERSONA",
     "SCOPE_USER",
+    "StickerDescription",
     "TelegramChat",
     "TelegramMessage",
     "UserProfile",
@@ -130,7 +132,7 @@ class MemoryStore:
     handles).
     """
 
-    SCHEMA_VERSION = 7
+    SCHEMA_VERSION = 8
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -340,6 +342,23 @@ class MemoryStore:
                     ON goals(chat_id, status);
                 CREATE INDEX IF NOT EXISTS idx_goals_due_open
                     ON goals(due_at) WHERE status = 'open';
+                CREATE TABLE IF NOT EXISTS sticker_descriptions (
+                    sticker_id TEXT PRIMARY KEY,
+                    set_name TEXT NOT NULL,
+                    emoji TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT '',
+                    embedding BLOB,
+                    embedding_model TEXT,
+                    failure_reason TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    last_used_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_sticker_descriptions_set
+                    ON sticker_descriptions(set_name);
+                CREATE INDEX IF NOT EXISTS idx_sticker_descriptions_desc_present
+                    ON sticker_descriptions(set_name) WHERE description != '';
                 CREATE TABLE IF NOT EXISTS user_state (
                     user_id TEXT NOT NULL,
                     persona_key TEXT NOT NULL,
@@ -1572,6 +1591,164 @@ class MemoryStore:
         return items
 
     # ------------------------------------------------------------------
+    # Sticker descriptions (vision-model captions cached per sticker)
+
+    def get_sticker_description(self, sticker_id: str) -> StickerDescription | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM sticker_descriptions WHERE sticker_id = ?",
+                (str(sticker_id),),
+            ).fetchone()
+        return None if row is None else self._sticker_description_from_row(row)
+
+    def upsert_sticker_description(
+        self,
+        *,
+        sticker_id: str,
+        set_name: str,
+        emoji: str = "",
+        description: str = "",
+        embedding: Sequence[float] | None = None,
+        embedding_model: str | None = None,
+        failure_reason: str | None = None,
+    ) -> StickerDescription:
+        sticker_id = str(sticker_id or "").strip()
+        set_name = str(set_name or "").strip()
+        if not sticker_id or not set_name:
+            raise ValueError("sticker description needs sticker_id and set_name")
+        emoji_clean = str(emoji or "").strip()
+        description_clean = str(description or "").strip()
+        failure_clean = str(failure_reason or "").strip() or None
+        now = utc_now()
+        vector_blob = pack_embedding(embedding) if embedding else None
+        with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT attempt_count, created_at FROM sticker_descriptions "
+                "WHERE sticker_id = ?",
+                (sticker_id,),
+            ).fetchone()
+            attempts = int(existing["attempt_count"]) + 1 if existing else 1
+            created_at = str(existing["created_at"]) if existing else now
+            conn.execute(
+                """
+                INSERT INTO sticker_descriptions(
+                    sticker_id, set_name, emoji, description, embedding,
+                    embedding_model, failure_reason, attempt_count,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(sticker_id) DO UPDATE SET
+                    set_name = excluded.set_name,
+                    emoji = excluded.emoji,
+                    description = excluded.description,
+                    embedding = excluded.embedding,
+                    embedding_model = excluded.embedding_model,
+                    failure_reason = excluded.failure_reason,
+                    attempt_count = excluded.attempt_count,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    sticker_id,
+                    set_name,
+                    emoji_clean,
+                    description_clean,
+                    vector_blob,
+                    embedding_model,
+                    failure_clean,
+                    attempts,
+                    created_at,
+                    now,
+                ),
+            )
+        found = self.get_sticker_description(sticker_id)
+        if found is None:
+            raise RuntimeError("sticker description upsert failed")
+        return found
+
+    def list_sticker_descriptions(
+        self,
+        *,
+        set_name: str | None = None,
+        only_described: bool = False,
+        limit: int = 1000,
+    ) -> list[StickerDescription]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if set_name is not None:
+            clauses.append("set_name = ?")
+            params.append(set_name)
+        if only_described:
+            clauses.append("description != ''")
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(int(limit))
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM sticker_descriptions {where} LIMIT ?",
+                tuple(params),
+            ).fetchall()
+        return [self._sticker_description_from_row(row) for row in rows]
+
+    def list_undescribed_stickers(
+        self,
+        *,
+        set_name: str | None = None,
+        max_attempts: int = 3,
+        limit: int = 100,
+    ) -> list[StickerDescription]:
+        """Stickers we haven't successfully captioned yet.
+
+        ``attempt_count`` is bumped on every upsert, so persistently
+        failing stickers stop getting retried after ``max_attempts``.
+        """
+
+        clauses = ["description = ''", "attempt_count < ?"]
+        params: list[Any] = [int(max_attempts)]
+        if set_name is not None:
+            clauses.append("set_name = ?")
+            params.append(set_name)
+        where = " AND ".join(clauses)
+        params.append(int(limit))
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM sticker_descriptions
+                WHERE {where}
+                ORDER BY attempt_count ASC, created_at ASC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return [self._sticker_description_from_row(row) for row in rows]
+
+    def mark_sticker_used(self, sticker_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE sticker_descriptions SET last_used_at = ? WHERE sticker_id = ?",
+                (utc_now(), str(sticker_id)),
+            )
+
+    def count_sticker_descriptions(
+        self,
+        *,
+        set_name: str | None = None,
+        only_described: bool = False,
+    ) -> int:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if set_name is not None:
+            clauses.append("set_name = ?")
+            params.append(set_name)
+        if only_described:
+            clauses.append("description != ''")
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self.connect() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) AS n FROM sticker_descriptions {where}",
+                tuple(params),
+            ).fetchone()
+        return int(row["n"])
+
+    # ------------------------------------------------------------------
     # Memory conflicts (pairs of semantically-similar facts the
     # consolidate pass did not auto-merge — candidates for the persona
     # to review or for belief revision down the line).
@@ -2301,6 +2478,24 @@ class MemoryStore:
             resolution_winner_id=row["resolution_winner_id"],
             resolved_at=row["resolved_at"],
             metadata=json.loads(row["metadata"] or "{}"),
+        )
+
+    @staticmethod
+    def _sticker_description_from_row(row: sqlite3.Row) -> StickerDescription:
+        embedding_blob = row["embedding"] if "embedding" in row.keys() else None
+        embedding = unpack_embedding(embedding_blob) if embedding_blob else None
+        return StickerDescription(
+            sticker_id=str(row["sticker_id"]),
+            set_name=str(row["set_name"]),
+            emoji=str(row["emoji"] or ""),
+            description=str(row["description"] or ""),
+            embedding=embedding,
+            embedding_model=row["embedding_model"],
+            failure_reason=row["failure_reason"],
+            attempt_count=int(row["attempt_count"]),
+            last_used_at=row["last_used_at"],
+            created_at=str(row["created_at"]),
+            updated_at=row["updated_at"],
         )
 
     @staticmethod

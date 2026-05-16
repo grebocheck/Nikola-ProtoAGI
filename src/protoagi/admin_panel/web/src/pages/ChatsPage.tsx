@@ -55,7 +55,7 @@ export function ChatsPage() {
     api
       .reasoningEntries(selectedChatId, 30)
       .then((value) => {
-        if (!cancelled) setEntries(value.entries);
+        if (!cancelled) setEntries(value);
       })
       .catch((err) => {
         if (!cancelled) setEntriesError(String(err));

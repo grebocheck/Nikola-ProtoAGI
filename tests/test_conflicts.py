@@ -144,7 +144,7 @@ class ConflictStorageTests(unittest.TestCase):
         )
 
     def test_schema_version_is_recorded(self) -> None:
-        self.assertEqual(self.store.get_kv("schema_version"), "7")
+        self.assertEqual(self.store.get_kv("schema_version"), "8")
 
 
 class ConflictScanTests(unittest.TestCase):
