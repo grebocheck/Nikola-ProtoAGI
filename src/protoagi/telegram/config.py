@@ -63,12 +63,20 @@ class TelegramConfig:
     tts_max_chars: int = 600
     tts_response_format: str = "opus"
     tts_speed: float = 1.0
+    tts_delivery: str = "auto"
+    tts_auto_cooldown_seconds: int = 6 * 60 * 60
+    tts_auto_max_chars: int = 280
     group_gate: GroupGateConfig = field(default_factory=GroupGateConfig)
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
     reasoning_log: ReasoningLogConfig = field(default_factory=ReasoningLogConfig)
 
     def __post_init__(self) -> None:
         self.set_persona(self.persona_key)
+        self.tts_delivery = _normalize_tts_delivery(self.tts_delivery)
+        if self.tts_auto_cooldown_seconds < 0:
+            self.tts_auto_cooldown_seconds = 0
+        if self.tts_auto_max_chars <= 0:
+            self.tts_auto_max_chars = self.tts_max_chars
         if self.llm_context_size < 8192:
             scaled = max(1200, int(self.llm_context_size * 0.75))
             self.prompt_context_max_chars = min(self.prompt_context_max_chars, scaled)
@@ -125,6 +133,9 @@ class TelegramConfig:
             tts_max_chars=env_int("PROTOAGI_TTS_MAX_CHARS", 600),
             tts_response_format=os.environ.get("PROTOAGI_TTS_RESPONSE_FORMAT", "opus").strip().lower() or "opus",
             tts_speed=_env_float("PROTOAGI_TTS_SPEED", 1.0),
+            tts_delivery=_normalize_tts_delivery(os.environ.get("PROTOAGI_TTS_DELIVERY", "auto")),
+            tts_auto_cooldown_seconds=env_int("PROTOAGI_TTS_AUTO_COOLDOWN_SECONDS", 6 * 60 * 60),
+            tts_auto_max_chars=env_int("PROTOAGI_TTS_AUTO_MAX_CHARS", 280),
             group_gate=_load_group_gate_config(),
             web_search=_load_web_search_config(),
             reasoning_log=_load_reasoning_log_config(),
@@ -139,6 +150,19 @@ def _env_float(name: str, default: float) -> float:
         return float(raw)
     except ValueError:
         return default
+
+
+def _normalize_tts_delivery(raw: str | None) -> str:
+    value = (raw or "auto").strip().lower().replace("-", "_")
+    if value in {"auto", "smart", "rare", "model"}:
+        return "auto"
+    if value in {"voice", "voice_only", "audio", "audio_only"}:
+        return "voice"
+    if value in {"text_and_voice", "voice_and_text", "both", "duplicate"}:
+        return "text_and_voice"
+    if value in {"text", "text_only"}:
+        return "text"
+    return "auto"
 
 
 def _parse_chat_ids(raw: str) -> set[str] | None:

@@ -152,7 +152,9 @@ OpenAI-compatible `/audio/transcriptions` and `/audio/speech` endpoints. The
 project does not bundle voice or TTS model weights. On Windows, TTS startup can
 bootstrap a local `ffmpeg` into `runs\ffmpeg` for Telegram Opus voice replies;
 if that download is unavailable, it falls back to WAV audio bubbles instead of
-blocking the bot.
+blocking the bot. TTS delivery defaults to text-first `auto`: voice/audio is
+rare, model-requested, and still guarded by cooldown/length checks, with text
+fallback when synthesis fails.
 
 More details: [docs/TELEGRAM.md](docs/TELEGRAM.md).
 

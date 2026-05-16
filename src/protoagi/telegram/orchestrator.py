@@ -115,6 +115,7 @@ _TELEGRAM_LOG_TAIL_BYTES = 1_000_000
 _REMINDER_CHECK_KV = "telegram:last_reminder_check"
 _REFLECTION_LAST_KV = "telegram:last_reflection_at"
 _DECISION_METRICS_KV = "telegram:decision_metrics"
+_TTS_LAST_AUTO_VOICE_KV_PREFIX = "telegram:last_auto_tts:"
 _REMINDER_CHECK_SECONDS = 60
 _REFLECTION_INTERVAL_SECONDS = 6 * 60 * 60
 
@@ -263,6 +264,12 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         cfg = self.telegram_config
         if cfg.vision_model and cfg.vision_base_url:
             targets.append(("vision", cfg.vision_base_url, cfg.vision_model))
+        elif cfg.vision_base_url:
+            print(
+                "[bootstrap] vision model is not configured; image/GIF recognition is disabled. "
+                "Set PROTOAGI_VISION_MODEL=smolvlm2-2.2b-instruct to enable it.",
+                flush=True,
+            )
         if cfg.voice_model and cfg.voice_base_url:
             targets.append(("voice", cfg.voice_base_url, cfg.voice_model))
         if cfg.tts_enabled and cfg.tts_base_url and cfg.tts_model:
@@ -1056,6 +1063,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             replies,
             message_id=reply_to_message_id,
             stickers=decision.stickers,
+            voice_reply=decision.voice_reply,
         )
         self._schedule_from_minutes(chat_state.chat_id, decision.next_check_minutes)
         return True
@@ -1504,6 +1512,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         initiative: bool = False,
         disable_notification: bool = False,
         stickers: list[dict[str, str]] | None = None,
+        voice_reply: bool = False,
     ) -> None:
         stickers = stickers or []
         style_choice = self._style_tuner.choose(chat.chat_id)
@@ -1520,11 +1529,44 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                 self.telegram.send_chat_action(chat.chat_id, "typing")
             except TelegramApiError:
                 pass
+        tts_delivery = self.telegram_config.tts_delivery
         sent_text = False
-        for message_index, message_text in enumerate(messages):
+        text_messages = messages
+        if (
+            messages
+            and self.telegram_config.tts_enabled
+            and (
+                tts_delivery == "voice"
+                or (
+                    tts_delivery == "auto"
+                    and self._should_send_auto_voice_reply(
+                        chat,
+                        messages,
+                        stickers=stickers,
+                        initiative=initiative,
+                        voice_reply=voice_reply,
+                    )
+                )
+            )
+        ):
+            voice_sent = self._try_send_tts_reply(
+                chat,
+                messages[0],
+                reply_to_message_id=message_id if not initiative else None,
+                disable_notification=disable_notification,
+            )
+            if voice_sent:
+                if tts_delivery == "auto":
+                    self._mark_auto_voice_reply_sent(chat)
+                sent_text = True
+                text_messages = messages[1:]
+            else:
+                text_messages = messages
+        text_reply_to_message_id = None if sent_text else message_id
+        for message_index, message_text in enumerate(text_messages):
             chunks = split_telegram_message(message_text, max_chars=self.telegram_config.max_reply_chars)
             for chunk_index, chunk in enumerate(chunks):
-                should_reply_to = message_id if message_index == 0 and chunk_index == 0 and not initiative else None
+                should_reply_to = text_reply_to_message_id if message_index == 0 and chunk_index == 0 and not initiative else None
                 sent = self.telegram.send_message(
                     chat.chat_id,
                     chunk,
@@ -1539,38 +1581,13 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                     chunk,
                     reply_to_message_id=should_reply_to,
                 )
-        if messages and self.telegram_config.tts_enabled:
-            voice_data = self._tts.synthesize(
+        if messages and self.telegram_config.tts_enabled and tts_delivery == "text_and_voice":
+            self._try_send_tts_reply(
+                chat,
                 messages[0],
-                voice=self.persona.tts_voice or None,
+                reply_to_message_id=message_id if not initiative and not sent_text else None,
+                disable_notification=disable_notification,
             )
-            if voice_data:
-                try:
-                    sent_voice = self._send_tts_audio(
-                        chat,
-                        voice_data,
-                        reply_to_message_id=message_id if not initiative and not sent_text else None,
-                        disable_notification=disable_notification,
-                    )
-                    if sent_voice is not None:
-                        self._log_sent_telegram_message(
-                            chat,
-                            sent_voice,
-                            "assistant",
-                            "[voice-reply]",
-                            reply_to_message_id=message_id if not initiative and not sent_text else None,
-                        )
-                except (TelegramApiError, OSError) as exc:
-                    print(
-                        f"[tts] Telegram rejected the audio for chat {chat.chat_id} "
-                        f"(format={self._tts.response_format}): {exc}",
-                        flush=True,
-                    )
-            elif self._tts.last_error:
-                print(
-                    f"[tts] synthesis failed for chat {chat.chat_id}: {self._tts.last_error}",
-                    flush=True,
-                )
         for sticker_choice in stickers[:2]:
             file_id = self._select_sticker_file_id(sticker_choice, chat.chat_id)
             if not file_id:
@@ -1633,6 +1650,90 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             sender_name=self.telegram_config.bot_name,
             text=text,
             metadata=metadata,
+        )
+
+    def _try_send_tts_reply(
+        self,
+        chat: TelegramChat,
+        text: str,
+        *,
+        reply_to_message_id: int | None,
+        disable_notification: bool,
+    ) -> bool:
+        voice_data = self._tts.synthesize(
+            text,
+            voice=self.persona.tts_voice or None,
+        )
+        if not voice_data:
+            if self._tts.last_error:
+                print(
+                    f"[tts] synthesis failed for chat {chat.chat_id}: {self._tts.last_error}",
+                    flush=True,
+                )
+            return False
+        try:
+            sent_voice = self._send_tts_audio(
+                chat,
+                voice_data,
+                reply_to_message_id=reply_to_message_id,
+                disable_notification=disable_notification,
+            )
+        except (TelegramApiError, OSError) as exc:
+            print(
+                f"[tts] Telegram rejected the audio for chat {chat.chat_id} "
+                f"(format={self._tts.response_format}): {exc}",
+                flush=True,
+            )
+            return False
+        if sent_voice is None:
+            return False
+        self._log_sent_telegram_message(
+            chat,
+            sent_voice,
+            "assistant",
+            text,
+            reply_to_message_id=reply_to_message_id,
+        )
+        return True
+
+    def _should_send_auto_voice_reply(
+        self,
+        chat: TelegramChat,
+        messages: list[str],
+        *,
+        stickers: list[dict[str, str]],
+        initiative: bool,
+        voice_reply: bool,
+    ) -> bool:
+        if not voice_reply:
+            return False
+        if initiative or chat.chat_type != "private":
+            return False
+        if stickers or len(messages) != 1:
+            return False
+        text = messages[0].strip()
+        if not text:
+            return False
+        auto_max_chars = self.telegram_config.tts_auto_max_chars or self.telegram_config.tts_max_chars
+        max_chars = min(self.telegram_config.tts_max_chars, auto_max_chars)
+        if max_chars > 0 and len(text) > max_chars:
+            return False
+        cooldown = max(0, self.telegram_config.tts_auto_cooldown_seconds)
+        if cooldown <= 0:
+            return True
+        last_raw = self.memory.get_kv(_TTS_LAST_AUTO_VOICE_KV_PREFIX + str(chat.chat_id))
+        if not last_raw:
+            return True
+        try:
+            last_sent = float(last_raw)
+        except ValueError:
+            return True
+        return time.time() - last_sent >= cooldown
+
+    def _mark_auto_voice_reply_sent(self, chat: TelegramChat) -> None:
+        self.memory.set_kv(
+            _TTS_LAST_AUTO_VOICE_KV_PREFIX + str(chat.chat_id),
+            f"{time.time():.3f}",
         )
 
     def _resolve_reply_target(
@@ -1718,7 +1819,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         origin_message_id: int | str | None = None,
     ) -> None:
         description = str(description or "").strip()
-        if not description:
+        if not description or _is_unavailable_media_description(description):
             return
         text = f"Telegram image in chat {chat.chat_id}: {description}"
         tags = [
@@ -2523,7 +2624,10 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         parts = [text] if text else []
         if image is not None:
             image_label = image.file_name or image.label
-            parts.append(f"[зображення: {description or image_label}]")
+            if _is_unavailable_media_description(description):
+                parts.append("[зображення: опис недоступний; не вгадуй зміст з контексту]")
+            else:
+                parts.append(f"[зображення: {description or image_label}]")
         if sticker is not None:
             bits = [sticker.kind]
             if sticker.emoji:
@@ -2621,6 +2725,7 @@ def _decision_to_payload(decision: Decision) -> dict[str, Any]:
         "replies": list(decision.replies),
         "reply_to": decision.reply_to,
         "stickers": list(decision.stickers),
+        "voice_reply": decision.voice_reply,
         "memories": list(decision.memories),
         "self_memories": list(decision.self_memories),
         "reminders": list(decision.reminders),
@@ -2730,6 +2835,22 @@ def _first_reply_excerpt(decision: Decision) -> str:
         if text:
             return text
     return ""
+
+
+def _is_unavailable_media_description(text: str) -> bool:
+    value = str(text or "").strip().lower()
+    if not value:
+        return True
+    markers = (
+        "опис недоступ",
+        "опис не вдався",
+        "опис порож",
+        "не вдалося витягнути кадр",
+        "description unavailable",
+        "no still frame",
+        "no visual description",
+    )
+    return any(marker in value for marker in markers)
 
 
 _PROMPT_LEVELS: tuple[dict[str, int], ...] = (

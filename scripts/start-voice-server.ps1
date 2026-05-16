@@ -58,6 +58,15 @@ function Get-VoiceProcesses {
         Where-Object { ($_.CommandLine -as [string]) -match "voice-server\.py.*--port\s+$Port\b" })
 }
 
+function Get-VoiceRootProcesses {
+    $Procs = @(Get-VoiceProcesses)
+    $Ids = @{}
+    foreach ($Proc in $Procs) {
+        $Ids[[int]$Proc.ProcessId] = $true
+    }
+    @($Procs | Where-Object { -not $Ids.ContainsKey([int]$_.ParentProcessId) })
+}
+
 function Stop-Voice {
     $Procs = @(Get-VoiceProcesses)
     if ($Procs.Count -eq 0) {
@@ -82,13 +91,22 @@ if ($Logs) {
     return
 }
 
+$Existing = @(Get-VoiceProcesses)
 if (Test-VoiceServer) {
-    Write-Host "Voice server already running on http://127.0.0.1:$Port"
-    return
+    $Roots = @(Get-VoiceRootProcesses)
+    if ($Roots.Count -le 1) {
+        Write-Host "Voice server already running on http://127.0.0.1:$Port"
+        return
+    }
+    Write-Warning "Multiple voice processes found on port $Port; restarting one clean server."
+    foreach ($Proc in $Existing) {
+        Stop-Process -Id $Proc.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Seconds 1
+    $Existing = @(Get-VoiceProcesses)
 }
 
 # Stale process on the port? Knock it down before re-binding.
-$Existing = @(Get-VoiceProcesses)
 if ($Existing.Count -gt 0) {
     Write-Warning "Stale voice process on port $Port; killing before restart."
     foreach ($Proc in $Existing) {

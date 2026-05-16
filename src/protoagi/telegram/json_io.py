@@ -26,6 +26,7 @@ class Decision:
     replies: list[str] = field(default_factory=list)
     reply_to: str | int | None = None
     stickers: list[dict[str, str]] = field(default_factory=list)
+    voice_reply: bool = False
     reminders: list[dict[str, Any]] = field(default_factory=list)
     tool_request: dict[str, Any] | None = None
     next_check_minutes: int | None = None
@@ -149,6 +150,7 @@ DECISION_JSON_SCHEMA: dict[str, Any] = {
                     ]
                 },
                 "stickers": {"type": "array", "items": _STICKER_ITEM_SCHEMA},
+                "voice_reply": {"type": "boolean"},
                 "memories": {"type": "array", "items": {"type": "string"}},
                 "self_memories": {"type": "array", "items": {"type": "string"}},
                 "reminders": {"type": "array", "items": _REMINDER_ITEM_SCHEMA},
@@ -373,6 +375,7 @@ def decision_from_payload(payload: dict[str, Any]) -> Decision:
         replies=normalize_reply_messages(payload.get("replies", [])),
         reply_to=normalize_reply_to(payload.get("reply_to")),
         stickers=normalize_sticker_choices(payload.get("stickers", [])),
+        voice_reply=_optional_bool(payload.get("voice_reply")),
         reminders=normalize_reminder_requests(payload.get("reminders", [])),
         tool_request=normalize_tool_request(payload.get("tool_request")),
         next_check_minutes=_optional_int(payload.get("next_check_minutes")),
@@ -582,6 +585,20 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _optional_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off", ""}:
+            return False
+    return default
 
 
 __all__ = [

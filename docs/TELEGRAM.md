@@ -255,9 +255,11 @@ directly if you want to warm the cache before starting Telegram.
 Vision requests include the llama.cpp multimodal marker internally so uploaded
 Telegram images are paired with the image bytes instead of failing tokenization.
 Animated GIFs use Telegram's still-frame thumbnail when one is available. If a
-GIF arrives as a raw `image/gif` document without a thumbnail, the bot stores it
-as media but does not send the full animation through the vision LLM; that keeps
-large GIF payloads from overflowing the main 8k context.
+GIF arrives as a raw `image/gif` document without a thumbnail, the bot stores
+the original media and, when local `ffmpeg` is available, extracts the first
+JPEG frame for the vision LLM. If no frame can be extracted, the current turn
+gets a neutral GIF marker but no long-term media memory is written from an
+`опис недоступний` placeholder.
 
 Incoming stickers are also treated as conversational messages with emoji and
 pack metadata, so the model can react to them instead of ignoring them.
@@ -284,9 +286,16 @@ PROTOAGI_VOICE_MODEL=whisper-large-v3
 PROTOAGI_STORE_VOICE=1
 ```
 
-Outgoing TTS is opt-in. When enabled, the bot still sends the normal text reply
-and then adds a Telegram voice message generated from `/audio/speech`. Each
-persona can pick its own voice through the `tts_voice` field in
+Outgoing TTS is opt-in. By default, when enabled, `PROTOAGI_TTS_DELIVERY=auto`
+still prefers normal text. The model can request a rare short voice reply with
+`voice_reply=true`, and local guards only allow it in private chats when the
+reply is short, sticker-free, and outside the cooldown window. If synthesis or
+Telegram delivery fails, it falls back to the normal text reply. Set
+`PROTOAGI_TTS_DELIVERY=voice` to force audio instead of text, or
+`PROTOAGI_TTS_DELIVERY=text_and_voice` only when you explicitly want both a
+text transcript and a voice/audio attachment. Set `PROTOAGI_TTS_DELIVERY=text`
+to keep replies text-only even when TTS is enabled. Each persona can pick its
+own voice through the `tts_voice` field in
 `config/personas/*.json` (built-ins: `solomiya`→`solomiya`, `mykola`→`mykola`);
 `PROTOAGI_TTS_VOICE` is only the fallback when a persona does not set one.
 
@@ -297,6 +306,9 @@ PROTOAGI_TTS_MODEL=tts-1-hd
 PROTOAGI_TTS_VOICE=nova
 PROTOAGI_TTS_RESPONSE_FORMAT=opus
 PROTOAGI_TTS_SPEED=1.0
+PROTOAGI_TTS_DELIVERY=auto
+PROTOAGI_TTS_AUTO_COOLDOWN_SECONDS=21600
+PROTOAGI_TTS_AUTO_MAX_CHARS=280
 ```
 
 ### Recommended Ukrainian setup: Piper UA bridge
@@ -372,8 +384,10 @@ bubble instead of a voice waveform, but the message goes through.
 
 When the TTS request fails (server down, format mismatch, JSON error
 blob instead of audio) the bot prints a one-line `[tts]` reason to
-stdout so the operator notices. The text reply is sent regardless; the
-voice/audio attachment is best-effort.
+stdout so the operator notices. In `auto` and `voice` delivery modes, the
+text reply is sent as a fallback when audio was supposed to replace text.
+In `text_and_voice` mode, the text has already been sent and the
+voice/audio attachment remains best-effort.
 
 ## Initiative
 

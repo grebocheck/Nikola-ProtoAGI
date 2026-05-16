@@ -448,8 +448,8 @@ Turned each P3 research direction into a dependency-free first working layer:
   no-dependency force-directed canvas graph.
 - **P3-18** voice: Telegram voice/audio messages can be transcribed through
   an OpenAI-compatible `/audio/transcriptions` endpoint and stored as
-  episodic voice memory. Optional TTS sends a generated Telegram voice reply
-  after the normal text reply.
+  episodic voice memory. Optional TTS is text-first by default, with rare
+  guarded voice replies when the persona explicitly requests one.
 
 ---
 

@@ -214,8 +214,8 @@ Test count: 145 -> 152.
   force layout.
 - Voice: Telegram voice/audio messages can be transcribed through an
   OpenAI-compatible `/audio/transcriptions` endpoint and stored as episodic
-  voice memory. Optional TTS uses `/audio/speech` and sends a Telegram voice
-  reply after text.
+  voice memory. Optional TTS uses `/audio/speech`; the default delivery is
+  text-first, with rare guarded voice replies when the persona requests one.
 
 Test count: 130 -> 138.
 

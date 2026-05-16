@@ -52,6 +52,15 @@ function Get-TtsProcesses {
         Where-Object { ($_.CommandLine -as [string]) -match "tts-server-uk\.py.*--port\s+$Port\b" })
 }
 
+function Get-TtsRootProcesses {
+    $Procs = @(Get-TtsProcesses)
+    $Ids = @{}
+    foreach ($Proc in $Procs) {
+        $Ids[[int]$Proc.ProcessId] = $true
+    }
+    @($Procs | Where-Object { -not $Ids.ContainsKey([int]$_.ParentProcessId) })
+}
+
 function Stop-Tts {
     $Procs = @(Get-TtsProcesses)
     if ($Procs.Count -eq 0) {
@@ -76,12 +85,21 @@ if ($Logs) {
     return
 }
 
+$Existing = @(Get-TtsProcesses)
 if (Test-TtsServer) {
-    Write-Host "TTS server already running on http://127.0.0.1:$Port"
-    return
+    $Roots = @(Get-TtsRootProcesses)
+    if ($Roots.Count -le 1) {
+        Write-Host "TTS server already running on http://127.0.0.1:$Port"
+        return
+    }
+    Write-Warning "Multiple TTS processes found on port $Port; restarting one clean server."
+    foreach ($Proc in $Existing) {
+        Stop-Process -Id $Proc.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Seconds 1
+    $Existing = @(Get-TtsProcesses)
 }
 
-$Existing = @(Get-TtsProcesses)
 if ($Existing.Count -gt 0) {
     throw "A python.exe is bound to port $Port but the server is not healthy. Check $StdErr or stop it: .\scripts\start-tts-server.ps1 -Stop"
 }

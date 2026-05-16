@@ -182,8 +182,10 @@ class FakeTTS:
         self._response_format = response_format
         self.last_error: str | None = None
         self.last_voice: str | None = None
+        self.calls = 0
 
     def synthesize(self, text: str, *, voice: str | None = None):
+        self.calls += 1
         self.last_voice = voice
         return self.data
 
@@ -198,6 +200,17 @@ class FakeTTS:
             "ogg": "audio/ogg",
             "mp3": "audio/mpeg",
         }.get(self._response_format, "application/octet-stream")
+
+
+class FakeFailingTTS(FakeTTS):
+    def __init__(self, last_error: str = "boom") -> None:
+        super().__init__(b"")
+        self.last_error = last_error
+
+    def synthesize(self, text: str, *, voice: str | None = None):
+        self.calls += 1
+        self.last_voice = voice
+        return None
 
 
 class TelegramBotTests(unittest.TestCase):
@@ -215,6 +228,7 @@ class TelegramBotTests(unittest.TestCase):
                 "reply": "Так",
                 "replies": ["ага", "сек"],
                 "reply_to": "current",
+                "voice_reply": True,
                 "stickers": [{"pack": "miku", "emoji": "✨", "reason": "playful"}],
                 "memories": ["любить чай"],
                 "self_memories": ["люблю лимонний чай"],
@@ -225,6 +239,7 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(decision_reply_texts(decision), ["ага", "сек"])
         self.assertEqual(decision.reply_to, "current")
         self.assertEqual(decision.stickers[0]["pack"], "M1ku_Hatsune")
+        self.assertTrue(decision.voice_reply)
         self.assertEqual(decision.memories, ["любить чай"])
         self.assertEqual(decision.self_memories, ["люблю лимонний чай"])
 
@@ -881,7 +896,7 @@ class TelegramBotTests(unittest.TestCase):
             self.assertEqual(blob.bytes, b"voice-ogg")
             self.assertEqual(blob.mime, "audio/ogg")
 
-    def test_tts_sends_voice_reply_when_enabled(self) -> None:
+    def test_tts_auto_prefers_text_unless_voice_requested(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             memory = MemoryStore(Path(tmp) / "memory.sqlite3")
             telegram = FakeTelegram()
@@ -900,7 +915,8 @@ class TelegramBotTests(unittest.TestCase):
                 ),
                 agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
             )
-            bot._tts = FakeTTS(b"voice-bytes")
+            fake_tts = FakeTTS(b"voice-bytes")
+            bot._tts = fake_tts
             bot.bootstrap()
             bot.process_update(
                 {
@@ -913,7 +929,159 @@ class TelegramBotTests(unittest.TestCase):
                     },
                 }
             )
+            self.assertEqual(telegram.sent[0]["text"], "voice reply")
+            self.assertEqual(telegram.voices, [])
+            self.assertEqual(fake_tts.calls, 0)
+
+    def test_tts_auto_sends_voice_when_decision_requests_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": true, "reply": "voice reply", "voice_reply": true, "memories": [], "next_check_minutes": 60}'
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(
+                    token="token",
+                    tts_enabled=True,
+                    tts_base_url="http://tts.local/v1",
+                    tts_model="tts-stub",
+                ),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot._tts = FakeTTS(b"voice-bytes")
+            bot.bootstrap()
+            bot.process_update(
+                {
+                    "update_id": 735,
+                    "message": {
+                        "message_id": 925,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "text": "say it",
+                    },
+                }
+            )
             self.assertEqual(telegram.voices[0]["data"], b"voice-bytes")
+            self.assertEqual(telegram.sent, [])
+
+    def test_tts_auto_cooldown_keeps_later_reply_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                [
+                    '{"should_reply": true, "reply": "first voice", "voice_reply": true, "memories": [], "next_check_minutes": 60}',
+                    '{"should_reply": true, "reply": "second voice", "voice_reply": true, "memories": [], "next_check_minutes": 60}',
+                ]
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(
+                    token="token",
+                    tts_enabled=True,
+                    tts_base_url="http://tts.local/v1",
+                    tts_model="tts-stub",
+                ),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            fake_tts = FakeTTS(b"voice-bytes")
+            bot._tts = fake_tts
+            bot.bootstrap()
+            for update_id, message_id, text in (
+                (736, 926, "say it once"),
+                (737, 927, "say it twice"),
+            ):
+                bot.process_update(
+                    {
+                        "update_id": update_id,
+                        "message": {
+                            "message_id": message_id,
+                            "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                            "from": {"id": 123, "first_name": "Vadim"},
+                            "text": text,
+                        },
+                    }
+                )
+            self.assertEqual(len(telegram.voices), 1)
+            self.assertEqual(telegram.sent[0]["text"], "second voice")
+            self.assertEqual(fake_tts.calls, 1)
+
+    def test_tts_text_and_voice_delivery_keeps_transcript_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": true, "reply": "voice reply", "memories": [], "next_check_minutes": 60}'
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(
+                    token="token",
+                    tts_enabled=True,
+                    tts_base_url="http://tts.local/v1",
+                    tts_model="tts-stub",
+                    tts_delivery="text_and_voice",
+                ),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot._tts = FakeTTS(b"voice-bytes")
+            bot.bootstrap()
+            bot.process_update(
+                {
+                    "update_id": 735,
+                    "message": {
+                        "message_id": 925,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "text": "say it",
+                    },
+                }
+            )
+            self.assertEqual(telegram.sent[0]["text"], "voice reply")
+            self.assertEqual(telegram.voices[0]["data"], b"voice-bytes")
+
+    def test_tts_voice_delivery_falls_back_to_text_when_synthesis_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": true, "reply": "fallback text", "voice_reply": true, "memories": [], "next_check_minutes": 60}'
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(
+                    token="token",
+                    tts_enabled=True,
+                    tts_base_url="http://tts.local/v1",
+                    tts_model="tts-stub",
+                ),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot._tts = FakeFailingTTS()
+            bot.bootstrap()
+            bot.process_update(
+                {
+                    "update_id": 736,
+                    "message": {
+                        "message_id": 926,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "text": "say it",
+                    },
+                }
+            )
+            self.assertEqual(telegram.voices, [])
+            self.assertEqual(telegram.sent[0]["text"], "fallback text")
 
     def test_tts_uses_persona_voice_when_set(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -933,6 +1101,7 @@ class TelegramBotTests(unittest.TestCase):
                     tts_base_url="http://tts.local/v1",
                     tts_model="tts-1-hd",
                     tts_voice="nova",
+                    tts_delivery="voice",
                 ),
                 agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
             )
@@ -973,6 +1142,7 @@ class TelegramBotTests(unittest.TestCase):
                     tts_base_url="http://tts.local/v1",
                     tts_model="tts-1-hd",
                     tts_voice="nova",
+                    tts_delivery="voice",
                 ),
                 agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
             )
@@ -1014,6 +1184,13 @@ class TelegramBotTests(unittest.TestCase):
 
         self.assertEqual(get_persona("solomiya").tts_voice, "solomiya")
         self.assertEqual(get_persona("mykola").tts_voice, "mykola")
+
+    def test_tts_delivery_aliases_are_normalized(self) -> None:
+        self.assertEqual(TelegramConfig(token="token").tts_delivery, "auto")
+        self.assertEqual(TelegramConfig(token="token", tts_delivery="auto").tts_delivery, "auto")
+        self.assertEqual(TelegramConfig(token="token", tts_delivery="both").tts_delivery, "text_and_voice")
+        self.assertEqual(TelegramConfig(token="token", tts_delivery="voice-only").tts_delivery, "voice")
+        self.assertEqual(TelegramConfig(token="token", tts_delivery="bad-value").tts_delivery, "auto")
 
     def test_voice_synthesizer_rejects_json_error_blob(self) -> None:
         from protoagi.telegram.voice import VoiceSynthesisConfig, VoiceSynthesizer
@@ -1076,6 +1253,7 @@ class TelegramBotTests(unittest.TestCase):
                     tts_base_url="http://tts.local/v1",
                     tts_model="tts-stub",
                     tts_response_format="mp3",
+                    tts_delivery="voice",
                 ),
                 agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
             )
@@ -1093,6 +1271,7 @@ class TelegramBotTests(unittest.TestCase):
                 }
             )
             self.assertEqual(telegram.voices, [])
+            self.assertEqual(telegram.sent, [])
             self.assertTrue(getattr(telegram, "audios", []))
             audio = telegram.audios[0]
             self.assertEqual(audio["data"], b"mp3-bytes")
@@ -1162,6 +1341,8 @@ class TelegramBotTests(unittest.TestCase):
             self.assertIn("опис недоступний", payload)
             self.assertNotIn("vision model", payload)
             self.assertNotIn("не налаштована", payload)
+            media_items = [item for item in memory.list_memories(limit=10) if item.media_id == "big"]
+            self.assertEqual(media_items, [])
 
     def test_raw_gif_document_skips_vision_llm(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1199,8 +1380,61 @@ class TelegramBotTests(unittest.TestCase):
             self.assertTrue(processed)
             self.assertEqual(vision.messages, [])
             payload = llm.messages[0][1]["content"]
-            self.assertIn("GIF received; no still frame available", payload)
+            self.assertIn("опис недоступний", payload)
+            self.assertIn("не вгадуй", payload)
             self.assertIsNotNone(memory.get_media_blob("GIF_DOC_RAW"))
+            media_items = [item for item in memory.list_memories(limit=10) if item.media_id == "GIF_DOC_RAW"]
+            self.assertEqual(media_items, [])
+
+    def test_raw_gif_document_uses_extracted_still_frame_when_available(self) -> None:
+        import protoagi.telegram.vision as vision_mod
+
+        original = vision_mod._extract_gif_still_frame
+        vision_mod._extract_gif_still_frame = lambda data: b"jpeg-frame"  # type: ignore[assignment]
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+                telegram = FakeTelegram()
+                llm = FakeLLM(
+                    '{"should_reply": true, "reply": "seen", '
+                    '"stickers": [], "memories": [], "next_check_minutes": 60}'
+                )
+                vision = FakeVisionLLM("animated cat waves")
+                bot = NikolaBot(
+                    telegram=telegram,
+                    llm=llm,
+                    memory=memory,
+                    telegram_config=TelegramConfig(token="token", persona_key="solomiya", vision_model="vision-test"),
+                    agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+                )
+                bot.vision_llm = vision
+                bot.bootstrap()
+                processed = bot.process_update(
+                    {
+                        "update_id": 239,
+                        "message": {
+                            "message_id": 919,
+                            "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                            "from": {"id": 123, "first_name": "Vadim"},
+                            "document": {
+                                "file_id": "GIF_DOC_RAW",
+                                "mime_type": "image/gif",
+                                "file_name": "meme.gif",
+                            },
+                        },
+                    }
+                )
+                self.assertTrue(processed)
+                self.assertTrue(vision.messages)
+                vision_content = vision.messages[0][1]["content"]
+                self.assertIn("data:image/jpeg;base64", vision_content[1]["image_url"]["url"])
+                payload = llm.messages[0][1]["content"]
+                self.assertIn("animated cat waves", payload)
+                media_items = [item for item in memory.list_memories(limit=10) if item.media_id == "GIF_DOC_RAW"]
+                self.assertTrue(media_items)
+                self.assertIn("animated cat waves", media_items[0].text)
+        finally:
+            vision_mod._extract_gif_still_frame = original  # type: ignore[assignment]
 
     def test_decision_prompt_compacts_large_history_and_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

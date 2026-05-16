@@ -153,6 +153,10 @@ if (-not $NoVision) {
     $VisionBaseUrl = [string]($DotEnv["PROTOAGI_VISION_BASE_URL"])
     if (-not [string]::IsNullOrWhiteSpace($VisionModel) -and $VisionBaseUrl -match "^https?://(127\.0\.0\.1|localhost):(?<port>\d+)(/|$)") {
         $VisionPort = [int]$Matches["port"]
+        # Raw image/gif documents sometimes arrive without Telegram's
+        # server-side thumbnail. Vision can still describe them if we have
+        # ffmpeg to extract one still frame locally.
+        & (Join-Path $PSScriptRoot "ensure-ffmpeg.ps1") -Root $Root
         $ResolvedVisionRepo = $VisionRepo
         if ([string]::IsNullOrWhiteSpace($ResolvedVisionRepo)) {
             $ResolvedVisionRepo = [string]($DotEnv["PROTOAGI_VISION_HF_REPO"])
