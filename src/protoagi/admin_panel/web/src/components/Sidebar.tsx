@@ -7,6 +7,7 @@ const NAV_ITEMS = [
   { to: "/memory", label: "Память", icon: "▤" },
   { to: "/goals", label: "Цілі", icon: "◇" },
   { to: "/conflicts", label: "Суперечності", icon: "⚠" },
+  { to: "/stickers", label: "Стікери", icon: "☆" },
   { to: "/chats", label: "Чати", icon: "✎" },
 ] as const;
 

@@ -1727,6 +1727,41 @@ class MemoryStore:
                 (utc_now(), str(sticker_id)),
             )
 
+    def reset_sticker_describer_attempts(
+        self,
+        *,
+        set_name: str | None = None,
+        only_failed: bool = True,
+    ) -> int:
+        """Zero out ``attempt_count`` on stickers so the worker retries them.
+
+        Useful after a configuration change (vision endpoint, prompt,
+        ffmpeg installed) — operators don't need to drop and rebuild
+        the database. ``only_failed`` (default) keeps rows that already
+        have a description untouched. Returns the number of rows reset.
+        """
+
+        clauses: list[str] = []
+        params: list[Any] = []
+        if set_name is not None:
+            clauses.append("set_name = ?")
+            params.append(set_name)
+        if only_failed:
+            clauses.append("description = ''")
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self.connect() as conn:
+            cur = conn.execute(
+                f"""
+                UPDATE sticker_descriptions
+                SET attempt_count = 0,
+                    failure_reason = NULL,
+                    updated_at = ?
+                {where}
+                """,
+                tuple([utc_now(), *params]),
+            )
+        return max(0, int(cur.rowcount))
+
     def count_sticker_descriptions(
         self,
         *,

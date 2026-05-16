@@ -50,6 +50,7 @@ from urllib.parse import parse_qs, urlparse
 from .data import (
     list_conflicts,
     list_goals,
+    list_stickers,
     list_user_states,
     memory_graph,
     reasoning_entries,
@@ -61,6 +62,7 @@ from .data import (
 )
 from ..storage.memory import MemoryStore
 from ..storage.service import MemoryService
+from ..telegram.api import TelegramApi, TelegramApiError
 
 
 _WEB_DIST = Path(__file__).resolve().parent / "web" / "dist"
@@ -195,6 +197,25 @@ def make_handler(memory: MemoryStore, service: MemoryService) -> type[BaseHTTPRe
                     memory,
                     persona_key=str(query.get("persona", [""])[0]).strip() or None,
                 ))
+                return
+            if path == "/api/stickers":
+                _json_response(self, list_stickers(
+                    memory,
+                    set_name=str(query.get("pack", [""])[0]).strip() or None,
+                    described=str(query.get("described", ["all"])[0]).strip() or "all",
+                    limit=_query_int(query, "limit", 1000),
+                ))
+                return
+            if path.startswith("/api/sticker_thumbnail/"):
+                sticker_id = path.split("/api/sticker_thumbnail/", 1)[1]
+                if not sticker_id:
+                    _send_error_json(self, 400, "missing sticker_id")
+                    return
+                blob = memory.get_media_blob(sticker_id)
+                if blob is None:
+                    _send_error_json(self, 404, "thumbnail not cached yet")
+                    return
+                _bytes_response(self, blob.bytes, content_type=blob.mime)
                 return
             if path == "/api/reasoning":
                 _json_response(self, reasoning_overview(memory))
@@ -417,6 +438,17 @@ def make_handler(memory: MemoryStore, service: MemoryService) -> type[BaseHTTPRe
                     _send_error_json(self, 404, "goal not found")
                     return
                 _json_response(self, serialize_goal(updated))
+                return
+
+            # ---------- Stickers ----------
+            if path == "/api/stickers/reset":
+                pack = str(payload.get("pack") or "").strip() or None
+                only_failed = bool(payload.get("only_failed", True))
+                reset = memory.reset_sticker_describer_attempts(
+                    set_name=pack,
+                    only_failed=only_failed,
+                )
+                _json_response(self, {"reset": reset, "pack": pack, "only_failed": only_failed})
                 return
 
             # ---------- Conflicts ----------

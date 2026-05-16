@@ -88,6 +88,20 @@ export interface Conflict {
   memory_b?: ConflictSide;
 }
 
+export interface StickerDescription {
+  sticker_id: string;
+  set_name: string;
+  emoji: string;
+  description: string;
+  embedding_model: string | null;
+  has_embedding: boolean;
+  failure_reason: string | null;
+  attempt_count: number;
+  last_used_at: string | null;
+  created_at: string;
+  updated_at: string | null;
+}
+
 export interface UserState {
   user_id: string;
   persona_key: string;
@@ -239,6 +253,28 @@ export const api = {
 
   userStates: (persona?: string) =>
     http<UserState[]>("/api/user_state", { params: { persona } }),
+
+  stickers: (params?: {
+    pack?: string;
+    described?: "all" | "yes" | "no";
+    limit?: number;
+  }) =>
+    http<StickerDescription[]>("/api/stickers", {
+      params: {
+        pack: params?.pack,
+        described: params?.described,
+        limit: params?.limit ?? 1000,
+      },
+    }),
+
+  stickerThumbnailUrl: (stickerId: string) =>
+    `/api/sticker_thumbnail/${encodeURIComponent(stickerId)}`,
+
+  resetStickers: (body?: { pack?: string; only_failed?: boolean }) =>
+    http<{ reset: number; pack: string | null; only_failed: boolean }>(
+      "/api/stickers/reset",
+      { method: "POST", body: JSON.stringify(body ?? { only_failed: true }) }
+    ),
 
   chats: () => http<TelegramChat[]>("/api/chats"),
 

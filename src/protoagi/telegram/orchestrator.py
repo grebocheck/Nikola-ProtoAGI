@@ -1110,9 +1110,34 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             origin_message_id=current_message_id or None,
         )
         self._maybe_bootstrap_user_state(user_id)
+        had_stickers_before_filter = len(decision.stickers)
         self._filter_decision_stickers(chat_state, incoming_text, decision)
+        stickers_filtered = had_stickers_before_filter - len(decision.stickers)
         self._maybe_add_reaction_sticker(chat_state, incoming_text, decision)
         if not decision.should_reply and not decision.stickers:
+            # The bot decided to stay silent. Tell the operator WHY so they
+            # don't have to dig through the reasoning log to find out:
+            # was it a true "no reply" verdict, did sticker filtering
+            # strip everything, or did the user-payload have something
+            # unusual? Keep one short line per silent turn.
+            reasons: list[str] = []
+            if not decision.should_reply:
+                reasons.append("model said should_reply=false")
+            if had_stickers_before_filter and stickers_filtered:
+                reasons.append(
+                    f"sticker filter dropped {stickers_filtered}/"
+                    f"{had_stickers_before_filter}"
+                )
+            if not decision_reply_texts(decision) and decision.should_reply:
+                reasons.append("empty reply text after composer")
+            sticker_label = (
+                f" sticker={incoming_sticker.kind}" if incoming_sticker is not None else ""
+            )
+            print(
+                f"[decision] chat={chat_state.chat_id} silent: "
+                f"{'; '.join(reasons) or 'unknown'}{sticker_label}",
+                flush=True,
+            )
             self._schedule_from_minutes(chat_state.chat_id, decision.next_check_minutes)
             return True
         reply_to_message_id = self._resolve_reply_target(
@@ -1235,6 +1260,16 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         message = response.get("choices", [{}])[0].get("message", {})
         content = clean_model_content(message.get("content", ""))
         payload = extract_json_object(content)
+        if not payload:
+            # Either the model returned non-JSON or extract_json_object
+            # couldn't recover it. Without this log the bot silently
+            # defaults to should_reply=false (since the dataclass
+            # default for missing keys is empty).
+            print(
+                f"[decision] chat={chat.chat_id} unparseable LLM JSON; "
+                f"raw content head={content[:200]!r}",
+                flush=True,
+            )
         decision = decision_from_payload(payload)
         self._capture_reasoning(
             chat=chat,
@@ -1655,6 +1690,15 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         for sticker_choice in stickers[:2]:
             file_id = self._select_sticker_file_id(sticker_choice, chat.chat_id)
             if not file_id:
+                # Most common cause: the LLM picked a sticker_id we
+                # don't have in sticker_descriptions, or picked a pack
+                # whose getStickerSet failed. Surface so the operator
+                # can tell why a sticker was dropped.
+                print(
+                    f"[sticker] chat={chat.chat_id} could not resolve choice "
+                    f"{sticker_choice!r}; nothing sent for this slot.",
+                    flush=True,
+                )
                 continue
             self._send_chat_action_safely(chat.chat_id, "choose_sticker")
             sent = self.telegram.send_sticker(
@@ -2275,7 +2319,12 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                     metadata={"working_memory": True, "expires_in_hours": expires_in_hours},
                 )
                 added += 1
-            except (ValueError, RuntimeError):
+            except (ValueError, RuntimeError) as exc:
+                print(
+                    f"[temporary_note] chat={chat.chat_id} skip note "
+                    f"({text[:60]!r}): {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
                 continue
         return added
 
@@ -2378,7 +2427,12 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                     )
                     self.memory.update_goal(int(goal_id), status=target_status)
                     applied += 1
-            except (ValueError, TypeError):
+            except (ValueError, TypeError) as exc:
+                print(
+                    f"[goal] chat={chat.chat_id} skip action {entry!r}: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
                 continue
         return applied
 

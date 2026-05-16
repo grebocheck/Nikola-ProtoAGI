@@ -61,15 +61,34 @@ function Get-TtsRootProcesses {
     @($Procs | Where-Object { -not $Ids.ContainsKey([int]$_.ParentProcessId) })
 }
 
-function Stop-Tts {
-    $Procs = @(Get-TtsProcesses)
-    if ($Procs.Count -eq 0) {
-        Write-Host "TTS server is not running on port $Port."
-        return
+# Kill all matching processes and wait for the kernel to reap them.
+# Stop-Process is asynchronous on Windows; polling avoids racing the
+# new bind() against the stale listener.
+function Stop-TtsProcesses {
+    $procs = @(Get-TtsProcesses)
+    if ($procs.Count -eq 0) { return 0 }
+    foreach ($p in $procs) {
+        Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
     }
-    foreach ($Proc in $Procs) {
-        Stop-Process -Id $Proc.ProcessId -Force
-        Write-Host "Stopped TTS server PID $($Proc.ProcessId)."
+    for ($i = 0; $i -lt 40; $i++) {
+        Start-Sleep -Milliseconds 250
+        if ((Get-TtsProcesses).Count -eq 0) { break }
+    }
+    $remaining = @(Get-TtsProcesses)
+    if ($remaining.Count -gt 0) {
+        Write-Warning ("TTS processes still alive after kill: " +
+            ($remaining.ProcessId -join ', '))
+    }
+    return $procs.Count
+}
+
+function Stop-Tts {
+    $count = Stop-TtsProcesses
+    if ($count -eq 0) {
+        Write-Host "TTS server is not running on port $Port."
+    } else {
+        $rootHint = if ($count -gt 1) { " (1 root + $($count - 1) ancillary)" } else { "" }
+        Write-Host "Stopped TTS server: $count process(es)$rootHint."
     }
     if (Test-Path $PidFile) { Remove-Item $PidFile -Force }
 }
@@ -85,23 +104,30 @@ if ($Logs) {
     return
 }
 
+# Reuse only a clean single-root healthy server. Multiple roots or an
+# unhealthy server with stale matches: kill everything and respawn.
 $Existing = @(Get-TtsProcesses)
-if (Test-TtsServer) {
-    $Roots = @(Get-TtsRootProcesses)
-    if ($Roots.Count -le 1) {
-        Write-Host "TTS server already running on http://127.0.0.1:$Port"
-        return
-    }
-    Write-Warning "Multiple TTS processes found on port $Port; restarting one clean server."
-    foreach ($Proc in $Existing) {
-        Stop-Process -Id $Proc.ProcessId -Force -ErrorAction SilentlyContinue
-    }
-    Start-Sleep -Seconds 1
-    $Existing = @(Get-TtsProcesses)
+$Roots = @(Get-TtsRootProcesses)
+if ((Test-TtsServer) -and ($Roots.Count -eq 1)) {
+    Write-Host "TTS server already running on http://127.0.0.1:$Port (PID $($Roots[0].ProcessId))"
+    return
 }
-
 if ($Existing.Count -gt 0) {
-    throw "A python.exe is bound to port $Port but the server is not healthy. Check $StdErr or stop it: .\scripts\start-tts-server.ps1 -Stop"
+    $rootHint = if ($Roots.Count -gt 1) {
+        " ($($Roots.Count) roots)"
+    } elseif ($Existing.Count -gt 1) {
+        " (1 root + $($Existing.Count - 1) ancillary)"
+    } else {
+        ""
+    }
+    Write-Warning "Cleaning up $($Existing.Count) stale TTS process(es)$rootHint before restart."
+    $killed = Stop-TtsProcesses
+    if ((Get-TtsProcesses).Count -gt 0) {
+        throw ("Could not terminate stale TTS processes: " +
+            ((Get-TtsProcesses).ProcessId -join ', ') +
+            ". Kill them manually and retry.")
+    }
+    Write-Host "Killed $killed stale process(es)."
 }
 
 New-Item -ItemType Directory -Force -Path `

@@ -261,6 +261,49 @@ def list_conflicts(
     return [serialize_conflict(conflict, items=items) for conflict in rows_conflicts]
 
 
+def serialize_sticker_description(row: Any) -> dict[str, Any]:
+    return {
+        "sticker_id": row.sticker_id,
+        "set_name": row.set_name,
+        "emoji": row.emoji,
+        "description": row.description,
+        "embedding_model": row.embedding_model,
+        "has_embedding": row.embedding is not None,
+        "failure_reason": row.failure_reason,
+        "attempt_count": row.attempt_count,
+        "last_used_at": row.last_used_at,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+def list_stickers(
+    memory: MemoryStore,
+    *,
+    set_name: str | None = None,
+    described: str = "all",
+    limit: int = 1000,
+) -> list[dict[str, Any]]:
+    """List sticker description rows for the admin UI.
+
+    ``described`` accepts ``"all"`` (everything), ``"yes"`` (only rows
+    with a non-empty description), and ``"no"`` (only undescribed rows
+    that haven't exhausted MAX_ATTEMPTS yet).
+    """
+
+    if described == "yes":
+        rows = memory.list_sticker_descriptions(
+            set_name=set_name, only_described=True, limit=limit
+        )
+    elif described == "no":
+        rows = memory.list_undescribed_stickers(set_name=set_name, limit=limit)
+    else:
+        rows = memory.list_sticker_descriptions(
+            set_name=set_name, only_described=False, limit=limit
+        )
+    return [serialize_sticker_description(row) for row in rows]
+
+
 def list_user_states(
     memory: MemoryStore,
     *,

@@ -5,6 +5,7 @@ import { MemoryPage } from "./pages/MemoryPage";
 import { GoalsPage } from "./pages/GoalsPage";
 import { ConflictsPage } from "./pages/ConflictsPage";
 import { ChatsPage } from "./pages/ChatsPage";
+import { StickersPage } from "./pages/StickersPage";
 
 export default function App() {
   return (
@@ -16,6 +17,7 @@ export default function App() {
           <Route path="/memory" element={<MemoryPage />} />
           <Route path="/goals" element={<GoalsPage />} />
           <Route path="/conflicts" element={<ConflictsPage />} />
+          <Route path="/stickers" element={<StickersPage />} />
           <Route path="/chats" element={<ChatsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

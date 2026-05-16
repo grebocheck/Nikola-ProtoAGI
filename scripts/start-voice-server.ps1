@@ -59,6 +59,10 @@ function Get-VoiceProcesses {
 }
 
 function Get-VoiceRootProcesses {
+    # Among the processes we found by command-line match, drop the ones
+    # whose parent is also one of those processes. What's left is the
+    # "real" servers — usually exactly one. A second root means we
+    # somehow accumulated a stale process across restarts.
     $Procs = @(Get-VoiceProcesses)
     $Ids = @{}
     foreach ($Proc in $Procs) {
@@ -67,15 +71,39 @@ function Get-VoiceRootProcesses {
     @($Procs | Where-Object { -not $Ids.ContainsKey([int]$_.ParentProcessId) })
 }
 
-function Stop-Voice {
-    $Procs = @(Get-VoiceProcesses)
-    if ($Procs.Count -eq 0) {
-        Write-Host "Voice server is not running on port $Port."
-        return
+# Kill every process that matches the command-line regex and wait
+# until they actually exit. Returns the count of PIDs that were
+# alive at call time.
+function Stop-VoiceProcesses {
+    $procs = @(Get-VoiceProcesses)
+    if ($procs.Count -eq 0) { return 0 }
+    foreach ($p in $procs) {
+        Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
     }
-    foreach ($Proc in $Procs) {
-        Stop-Process -Id $Proc.ProcessId -Force -ErrorAction SilentlyContinue
-        Write-Host "Stopped voice server PID $($Proc.ProcessId)."
+    # Stop-Process is asynchronous; the kernel still has to reap the
+    # process before the port is released. Poll up to 10 s.
+    for ($i = 0; $i -lt 40; $i++) {
+        Start-Sleep -Milliseconds 250
+        if ((Get-VoiceProcesses).Count -eq 0) { break }
+    }
+    $remaining = @(Get-VoiceProcesses)
+    if ($remaining.Count -gt 0) {
+        Write-Warning ("Voice processes still alive after kill attempt: " +
+            ($remaining.ProcessId -join ', '))
+    }
+    return $procs.Count
+}
+
+function Stop-Voice {
+    $count = Stop-VoiceProcesses
+    if ($count -eq 0) {
+        Write-Host "Voice server is not running on port $Port."
+    } else {
+        # Display a "1 root + N workers" hint when we killed more than
+        # one — this is normal for inference backends that spawn helper
+        # subprocesses (faster-whisper / huggingface_hub downloader).
+        $rootHint = if ($count -gt 1) { " (1 root + $($count - 1) ancillary)" } else { "" }
+        Write-Host "Stopped voice server: $count process(es)$rootHint."
     }
     if (Test-Path $PidFile) { Remove-Item $PidFile -Force }
 }
@@ -91,28 +119,32 @@ if ($Logs) {
     return
 }
 
+# Reuse a healthy server only when it's a clean single-root situation.
+# Anything else (multiple roots, unhealthy + stale processes) goes
+# through the kill-and-respawn path so the operator never ends up
+# with a half-dead pool.
 $Existing = @(Get-VoiceProcesses)
-if (Test-VoiceServer) {
-    $Roots = @(Get-VoiceRootProcesses)
-    if ($Roots.Count -le 1) {
-        Write-Host "Voice server already running on http://127.0.0.1:$Port"
-        return
-    }
-    Write-Warning "Multiple voice processes found on port $Port; restarting one clean server."
-    foreach ($Proc in $Existing) {
-        Stop-Process -Id $Proc.ProcessId -Force -ErrorAction SilentlyContinue
-    }
-    Start-Sleep -Seconds 1
-    $Existing = @(Get-VoiceProcesses)
+$Roots = @(Get-VoiceRootProcesses)
+if ((Test-VoiceServer) -and ($Roots.Count -eq 1)) {
+    Write-Host "Voice server already running on http://127.0.0.1:$Port (PID $($Roots[0].ProcessId))"
+    return
 }
-
-# Stale process on the port? Knock it down before re-binding.
 if ($Existing.Count -gt 0) {
-    Write-Warning "Stale voice process on port $Port; killing before restart."
-    foreach ($Proc in $Existing) {
-        Stop-Process -Id $Proc.ProcessId -Force -ErrorAction SilentlyContinue
+    $rootHint = if ($Roots.Count -gt 1) {
+        " ($($Roots.Count) roots)"
+    } elseif ($Existing.Count -gt 1) {
+        " (1 root + $($Existing.Count - 1) ancillary)"
+    } else {
+        ""
     }
-    Start-Sleep -Seconds 1
+    Write-Warning "Cleaning up $($Existing.Count) stale voice process(es)$rootHint before restart."
+    $killed = Stop-VoiceProcesses
+    if ((Get-VoiceProcesses).Count -gt 0) {
+        throw ("Could not terminate stale voice processes: " +
+            ((Get-VoiceProcesses).ProcessId -join ', ') +
+            ". Kill them manually and retry.")
+    }
+    Write-Host "Killed $killed stale process(es)."
 }
 
 New-Item -ItemType Directory -Force -Path `
