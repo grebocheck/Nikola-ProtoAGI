@@ -293,6 +293,25 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(cleaned, "a white mug with a red ladybug logo.")
         self.assertEqual(clean_vision_description("що є чело " * 20), "опис недоступний")
 
+    def test_clean_vision_description_drops_runaway_trailing_fragment(self) -> None:
+        # SmolVLM2 hit max_tokens mid-word — the previous version
+        # stitched the partial fragment into the caption.  We now drop
+        # the trailing incomplete sentence entirely.
+        text = (
+            "На стікері аніме-дівчина зашарілася. "
+            "Починає говорити \"Якщо ви бачите цей текст, я виконую його д"
+        )
+        cleaned = clean_vision_description(text)
+        self.assertEqual(cleaned, "На стікері аніме-дівчина зашарілася.")
+        self.assertNotIn("викон", cleaned)
+
+    def test_clean_vision_description_annotates_truncated_single_sentence(self) -> None:
+        # Single sentence that itself ended mid-word: keep it (we have
+        # nothing better) but flag the truncation with ``…`` so the
+        # operator knows the model output ran out.
+        cleaned = clean_vision_description("Дівчина усміхається і тримає чашку")
+        self.assertTrue(cleaned.endswith("…"), cleaned)
+
     def test_split_telegram_message(self) -> None:
         chunks = split_telegram_message("a" * 20, max_chars=8)
         self.assertEqual(chunks, ["aaaaaaaa", "aaaaaaaa", "aaaa"])
@@ -1536,7 +1555,10 @@ class TelegramBotTests(unittest.TestCase):
                 '{"should_reply": true, "reply": "бачу сонний настрій", '
                 '"stickers": [], "memories": [], "next_check_minutes": 60}'
             )
-            vision = FakeVisionLLM("sleepy fox wrapped in a blanket")
+            # End the caption with a period so it isn't flagged as
+            # truncated by the cleaner — exercising the happy-path
+            # passthrough rather than the new ellipsis annotation.
+            vision = FakeVisionLLM("sleepy fox wrapped in a blanket.")
             bot = NikolaBot(
                 telegram=telegram,
                 llm=llm,
@@ -1570,7 +1592,7 @@ class TelegramBotTests(unittest.TestCase):
             self.assertIn("sleepy fox wrapped in a blanket", payload)
             self.assertIn("emoji=🧃", payload)
             recent = memory.recent_telegram_messages(123, limit=1)[0]
-            self.assertEqual(recent["metadata"]["sticker"]["visual_description"], "sleepy fox wrapped in a blanket")
+            self.assertEqual(recent["metadata"]["sticker"]["visual_description"], "sleepy fox wrapped in a blanket.")
 
     def test_typing_action_is_sent_while_processing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

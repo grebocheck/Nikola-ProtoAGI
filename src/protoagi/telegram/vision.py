@@ -36,6 +36,9 @@ VISION_PROMPT_LEAK_RE = re.compile(
 )
 
 
+_SENTENCE_END_RE = re.compile(r"[.!?…][\"'»)\]]?\s*$")
+
+
 def clean_vision_description(text: str) -> str:
     cleaned = clean_model_content(str(text or "")).strip()
     cleaned = re.sub(r"\s+", " ", cleaned)
@@ -46,10 +49,29 @@ def clean_vision_description(text: str) -> str:
         return ""
     if VISION_PROMPT_LEAK_RE.search(cleaned) or _is_repetitive_vision_text(cleaned):
         return "опис недоступний"
+    # Keep up to two sentences, but drop a trailing fragment that
+    # clearly ended mid-thought (model ran out of tokens). The previous
+    # version stitched both segments together regardless, which
+    # produced captions like ``...я викоюну його д`` cut mid-word.
     sentences = re.split(r"(?<=[.!?…])\s+", cleaned)
-    cleaned = " ".join(part for part in sentences[:2] if part).strip()
+    sentences = [part for part in sentences if part]
+    kept: list[str] = []
+    if sentences:
+        first = sentences[0]
+        kept.append(first)
+        if len(sentences) >= 2:
+            second = sentences[1]
+            if _SENTENCE_END_RE.search(second):
+                kept.append(second)
+            # Otherwise the second sentence is a runaway fragment — drop it.
+    cleaned = " ".join(kept).strip()
+    # If we still ended on an incomplete word/clause (no terminator),
+    # annotate with an ellipsis so consumers can tell the caption was
+    # truncated rather than misleading them about completeness.
+    if cleaned and not _SENTENCE_END_RE.search(cleaned):
+        cleaned = cleaned.rstrip(" ,;:") + "…"
     if len(cleaned) > 420:
-        cleaned = cleaned[:420].rsplit(" ", 1)[0].rstrip(" ,.;:") + "..."
+        cleaned = cleaned[:420].rsplit(" ", 1)[0].rstrip(" ,.;:") + "…"
     return cleaned
 
 
