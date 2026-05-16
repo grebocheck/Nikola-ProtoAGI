@@ -160,7 +160,9 @@ foreach ($i in 1..60) {
     Start-Sleep -Seconds 1
     if (Test-AdminServer) { $Ready = $true; break }
     if ($Proc.HasExited) {
-        throw "Admin server exited early (code $($Proc.ExitCode)). Check $StdErr"
+        $Proc.Refresh()
+        $ExitCode = if ($null -ne $Proc.ExitCode) { $Proc.ExitCode } else { "unknown" }
+        throw "Admin server exited early (code $ExitCode). Check $StdErr"
     }
 }
 if (-not $Ready) {

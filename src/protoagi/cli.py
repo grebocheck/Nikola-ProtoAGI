@@ -141,8 +141,7 @@ def cmd_telegram(args: argparse.Namespace) -> int:
 def cmd_admin(args: argparse.Namespace) -> int:
     db_path = _resolve_db_path(args)
     if not db_path.exists():
-        print(f"no database at {db_path}", file=sys.stderr)
-        return 2
+        print(f"creating database at {db_path}")
     store = MemoryStore(db_path)
     service = MemoryService(store=store)
     server = serve_admin(store, service, host=args.host, port=args.port)

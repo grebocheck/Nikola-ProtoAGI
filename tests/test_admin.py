@@ -1,3 +1,4 @@
+import argparse
 import json
 import tempfile
 import threading
@@ -7,6 +8,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from protoagi import cli
 from protoagi.admin_panel.server import serve
 from protoagi.storage.memory import MemoryStore
 from protoagi.storage.service import MemoryService
@@ -20,6 +22,37 @@ def _free_port() -> int:
     port = sock.getsockname()[1]
     sock.close()
     return port
+
+
+class AdminCliTests(unittest.TestCase):
+    def test_admin_command_creates_missing_database(self) -> None:
+        class FakeServer:
+            def __init__(self) -> None:
+                self.served = False
+                self.closed = False
+
+            def serve_forever(self) -> None:
+                self.served = True
+
+            def server_close(self) -> None:
+                self.closed = True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "new" / "memory.sqlite3"
+            fake = FakeServer()
+            original_serve_admin = cli.serve_admin
+            try:
+                cli.serve_admin = lambda store, service, host, port: fake
+                code = cli.cmd_admin(
+                    argparse.Namespace(db=str(db_path), host="127.0.0.1", port=0)
+                )
+            finally:
+                cli.serve_admin = original_serve_admin
+
+            self.assertEqual(code, 0)
+            self.assertTrue(db_path.exists())
+            self.assertTrue(fake.served)
+            self.assertTrue(fake.closed)
 
 
 class AdminServerTests(unittest.TestCase):
