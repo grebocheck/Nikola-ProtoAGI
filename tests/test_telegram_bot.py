@@ -37,6 +37,10 @@ class FakeTelegram:
         self.voices: list[dict] = []
         self.actions: list[dict] = []
         self.updates: list[dict] = []
+        self.reactions: list[dict] = []
+        # When set, ``set_message_reaction`` raises this error once and
+        # then resets — used to simulate REACTION_INVALID for denylist tests.
+        self.next_reaction_error: str | None = None
 
     def get_me(self) -> dict:
         return {"id": 42, "username": "NikolaTestBot", "first_name": "Микола"}
@@ -76,6 +80,23 @@ class FakeTelegram:
 
     def download_file(self, file_path, *, max_bytes):
         return b"fake-image-bytes"
+
+    def set_message_reaction(self, chat_id, message_id, emoji, *, is_big=False):
+        if self.next_reaction_error is not None:
+            err = self.next_reaction_error
+            self.next_reaction_error = None
+            from protoagi.telegram.api import TelegramApiError
+
+            raise TelegramApiError(err)
+        self.reactions.append(
+            {
+                "chat_id": str(chat_id),
+                "message_id": message_id,
+                "emoji": emoji,
+                "is_big": is_big,
+            }
+        )
+        return True
 
     def send_sticker(self, chat_id, sticker, *, reply_to_message_id=None, disable_notification=False):
         self.stickers.append(
@@ -305,12 +326,33 @@ class TelegramBotTests(unittest.TestCase):
         self.assertEqual(cleaned, "На стікері аніме-дівчина зашарілася.")
         self.assertNotIn("викон", cleaned)
 
-    def test_clean_vision_description_annotates_truncated_single_sentence(self) -> None:
-        # Single sentence that itself ended mid-word: keep it (we have
-        # nothing better) but flag the truncation with ``…`` so the
-        # operator knows the model output ran out.
+    def test_clean_vision_description_completes_missing_period(self) -> None:
+        # Single sentence that ends on a full word but lacks a terminator
+        # (very common with SmolVLM2 output): treat as "model forgot the
+        # period", append ``.`` so downstream validation does not mistake
+        # it for a mid-word truncation.
         cleaned = clean_vision_description("Дівчина усміхається і тримає чашку")
+        self.assertTrue(cleaned.endswith("."), cleaned)
+        self.assertFalse(cleaned.endswith("…"), cleaned)
+
+    def test_clean_vision_description_marks_mid_word_truncation_with_ellipsis(self) -> None:
+        # When the last token is short and looks like a cut-off fragment
+        # (e.g. two-letter stub after a hyphen), keep the ``…`` marker so
+        # consumers can tell it was a real loss.
+        cleaned = clean_vision_description("Дівчина тримає чашку з на")
         self.assertTrue(cleaned.endswith("…"), cleaned)
+
+    def test_clean_vision_description_can_keep_three_sticker_sentences(self) -> None:
+        cleaned = clean_vision_description(
+            "Miku smiles at the viewer. She raises both hands near her face. "
+            "Small sparkles surround her.",
+            max_sentences=3,
+        )
+        self.assertEqual(
+            cleaned,
+            "Miku smiles at the viewer. She raises both hands near her face. "
+            "Small sparkles surround her.",
+        )
 
     def test_split_telegram_message(self) -> None:
         chunks = split_telegram_message("a" * 20, max_chars=8)
@@ -2059,6 +2101,239 @@ class TelegramBotTests(unittest.TestCase):
             self.assertTrue(processed)
             self.assertIn("Соломія", telegram.sent[0]["text"])
             self.assertNotIn("/remember", telegram.sent[0]["text"])
+
+    # ------------------------------------------------------------------
+    # setMessageReaction integration
+
+    def test_decision_from_payload_parses_reactions(self) -> None:
+        decision = decision_from_payload(
+            {
+                "should_reply": True,
+                "reply": "ок",
+                "reactions": [
+                    {"emoji": "👍", "message_id": 42, "big": True, "reason": "agreed"}
+                ],
+            }
+        )
+        self.assertEqual(len(decision.reactions), 1)
+        self.assertEqual(decision.reactions[0]["emoji"], "👍")
+        self.assertEqual(decision.reactions[0]["message_id"], 42)
+        self.assertTrue(decision.reactions[0]["big"])
+        self.assertEqual(decision.reactions[0]["reason"], "agreed")
+
+    def test_decision_reactions_capped_at_one(self) -> None:
+        decision = decision_from_payload(
+            {
+                "should_reply": False,
+                "reactions": [
+                    {"emoji": "👍"},
+                    {"emoji": "🔥"},
+                ],
+            }
+        )
+        self.assertEqual(len(decision.reactions), 1)
+        self.assertEqual(decision.reactions[0]["emoji"], "👍")
+
+    def test_reaction_sent_on_incoming_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": true, "reply": "ага", '
+                '"reactions": [{"emoji": "👍"}], '
+                '"memories": [], "next_check_minutes": 60}'
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(token="token"),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.bootstrap()
+            bot.process_update(
+                {
+                    "update_id": 1,
+                    "message": {
+                        "message_id": 55,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "text": "+",
+                    },
+                }
+            )
+            self.assertEqual(len(telegram.reactions), 1)
+            self.assertEqual(telegram.reactions[0]["emoji"], "👍")
+            self.assertEqual(telegram.reactions[0]["message_id"], 55)
+
+    def test_reaction_cooldown_blocks_second_within_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                [
+                    '{"should_reply": false, '
+                    '"reactions": [{"emoji": "🔥"}]}',
+                    '{"should_reply": false, '
+                    '"reactions": [{"emoji": "🔥"}]}',
+                ]
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(
+                    token="token",
+                    reaction_cooldown_seconds=3600,
+                ),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.bootstrap()
+            for i, msg_id in enumerate((71, 72), start=1):
+                bot.process_update(
+                    {
+                        "update_id": i,
+                        "message": {
+                            "message_id": msg_id,
+                            "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                            "from": {"id": 123, "first_name": "Vadim"},
+                            "text": f"line {i}",
+                        },
+                    }
+                )
+            self.assertEqual(len(telegram.reactions), 1)
+            self.assertEqual(telegram.reactions[0]["message_id"], 71)
+
+    def test_reaction_disallowed_emoji_filtered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": false, '
+                '"reactions": [{"emoji": "🤖"}]}'
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(token="token"),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.bootstrap()
+            bot.process_update(
+                {
+                    "update_id": 1,
+                    "message": {
+                        "message_id": 81,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "text": "hi",
+                    },
+                }
+            )
+            self.assertEqual(telegram.reactions, [])
+            self.assertEqual(telegram.sent, [])
+
+    def test_reaction_only_path_without_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": false, '
+                '"reactions": [{"emoji": "❤️"}]}'
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(token="token"),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.bootstrap()
+            bot.process_update(
+                {
+                    "update_id": 1,
+                    "message": {
+                        "message_id": 91,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "text": "thank you",
+                    },
+                }
+            )
+            self.assertEqual(telegram.sent, [])
+            self.assertEqual(len(telegram.reactions), 1)
+            self.assertEqual(telegram.reactions[0]["emoji"], "❤️")
+
+    def test_reaction_disabled_via_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            llm = FakeLLM(
+                '{"should_reply": true, "reply": "ага", '
+                '"reactions": [{"emoji": "👍"}]}'
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(
+                    token="token",
+                    reaction_enabled=False,
+                ),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.bootstrap()
+            bot.process_update(
+                {
+                    "update_id": 1,
+                    "message": {
+                        "message_id": 101,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "text": "hi",
+                    },
+                }
+            )
+            self.assertEqual(telegram.reactions, [])
+            self.assertEqual(telegram.sent[0]["text"], "ага")
+
+    def test_reaction_invalid_emoji_added_to_denylist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(Path(tmp) / "memory.sqlite3")
+            telegram = FakeTelegram()
+            telegram.next_reaction_error = "Telegram HTTP 400: REACTION_INVALID"
+            llm = FakeLLM(
+                '{"should_reply": false, '
+                '"reactions": [{"emoji": "👍"}]}'
+            )
+            bot = NikolaBot(
+                telegram=telegram,
+                llm=llm,
+                memory=memory,
+                telegram_config=TelegramConfig(token="token"),
+                agent_config=AgentConfig(database_path=Path(tmp) / "memory.sqlite3"),
+            )
+            bot.bootstrap()
+            bot.process_update(
+                {
+                    "update_id": 1,
+                    "message": {
+                        "message_id": 111,
+                        "chat": {"id": 123, "type": "private", "first_name": "Vadim"},
+                        "from": {"id": 123, "first_name": "Vadim"},
+                        "text": "hi",
+                    },
+                }
+            )
+            self.assertEqual(telegram.reactions, [])
+            from protoagi.telegram.reactions import (
+                REACTION_DENYLIST_KV_PREFIX,
+                parse_denylist,
+            )
+
+            denylist = parse_denylist(memory.get_kv(REACTION_DENYLIST_KV_PREFIX + "123"))
+            self.assertIn("👍", denylist)
 
 
 if __name__ == "__main__":

@@ -85,6 +85,15 @@ from .prompts import (
     reply_system_prompt,
     user_state_system_prompt,
 )
+from .reactions import (
+    ALLOWED_REACTION_EMOJI,
+    REACTION_COOLDOWN_KV_PREFIX,
+    REACTION_DENYLIST_KV_PREFIX,
+    REACTION_SENT_COUNT_KV_PREFIX,
+    filter_allowed_emoji,
+    parse_denylist,
+    serialize_denylist,
+)
 from .stickers import (
     STICKER_PACKS,
     normalize_sticker_pack,
@@ -152,6 +161,8 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         self._last_reminder_check = 0.0
         self._last_reflection_check = 0.0
         self._sticker_cache: dict[str, list[dict[str, str]]] = {}
+        self._chat_locks: dict[str, threading.Lock] = {}
+        self._chat_locks_guard = threading.Lock()
         self.error_log_path = PROJECT_ROOT / "runs" / "telegram-errors.log"
         self._style_tuner = ReplyStyleTuner(memory)
         self._group_gate = GroupReactivityGate(memory, telegram_config.group_gate)
@@ -1118,7 +1129,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         self._filter_decision_stickers(chat_state, incoming_text, decision)
         stickers_filtered = had_stickers_before_filter - len(decision.stickers)
         self._maybe_add_reaction_sticker(chat_state, incoming_text, decision)
-        if not decision.should_reply and not decision.stickers:
+        if not decision.should_reply and not decision.stickers and not decision.reactions:
             # The bot decided to stay silent. Tell the operator WHY so they
             # don't have to dig through the reasoning log to find out:
             # was it a true "no reply" verdict, did sticker filtering
@@ -1157,6 +1168,11 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             stickers=decision.stickers,
             voice_reply=decision.voice_reply,
         )
+        self._apply_reactions(
+            chat_state,
+            reply_to_message_id if isinstance(reply_to_message_id, int) else current_message_id or None,
+            decision.reactions,
+        )
         self._schedule_from_minutes(chat_state.chat_id, decision.next_check_minutes)
         return True
 
@@ -1175,6 +1191,108 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                 emoji = str(first.get("emoji") or "")
         self._style_tuner.record_reaction(chat_id, emoji)
         return True
+
+    # ------------------------------------------------------------------
+    # Bot-side emoji reactions (setMessageReaction)
+
+    def _chat_lock(self, chat_id: str) -> threading.Lock:
+        with self._chat_locks_guard:
+            lock = self._chat_locks.get(chat_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._chat_locks[chat_id] = lock
+            return lock
+
+    def _reaction_denylist(self, chat_id: str) -> set[str]:
+        raw = self.memory.get_kv(REACTION_DENYLIST_KV_PREFIX + chat_id)
+        return parse_denylist(raw)
+
+    def _reaction_cooldown_active(self, chat_id: str) -> bool:
+        raw = self.memory.get_kv(REACTION_COOLDOWN_KV_PREFIX + chat_id)
+        if not raw:
+            return False
+        try:
+            last = float(raw)
+        except ValueError:
+            return False
+        return (time.time() - last) < self.telegram_config.reaction_cooldown_seconds
+
+    def _mark_reaction_sent(self, chat_id: str) -> None:
+        self.memory.set_kv(REACTION_COOLDOWN_KV_PREFIX + chat_id, f"{time.time():.0f}")
+        counter_key = REACTION_SENT_COUNT_KV_PREFIX + chat_id
+        raw = self.memory.get_kv(counter_key)
+        try:
+            count = int(raw) if raw else 0
+        except ValueError:
+            count = 0
+        self.memory.set_kv(counter_key, str(count + 1))
+
+    def _record_reaction_denylist(self, chat_id: str, emoji: str) -> None:
+        denylist = self._reaction_denylist(chat_id)
+        if emoji in denylist:
+            return
+        denylist.add(emoji)
+        self.memory.set_kv(REACTION_DENYLIST_KV_PREFIX + chat_id, serialize_denylist(denylist))
+
+    def _apply_reactions(
+        self,
+        chat: TelegramChat,
+        default_message_id: int | None,
+        reactions: list[dict[str, Any]],
+    ) -> None:
+        if not self.telegram_config.reaction_enabled or not reactions:
+            return
+        choice = reactions[0]
+        emoji_raw = str(choice.get("emoji") or "").strip()
+        if not emoji_raw:
+            return
+        target_id = choice.get("message_id") or default_message_id
+        if target_id is None:
+            return
+        try:
+            target_int = int(target_id)
+        except (TypeError, ValueError):
+            return
+        if target_int <= 0:
+            return
+        denylist = self._reaction_denylist(chat.chat_id)
+        emoji = filter_allowed_emoji(emoji_raw, denylist)
+        if emoji is None:
+            print(
+                f"[reaction] chat={chat.chat_id} skipped: emoji {ascii(emoji_raw)} not in whitelist or denylisted",
+                flush=True,
+            )
+            return
+        is_big = bool(choice.get("big"))
+        with self._chat_lock(chat.chat_id):
+            if self._reaction_cooldown_active(chat.chat_id):
+                print(
+                    f"[reaction] chat={chat.chat_id} skipped: cooldown active",
+                    flush=True,
+                )
+                return
+            try:
+                self.telegram.set_message_reaction(
+                    chat.chat_id,
+                    target_int,
+                    emoji,
+                    is_big=is_big,
+                )
+            except TelegramApiError as exc:
+                message = str(exc)
+                if "REACTION_INVALID" in message or "REACTION_NOT_VALID" in message:
+                    self._record_reaction_denylist(chat.chat_id, emoji)
+                print(
+                    f"[reaction] chat={chat.chat_id} api error for {ascii(emoji)}: {message}",
+                    flush=True,
+                )
+                return
+            self._mark_reaction_sent(chat.chat_id)
+            print(
+                f"[reaction] chat={chat.chat_id} sent {ascii(emoji)} on msg={target_int}"
+                f"{' big' if is_big else ''}",
+                flush=True,
+            )
 
     def _handle_edited_message(self, message: dict[str, Any]) -> bool:
         chat = message.get("chat") or {}
@@ -1316,8 +1434,15 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             decision.replies = [item for item in decision.replies if not is_image_blind_reply(item)]
             if not decision_reply_texts(decision) and not decision.stickers:
                 decision.should_reply = False
-        if decision.should_reply and not decision_reply_texts(decision) and not decision.stickers:
-            decision.should_reply = False
+        if (
+            decision.should_reply
+            and not decision_reply_texts(decision)
+            and not decision.stickers
+        ):
+            # Pure reaction-only turns are valid: keep should_reply truthy
+            # so _handle_incoming_message routes through the apply path.
+            if not decision.reactions:
+                decision.should_reply = False
         self._record_decision_metrics(
             llm_calls=llm_calls,
             used_tools=used_tools,

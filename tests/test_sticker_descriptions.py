@@ -15,6 +15,57 @@ from pathlib import Path
 
 from protoagi.storage.memory import MemoryStore
 from protoagi.telegram import normalize_sticker_choices
+from protoagi.telegram.api import TelegramApiError
+from protoagi.telegram.sticker_describer import StickerDescriberWorker
+
+
+class DummyVision:
+    enabled = True
+    max_bytes = 1024
+    vision_llm = None
+
+    def _marker(self) -> str:
+        return "<__media__>"
+
+
+class FakeVisionLLM:
+    def chat_completion(self, messages, **kwargs):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            "Hatsune Miku looks angry and points at the viewer "
+                            "with one hand. Sharp motion lines surround her face."
+                        )
+                    }
+                }
+            ]
+        }
+
+
+class FakeChatLLM:
+    def chat_completion(self, messages, **kwargs):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            "Хацуне Міку сердито вказує пальцем на глядача. "
+                            "Біля її обличчя намальовані різкі лінії руху."
+                        )
+                    }
+                }
+            ]
+        }
+
+
+class FailingTelegram:
+    def get_sticker_set(self, name):
+        raise TelegramApiError("offline")
+
+    def get_file(self, file_id):
+        raise TelegramApiError("offline")
 
 
 class StickerDescriptionStorageTests(unittest.TestCase):
@@ -130,6 +181,66 @@ class StickerDescriptionStorageTests(unittest.TestCase):
         self.assertEqual(
             self.store.count_sticker_descriptions(only_described=True), 2
         )
+
+    def test_reset_low_quality_descriptions_queues_weak_existing_rows(self) -> None:
+        self.store.upsert_sticker_description(
+            sticker_id="EN",
+            set_name="M1ku_Hatsune",
+            description="A cute anime girl with blue hair and red eyes, blushing.",
+        )
+        detailed = (
+            "Хацуне Міку сердито вказує пальцем на глядача, нахилившись уперед. "
+            "Біля обличчя намальовані різкі лінії руху."
+        )
+        self.store.upsert_sticker_description(
+            sticker_id="GOOD",
+            set_name="M1ku_Hatsune",
+            description=detailed,
+        )
+        worker = StickerDescriberWorker(
+            telegram=object(),  # type: ignore[arg-type]
+            vision=DummyVision(),  # type: ignore[arg-type]
+            memory=self.store,
+            chat_llm=object(),  # type: ignore[arg-type]
+            describe_delay=0,
+        )
+
+        self.assertEqual(worker.reset_low_quality_descriptions(), 1)
+        weak = self.store.get_sticker_description("EN")
+        good = self.store.get_sticker_description("GOOD")
+        assert weak is not None
+        assert good is not None
+        self.assertEqual(weak.description, "")
+        self.assertEqual(weak.attempt_count, 0)
+        self.assertEqual(good.description, detailed)
+
+    def test_describe_one_falls_back_to_cached_media_bytes(self) -> None:
+        self.store.store_media_blob(
+            file_id="CACHED",
+            mime="image/jpeg",
+            data=b"cached-image-bytes",
+            caption="old weak caption",
+        )
+        row = self.store.upsert_sticker_description(
+            sticker_id="CACHED",
+            set_name="M1ku_Hatsune",
+            emoji="😠",
+            description="",
+        )
+        vision = DummyVision()
+        vision.vision_llm = FakeVisionLLM()
+        worker = StickerDescriberWorker(
+            telegram=FailingTelegram(),  # type: ignore[arg-type]
+            vision=vision,  # type: ignore[arg-type]
+            memory=self.store,
+            chat_llm=FakeChatLLM(),  # type: ignore[arg-type]
+            describe_delay=0,
+        )
+
+        self.assertTrue(worker.describe_one(row))
+        updated = self.store.get_sticker_description("CACHED")
+        assert updated is not None
+        self.assertIn("вказує пальцем", updated.description)
 
 
 class StickerChoiceNormalizerTests(unittest.TestCase):

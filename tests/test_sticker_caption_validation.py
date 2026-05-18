@@ -12,9 +12,11 @@ from __future__ import annotations
 import unittest
 
 from protoagi.telegram.sticker_describer import (
+    _caption_detail_issue,
     _cyrillic_ratio,
     _has_cjk,
     _is_acceptable_caption,
+    redescription_reason,
 )
 
 
@@ -100,6 +102,73 @@ class AcceptableCaptionTests(unittest.TestCase):
             'На стікері аніме-дівчина тримає табличку з написом "Stop the war".'
         )
         self.assertTrue(ok, reason)
+
+    def test_detail_gate_rejects_generic_character_portrait(self) -> None:
+        ok, reason = _is_acceptable_caption(
+            "Дівчина з довгим синім волоссям і синім сукном.",
+            require_detail=True,
+        )
+        self.assertFalse(ok)
+        self.assertIn("appearance", reason)
+
+    def test_detail_gate_accepts_action_and_object(self) -> None:
+        ok, reason = _is_acceptable_caption(
+            "Хацуне Міку сердито вказує пальцем на глядача, "
+            "нахилившись уперед; біля обличчя намальовані різкі лінії руху.",
+            require_detail=True,
+        )
+        self.assertTrue(ok, reason)
+
+
+class StickerCaptionDetailTests(unittest.TestCase):
+    def test_caption_detail_issue_flags_short_truncated_text(self) -> None:
+        # Short fragments ending in ``…`` lose almost all search value —
+        # those should still be rejected so the retry path can recover.
+        self.assertIn("truncated", _caption_detail_issue("Яскраве зображення молодої д…"))
+
+    def test_caption_detail_issue_accepts_long_truncated_text(self) -> None:
+        # A long caption whose tail was clipped by the max-chars cap in
+        # ``clean_vision_description`` still carries enough search-useful
+        # detail. Rejecting it just loops into a retry that produces the
+        # same shape, leaving the sticker permanently undescribed.
+        long_truncated = (
+            "Хацуне Міку сердито вказує пальцем на глядача, нахилившись "
+            "уперед; біля обличчя намальовані різкі лінії руху і червоне "
+            "сяйво на щоках; навколо неї літа…"
+        )
+        self.assertEqual(_caption_detail_issue(long_truncated), "")
+
+    def test_caption_detail_issue_flags_terse_caption(self) -> None:
+        self.assertIn("terse", _caption_detail_issue("Дівчина з синім волоссям."))
+
+    def test_caption_detail_issue_allows_short_visible_text_caption(self) -> None:
+        self.assertEqual(_caption_detail_issue('На стікері напис "ну ок".'), "")
+
+    def test_caption_detail_issue_flags_wholly_quoted_phrase(self) -> None:
+        # SmolVLM2-class captioners often interpret 'quote visible text in
+        # double quotes' as 'wrap the whole answer in quotes', producing
+        # things like ``"happy fox girl"…`` — useless for search.
+        self.assertIn(
+            "quoted phrase",
+            _caption_detail_issue('"happy fox girl with blonde hair"…'),
+        )
+        self.assertIn(
+            "quoted phrase",
+            _caption_detail_issue('"Hatsune Miku".'),
+        )
+
+    def test_caption_detail_issue_keeps_caption_with_internal_quotation(self) -> None:
+        # A caption with an embedded quoted phrase (visible sticker text)
+        # plus narration around it MUST NOT be treated as a tag.
+        text = 'A girl holds a sign that says "OK Boomer" and smirks at the viewer.'
+        self.assertEqual(_caption_detail_issue(text), "")
+
+    def test_redescription_reason_requeues_english_when_translator_exists(self) -> None:
+        reason = redescription_reason(
+            "A cute anime girl with blue hair and red eyes, blushing.",
+            require_ukrainian=True,
+        )
+        self.assertIn("English fallback", reason)
 
 
 if __name__ == "__main__":

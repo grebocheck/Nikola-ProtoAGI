@@ -36,6 +36,10 @@ class Decision:
     # emotional state or in-flight test scenarios that should not bleed
     # into long-term memory.
     temporary_notes: list[str] = field(default_factory=list)
+    # Optional emoji reactions the bot wants to attach to a message via
+    # ``setMessageReaction``. Capped at one item per decision; ``message_id``
+    # null means "react to the incoming message".
+    reactions: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -97,6 +101,21 @@ _REMINDER_ITEM_SCHEMA = {
         "trigger_at": {"anyOf": [{"type": "null"}, {"type": "string"}]},
     },
     "required": ["text"],
+    "additionalProperties": False,
+}
+
+
+_REACTION_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "emoji": {"type": "string"},
+        "message_id": {
+            "anyOf": [{"type": "null"}, {"type": "integer"}]
+        },
+        "big": {"type": "boolean"},
+        "reason": {"type": "string"},
+    },
+    "required": ["emoji"],
     "additionalProperties": False,
 }
 
@@ -168,6 +187,7 @@ DECISION_JSON_SCHEMA: dict[str, Any] = {
                 },
                 "goals": {"type": "array", "items": _GOAL_ACTION_SCHEMA},
                 "temporary_notes": {"type": "array", "items": {"type": "string"}},
+                "reactions": {"type": "array", "items": _REACTION_ITEM_SCHEMA},
             },
             "required": ["should_reply"],
             "additionalProperties": False,
@@ -391,6 +411,7 @@ def decision_from_payload(payload: dict[str, Any]) -> Decision:
             for item in payload.get("temporary_notes", [])
             if str(item).strip()
         ][:5],
+        reactions=normalize_reaction_choices(payload.get("reactions", [])),
     )
 
 
@@ -569,6 +590,44 @@ def normalize_sticker_choices(value: Any) -> list[dict[str, str]]:
     return choices[:2]
 
 
+def normalize_reaction_choices(value: Any) -> list[dict[str, Any]]:
+    """Coerce reaction items into a single-entry list of typed dicts.
+
+    Telegram bots may attach at most one reaction per message in regular
+    chats, so we cap to one entry here even if the model returns more —
+    later items are silently dropped rather than rejected, so a noisy
+    decision still goes through.
+    """
+
+    if isinstance(value, dict):
+        items = [value]
+    elif isinstance(value, list):
+        items = value
+    else:
+        return []
+    choices: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        emoji = str(item.get("emoji") or "").strip()
+        if not emoji:
+            continue
+        entry: dict[str, Any] = {"emoji": emoji}
+        message_id = _optional_int(item.get("message_id"))
+        if message_id is not None and message_id > 0:
+            entry["message_id"] = message_id
+        if "big" in item:
+            entry["big"] = _optional_bool(item.get("big"))
+        reason = str(item.get("reason") or "").strip()
+        if reason:
+            entry["reason"] = reason[:120]
+        choices.append(entry)
+        # Telegram bots are limited to a single reaction per message in
+        # standard chats; ignore the rest rather than risk a 400.
+        break
+    return choices
+
+
 def decision_reply_texts(decision: Decision) -> list[str]:
     source = decision.replies if decision.replies else [decision.reply]
     return [str(item).strip() for item in source if str(item).strip()]
@@ -643,6 +702,7 @@ __all__ = [
     "image_to_payload",
     "initiative_from_payload",
     "normalize_goal_actions",
+    "normalize_reaction_choices",
     "normalize_reminder_requests",
     "normalize_reply_messages",
     "normalize_reply_to",

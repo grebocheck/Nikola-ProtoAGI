@@ -41,9 +41,19 @@ VISION_PROMPT_LEAK_RE = re.compile(
 
 
 _SENTENCE_END_RE = re.compile(r"[.!?…][\"'»)\]]?\s*$")
+# A "complete enough" trailing word is at least three letters of any
+# script and not followed by a hyphen — used to decide whether a missing
+# terminator means "model just forgot the period" (then we append ``.``)
+# or "model was cut mid-word" (then we keep ``…``).
+_LAST_WORD_LOOKS_COMPLETE_RE = re.compile(r"[\w’ʼ']{3,}[\"'»)\]]?\s*$", re.UNICODE)
 
 
-def clean_vision_description(text: str) -> str:
+def clean_vision_description(
+    text: str,
+    *,
+    max_sentences: int = 2,
+    max_chars: int = 420,
+) -> str:
     cleaned = clean_model_content(str(text or "")).strip()
     cleaned = re.sub(r"\s+", " ", cleaned)
     for pattern in VISION_BOILERPLATE_PATTERNS:
@@ -53,29 +63,34 @@ def clean_vision_description(text: str) -> str:
         return ""
     if VISION_PROMPT_LEAK_RE.search(cleaned) or _is_repetitive_vision_text(cleaned):
         return "опис недоступний"
-    # Keep up to two sentences, but drop a trailing fragment that
+    # Keep a bounded number of sentences, but drop a trailing fragment that
     # clearly ended mid-thought (model ran out of tokens). The previous
     # version stitched both segments together regardless, which
     # produced captions like ``...я викоюну його д`` cut mid-word.
+    max_sentences = max(1, int(max_sentences))
     sentences = re.split(r"(?<=[.!?…])\s+", cleaned)
     sentences = [part for part in sentences if part]
     kept: list[str] = []
-    if sentences:
-        first = sentences[0]
-        kept.append(first)
-        if len(sentences) >= 2:
-            second = sentences[1]
-            if _SENTENCE_END_RE.search(second):
-                kept.append(second)
-            # Otherwise the second sentence is a runaway fragment — drop it.
+    for index, sentence in enumerate(sentences):
+        if index == 0 or _SENTENCE_END_RE.search(sentence):
+            kept.append(sentence)
+        # Otherwise this sentence is a runaway fragment — drop it.
+        if len(kept) >= max_sentences:
+            break
     cleaned = " ".join(kept).strip()
     # If we still ended on an incomplete word/clause (no terminator),
-    # annotate with an ellipsis so consumers can tell the caption was
-    # truncated rather than misleading them about completeness.
+    # decide whether the model just forgot the period (most common with
+    # SmolVLM2-class captioners — append ``.``) or was cut mid-word
+    # (append ``…`` so downstream validation can spot the loss).
     if cleaned and not _SENTENCE_END_RE.search(cleaned):
-        cleaned = cleaned.rstrip(" ,;:") + "…"
-    if len(cleaned) > 420:
-        cleaned = cleaned[:420].rsplit(" ", 1)[0].rstrip(" ,.;:") + "…"
+        trimmed = cleaned.rstrip(" ,;:")
+        if _LAST_WORD_LOOKS_COMPLETE_RE.search(trimmed):
+            cleaned = trimmed + "."
+        else:
+            cleaned = trimmed + "…"
+    max_chars = max(40, int(max_chars))
+    if len(cleaned) > max_chars:
+        cleaned = cleaned[:max_chars].rsplit(" ", 1)[0].rstrip(" ,.;:") + "…"
     return cleaned
 
 

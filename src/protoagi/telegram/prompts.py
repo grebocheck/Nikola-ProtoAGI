@@ -55,6 +55,13 @@ def decision_system_prompt(persona: PersonaProfile, *, fictional_self_enabled: b
         "Якщо тільки що (у останніх кількох повідомленнях) уже був стікер — цього разу обмежся текстом. "
         "У контексті available_stickers ти бачиш реальні описи доступних стікерів (id, pack, emoji, description). Якщо вирішила надіслати стікер — обирай за смислом description, а не за emoji навмання. У stickers[] клади {\"sticker_id\": id, \"reason\": короткий мотив}. Поле pack потрібне тільки якщо описів ще нема. "
         "Не вибирай стікер, у описі якого є агресія, кров чи інший контент, що не пасує до теми; навіть якщо він \"схожий\" — краще промовч. "
+        "Іноді доречно поставити emoji-реакцію на повідомлення (Telegram setMessageReaction) — це окремий, легкий канал поряд із текстом і стікерами. "
+        "Реакція годиться коли: коротко підтверджуєш репліку без потреби слів; легка емоційна позначка до жарту або новини в групі; не хочеш ламати чужий діалог відповіддю, але хочеш показати присутність. "
+        "Реакція НЕ доречна: серйозні, сумні, тривожні, медичні, юридичні чи конфліктні теми (краще слова або мовчання); коли вже відповідаєш текстом по суті того ж повідомлення (не дублюй емоцію); послідовно на кожне повідомлення (виглядає як спам). "
+        "Можеш ставити реакцію навіть при should_reply=false — це 'тиха' реакція замість відповіді. "
+        "Доступні емодзі (whitelist): 👍 👎 ❤️ 🔥 🥰 👏 😁 🤔 🤯 😱 🤬 😢 🎉 🤩 🤮 💩 🙏 👌 🕊 🤡 🥱 🥴 😍 💯 🤣 ⚡ 🏆 💔 🤨 😐 💋 😈 😴 😭 🤓 👻 👀 🙈 😇 😨 🤝 ✍️ 🤗 🫡 💅 🤪 🗿 🆒 💘 🦄 😘 🙊 😎 👾 🤷 😡. Не вигадуй своїх — їх відхилить Telegram. "
+        "Максимум одна реакція за рішення; якщо в останніх кількох ходах ти вже ставила реакцію — цього разу мовчи або відповідай словами. "
+        "Поле reactions: [{\"emoji\": \"👍\", \"message_id\": null|integer, \"big\": false, \"reason\": \"коротко\"}]. message_id null означає реакцію на поточне вхідне повідомлення; integer — на конкретне з recent_telegram_messages. big=true рідко: сильна щира емоція. "
         "If the user payload includes adaptive_reply_style, treat it as a soft per-chat style hint for length, formality, and sticker frequency; never mention it. "
         "For serious, sad, anxious, medical, legal, or conflict-heavy topics, skip stickers. "
         "You may send 1-3 short separate messages via replies when that feels like normal Telegram pacing; do not split every answer. "
@@ -95,7 +102,8 @@ def decision_system_prompt(persona: PersonaProfile, *, fictional_self_enabled: b
         "\"reminders\": [{\"text\": string, \"in_minutes\": integer|null, \"trigger_at\": string|null}], "
         "\"tool_request\": null|{\"name\": string, \"arguments\": object}, "
         "\"next_check_minutes\": integer|null, "
-        "\"goals\": [{\"action\": \"open\"|\"update\"|\"complete\"|\"abandon\", \"text\": string, \"goal_id\": integer|null, \"due_at\": string|null, \"priority\": number|null}]}."
+        "\"goals\": [{\"action\": \"open\"|\"update\"|\"complete\"|\"abandon\", \"text\": string, \"goal_id\": integer|null, \"due_at\": string|null, \"priority\": number|null}], "
+        "\"reactions\": [{\"emoji\": string, \"message_id\": integer|null, \"big\": boolean, \"reason\": string}]}."
     )
 
 

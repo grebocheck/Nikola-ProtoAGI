@@ -41,6 +41,11 @@ class TelegramConfig:
     sticker_cooldown_messages: int = 6
     sticker_max_reply_chars: int = 180
     sticker_initiative_enabled: bool = False
+    # Emoji reactions (``setMessageReaction``). Off by setting enabled=False;
+    # otherwise the LLM decides via the ``reactions`` field in its decision
+    # JSON and the per-chat cooldown caps the cadence regardless.
+    reaction_enabled: bool = True
+    reaction_cooldown_seconds: int = 45
     fictional_self_enabled: bool = True
     global_memory: bool = True
     proactive_enabled: bool = True
@@ -112,6 +117,8 @@ class TelegramConfig:
             sticker_cooldown_messages=env_int("NIKOLA_STICKER_COOLDOWN_MESSAGES", 6),
             sticker_max_reply_chars=env_int("NIKOLA_STICKER_MAX_REPLY_CHARS", 180),
             sticker_initiative_enabled=env_bool("NIKOLA_STICKER_INITIATIVE", False),
+            reaction_enabled=env_bool("NIKOLA_REACTION_ENABLED", True),
+            reaction_cooldown_seconds=env_int("NIKOLA_REACTION_COOLDOWN_SECONDS", 45),
             fictional_self_enabled=env_bool("NIKOLA_FICTIONAL_SELF", True),
             global_memory=env_bool("PROTOAGI_TELEGRAM_GLOBAL_MEMORY", True),
             proactive_enabled=env_bool("NIKOLA_PROACTIVE", True),

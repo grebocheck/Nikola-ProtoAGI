@@ -93,6 +93,23 @@ class TelegramApi:
     def send_chat_action(self, chat_id: str | int, action: str = "typing") -> bool:
         return bool(self.call("sendChatAction", {"chat_id": chat_id, "action": action}, timeout=20))
 
+    def set_message_reaction(
+        self,
+        chat_id: str | int,
+        message_id: int,
+        emoji: str | None,
+        *,
+        is_big: bool = False,
+    ) -> bool:
+        reaction = [{"type": "emoji", "emoji": emoji}] if emoji else []
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": int(message_id),
+            "reaction": reaction,
+            "is_big": bool(is_big),
+        }
+        return bool(self.call("setMessageReaction", payload, timeout=20))
+
     def get_sticker_set(self, name: str) -> dict[str, Any]:
         return dict(self.call("getStickerSet", {"name": name}))
 
