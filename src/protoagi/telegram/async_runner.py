@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from ..openai_compat import OpenAICompatError
 from .api import TelegramApiError, is_telegram_polling_conflict
@@ -9,7 +9,7 @@ from .constants import OFFSET_KEY
 
 
 if TYPE_CHECKING:
-    from .bot import NikolaBot
+    from .orchestrator import NikolaBot
 
 
 class AsyncBotRunner:
@@ -67,7 +67,7 @@ class AsyncBotRunner:
         for update, item in zip(updates, results):
             update_id = int(update.get("update_id", 0))
             if isinstance(item, BaseException):
-                self.bot._log_loop_exception(item)  # type: ignore[attr-defined]
+                self.bot._log_loop_exception(item)
                 failed_ids.append(update_id)
                 continue
             successful_ids.append(update_id)
@@ -90,7 +90,7 @@ class AsyncBotRunner:
             )
         return processed
 
-    async def _process_update(self, update: dict) -> bool:
+    async def _process_update(self, update: dict[str, Any]) -> bool:
         async with self._semaphore:
             return bool(await asyncio.to_thread(self.bot.process_update, update))
 
@@ -107,7 +107,7 @@ class AsyncBotRunner:
                 print(f"Telegram async poll transient error: {exc}", flush=True)
                 await self._sleep(5)
             except Exception as exc:
-                self.bot._log_loop_exception(exc)  # type: ignore[attr-defined]
+                self.bot._log_loop_exception(exc)
                 print(
                     f"Telegram async poll unexpected error: {exc}; see {self.bot.error_log_path}",
                     flush=True,
@@ -125,7 +125,7 @@ class AsyncBotRunner:
             except (OpenAICompatError, OSError) as exc:
                 print(f"Telegram async {name} transient error: {exc}", flush=True)
             except Exception as exc:
-                self.bot._log_loop_exception(exc)  # type: ignore[attr-defined]
+                self.bot._log_loop_exception(exc)
                 print(
                     f"Telegram async {name} unexpected error: {exc}; see {self.bot.error_log_path}",
                     flush=True,

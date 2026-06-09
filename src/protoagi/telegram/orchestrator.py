@@ -13,7 +13,7 @@ import traceback
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import threading
-from typing import Any
+from typing import Any, Iterator, Sequence, cast
 
 from ..config import AgentConfig, PROJECT_ROOT
 from ..embedding import EmbeddingClient, EmbeddingConfig
@@ -24,16 +24,18 @@ from ..storage.memory import (
     CONFLICT_STATUS_SUPERSEDED,
     GOAL_STATUS_ABANDONED,
     GOAL_STATUS_COMPLETED,
-    GOAL_STATUS_OPEN,
     Goal,
     KIND_EPISODIC,
     KIND_FACT,
     KIND_PERSONA_SELF,
+    MemoryFact,
+    MemoryItem,
     MemoryStore,
     SCOPE_CHAT,
     SCOPE_GLOBAL,
     SCOPE_PERSONA,
     SCOPE_USER,
+    StickerDescription,
     TelegramChat,
     UserState,
     utc_now,
@@ -68,7 +70,6 @@ from .json_io import (
     InitiativeDecision,
     StickerAttachment,
     USER_STATE_JSON_SCHEMA,
-    UserStateUpdate,
     conflict_resolution_from_payload,
     decision_from_payload,
     decision_reply_texts,
@@ -86,7 +87,6 @@ from .prompts import (
     user_state_system_prompt,
 )
 from .reactions import (
-    ALLOWED_REACTION_EMOJI,
     REACTION_COOLDOWN_KV_PREFIX,
     REACTION_DENYLIST_KV_PREFIX,
     REACTION_SENT_COUNT_KV_PREFIX,
@@ -236,7 +236,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
     def vision_llm(self, value: OpenAICompatibleClient | None) -> None:
         self._vision.vision_llm = value
         # Cached marker becomes stale when the underlying client changes.
-        self._vision._media_marker = None  # type: ignore[attr-defined]
+        self._vision._media_marker = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -341,7 +341,9 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             pass
 
     @contextmanager
-    def _chat_action_loop(self, chat: TelegramChat, action: str = "typing", *, enabled: bool = True):
+    def _chat_action_loop(
+        self, chat: TelegramChat, action: str = "typing", *, enabled: bool = True
+    ) -> Iterator[None]:
         if not enabled:
             yield
             return
@@ -490,14 +492,17 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             "reflections_written": 0,
         }
         try:
-            result["consolidated_global"] = self.memory_service.consolidate(
-                scope=SCOPE_GLOBAL, max_items=300
+            result["consolidated_global"] = cast(
+                "int", self.memory_service.consolidate(scope=SCOPE_GLOBAL, max_items=300)
             )
         except sqlite3_error_types() as exc:  # pragma: no cover - defensive
             print(f"reflection consolidate(global) failed: {exc}", flush=True)
         try:
-            result["consolidated_persona"] = self.memory_service.consolidate(
-                scope=SCOPE_PERSONA, persona_key=self.persona.key, max_items=200
+            result["consolidated_persona"] = cast(
+                "int",
+                self.memory_service.consolidate(
+                    scope=SCOPE_PERSONA, persona_key=self.persona.key, max_items=200
+                ),
             )
         except sqlite3_error_types() as exc:  # pragma: no cover - defensive
             print(f"reflection consolidate(persona) failed: {exc}", flush=True)
@@ -2203,10 +2208,13 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                     trigger_at = ""
             if not trigger_at:
                 in_minutes = entry.get("in_minutes")
-                try:
-                    minutes = max(1, min(int(in_minutes), max_minutes))
-                except (TypeError, ValueError):
+                if in_minutes is None:
                     minutes = 60
+                else:
+                    try:
+                        minutes = max(1, min(int(in_minutes), max_minutes))
+                    except (TypeError, ValueError):
+                        minutes = 60
                 trigger_at = (
                     datetime.now(timezone.utc) + timedelta(minutes=minutes)
                 ).isoformat(timespec="seconds")
@@ -2221,7 +2229,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             added += 1
         return added
 
-    def _relevant_memory_payload(self, facts) -> list[dict[str, Any]]:
+    def _relevant_memory_payload(self, facts: Sequence[MemoryFact]) -> list[dict[str, Any]]:
         """Build the ``relevant_memory`` list passed to the model.
 
         Includes provenance (``origin``) plus a ``tensions`` field when
@@ -2239,13 +2247,13 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                 "created_at": fact.created_at,
                 "origin": getattr(fact, "origin_message_id", None),
             }
-            tensions = tensions_by_id.get(getattr(fact, "id", None))
+            tensions = tensions_by_id.get(fact.id)
             if tensions:
                 entry["tensions"] = tensions
             payload.append(entry)
         return payload
 
-    def _tensions_for_facts(self, facts) -> dict[int, list[dict[str, Any]]]:
+    def _tensions_for_facts(self, facts: Sequence[MemoryFact]) -> dict[int, list[dict[str, Any]]]:
         """For each recalled fact id, look up unresolved conflict partners.
 
         Returns ``{fact_id: [{partner_text, similarity}, ...]}``. Items
@@ -2318,7 +2326,9 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
             for row in ranked
         ]
 
-    def _rank_stickers(self, rows, query_text: str):
+    def _rank_stickers(
+        self, rows: Sequence[StickerDescription], query_text: str
+    ) -> list[StickerDescription]:
         from ..storage.memory import cosine_similarity
 
         client = self.memory_service.embedding_client
@@ -2714,7 +2724,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         query: str,
         *,
         user_id: str | None = None,
-    ):
+    ) -> list[MemoryFact]:
         # By default Telegram memory is intentionally global across chats and
         # personas. When privacy mode is enabled, user-scoped memories are
         # only recalled for the originating Telegram user.
@@ -2752,7 +2762,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
                 break
         return [self._fact_view(result.item) for result in results]
 
-    def _persona_self_context(self, query: str):
+    def _persona_self_context(self, query: str) -> list[MemoryFact]:
         if not self.telegram_config.fictional_self_enabled:
             return []
         results = self.memory_service.recall(
@@ -2783,9 +2793,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         return [self._fact_view(item) for item in items[: self.telegram_config.max_memory_facts]]
 
     @staticmethod
-    def _fact_view(item):
-        from ..storage.memory import MemoryFact
-
+    def _fact_view(item: MemoryItem) -> MemoryFact:
         return MemoryFact(
             id=item.id,
             text=item.text,
@@ -3088,7 +3096,7 @@ def _format_origin_ref(chat_id: str | int, message_id: int | str | None) -> str 
     return f"telegram:{chat_id}:{message_int}"
 
 
-def _memory_pair_view(item) -> dict[str, Any]:
+def _memory_pair_view(item: MemoryItem) -> dict[str, Any]:
     """Compact projection of a MemoryItem for the conflict-resolution prompt.
 
     Strips embedding, access counters and other noise the model doesn't

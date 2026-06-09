@@ -123,7 +123,7 @@ class TelegramApi:
         request = Request(url, method="GET")
         try:
             with urlopen(request, timeout=60) as response:
-                data = response.read(max_bytes + 1)
+                data: bytes = response.read(max_bytes + 1)
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise TelegramApiError(f"Telegram file HTTP {exc.code}: {detail}") from exc

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Iterator
+from typing import Any, Iterator, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -70,7 +70,7 @@ class OpenAICompatibleClient:
             response_format=response_format,
             stream=False,
         )
-        return self._request("POST", "/chat/completions", payload)
+        return cast("dict[str, Any]", self._request("POST", "/chat/completions", payload))
 
     def chat_completion_stream(
         self,

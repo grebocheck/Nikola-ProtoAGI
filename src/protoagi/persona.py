@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 
 DEFAULT_PERSONA_KEY = "mykola"
@@ -68,7 +68,7 @@ class PersonaProfile:
         }
 
 
-def _profile_from_dict(data: dict) -> PersonaProfile:
+def _profile_from_dict(data: dict[str, Any]) -> PersonaProfile:
     def _str(value: object) -> str:
         return str(value or "").strip()
 

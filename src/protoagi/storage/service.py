@@ -133,7 +133,7 @@ class MemoryService:
         confidence: float = 0.7,
         source: str | None = None,
         pinned: bool = False,
-        metadata: dict | None = None,
+        metadata: dict[str, Any] | None = None,
         embed: bool = True,
         origin_message_id: str | int | None = None,
         expires_at: str | None = None,
@@ -857,8 +857,11 @@ class MemoryService:
                 return None
         if not isinstance(payload, dict):
             return None
+        raw_importance = payload.get("importance")
+        if raw_importance is None:
+            return None
         try:
-            importance = float(payload.get("importance"))
+            importance = float(raw_importance)
         except (TypeError, ValueError):
             return None
         kind = str(payload.get("kind") or fallback_kind)

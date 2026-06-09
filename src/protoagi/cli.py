@@ -127,14 +127,13 @@ def cmd_telegram(args: argparse.Namespace) -> int:
     if args.async_runner:
         import asyncio
 
-        runner = AsyncBotRunner(
+        async_runner = AsyncBotRunner(
             bot,
             max_concurrent_updates=args.max_concurrent_updates,
         )
-        asyncio.run(runner.run())
+        asyncio.run(async_runner.run())
         return 0
-    runner = BotRunner(bot)
-    runner.run()
+    BotRunner(bot).run()
     return 0
 
 

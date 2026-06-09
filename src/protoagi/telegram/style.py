@@ -71,7 +71,7 @@ class ReplyStyleTuner:
         state["last_choice"] = best_arm
         state["updated_at"] = utc_now()
         self._save_state(chat_id, state)
-        payload = dict(STYLE_ARMS[best_arm])
+        payload: dict[str, Any] = dict(STYLE_ARMS[best_arm])
         payload["arm"] = best_arm
         payload["confidence"] = round(min(1.0, max(0.0, best_score / 2.0)), 3)
         return StyleChoice(best_arm, payload)

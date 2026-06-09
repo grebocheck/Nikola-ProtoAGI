@@ -82,7 +82,7 @@ class EmbeddingClient:
 
     def _request(self, text: str) -> list[float]:
         url = self.config.base_url.rstrip("/") + "/embeddings"
-        payload = {"model": self.config.model, "input": text}
+        payload: dict[str, object] = {"model": self.config.model, "input": text}
         return self._request_payload(url, payload)
 
     def _request_media(self, data: bytes, *, mime: str, caption: str = "") -> list[float]:
@@ -94,7 +94,7 @@ class EmbeddingClient:
         }
         if caption.strip():
             image_payload["caption"] = caption.strip()
-        payload = {"model": self.config.model, "input": [image_payload]}
+        payload: dict[str, object] = {"model": self.config.model, "input": [image_payload]}
         return self._request_payload(url, payload)
 
     def _request_payload(self, url: str, payload: dict[str, object]) -> list[float]:

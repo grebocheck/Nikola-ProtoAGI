@@ -18,6 +18,9 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "protoagi.json"
 EXAMPLE_CONFIG_PATH = PROJECT_ROOT / "config" / "protoagi.example.json"
 DEFAULT_PERSONAS_DIR = PROJECT_ROOT / "config" / "personas"
 
+DEFAULT_BASE_URL = "http://127.0.0.1:8080/v1"
+DEFAULT_MODEL = "gpt-oss-20b-MXFP4"
+
 
 def _path_from_config(value: str | os.PathLike[str], *, root: Path = PROJECT_ROOT) -> Path:
     path = Path(value)
@@ -71,8 +74,8 @@ class EmbeddingSettings:
 
 @dataclass(slots=True)
 class AgentConfig:
-    base_url: str = "http://127.0.0.1:8080/v1"
-    model: str = "gpt-oss-20b-MXFP4"
+    base_url: str = DEFAULT_BASE_URL
+    model: str = DEFAULT_MODEL
     database_path: Path = DEFAULT_DB_PATH
     temperature: float = 0.6
     top_p: float = 1.0
@@ -106,8 +109,8 @@ class AgentConfig:
             embedding_data["backend"] = env_value
 
         return cls(
-            base_url=os.environ.get("PROTOAGI_BASE_URL", data.get("base_url", cls.base_url)),
-            model=os.environ.get("PROTOAGI_MODEL", data.get("model", cls.model)),
+            base_url=str(os.environ.get("PROTOAGI_BASE_URL", data.get("base_url", DEFAULT_BASE_URL))),
+            model=str(os.environ.get("PROTOAGI_MODEL", data.get("model", DEFAULT_MODEL))),
             database_path=_path_from_config(
                 os.environ.get("PROTOAGI_DB", data.get("database_path", str(DEFAULT_DB_PATH)))
             ),

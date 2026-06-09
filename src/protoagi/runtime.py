@@ -21,7 +21,7 @@ def ensure_runtime(profile: LlamaServerProfile) -> None:
 def server_ready(base_url: str) -> bool:
     try:
         with urlopen(f"{base_url.rstrip('/')}/models", timeout=2) as response:
-            return response.status == 200
+            return bool(response.status == 200)
     except URLError:
         return False
     except TimeoutError:

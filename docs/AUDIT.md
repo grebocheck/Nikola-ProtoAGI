@@ -1,9 +1,60 @@
 # Architecture Audit
 
-Last audit: 2026-05-07
+Last audit: 2026-06-09
 
 For the forward-looking plan and prioritized backlog, see
 [ROADMAP.md](ROADMAP.md).
+
+## 2026-06-09 phase 14 (tooling integrity / hygiene)
+
+A fresh audit re-checked the quality gates the earlier phases claimed to
+have shipped. Several were "green" only because nothing was actually
+running. This phase makes the gates real again. The unit suite has grown
+to **385 tests** (the older phase notes below stop counting at 198 —
+that drift is itself a symptom of the gaps closed here).
+
+Closed in this phase:
+
+- **H1 — mypy strict was a no-op.** `pyproject.toml` carried a global
+  `[[tool.mypy.overrides]] module = "protoagi.*" / ignore_errors = true`,
+  so `mypy --strict` reported success while checking nothing. Removed the
+  override and fixed the **~60 real strict errors** it was hiding across
+  16 files: missing annotations on `NikolaBot` helper methods
+  (`_fact_view`, `_relevant_memory_payload`, `_rank_stickers`,
+  `_search_chat_memory`, `_persona_self_context`, `_memory_pair_view`,
+  `_chat_action_loop`), `int(cur.lastrowid)` against `int | None` (new
+  `_last_row_id` helper in [storage/memory.py](../src/protoagi/storage/memory.py)),
+  the `due_at` Ellipsis sentinel now typed `EllipsisType`, slot/default
+  conflicts in [config.py](../src/protoagi/config.py), socket-tuple
+  variable shadowing in [agent_tools/core.py](../src/protoagi/agent_tools/core.py),
+  and several `Any`-return / generic-`dict` cases. A `py.typed` marker
+  was added so the package is checked as typed.
+- **H2 — dead `from .bot import NikolaBot` imports.** `runner.py` and
+  `async_runner.py` imported `NikolaBot` from a `telegram/bot` module that
+  no longer exists (it moved to `orchestrator.py`). The imports only
+  survived because they sat under `TYPE_CHECKING`. Repointed both at
+  `.orchestrator` and dropped the now-unnecessary `# type: ignore`s.
+- **H3 — ruff was failing.** `ruff check src/` reported 5 unused-import
+  errors in [orchestrator.py](../src/protoagi/telegram/orchestrator.py)
+  despite the README advertising a clean run. Fixed.
+- **H4 — CI did not exist.** Phase 10 / B5 claimed
+  `.github/workflows/ci.yml`, but the file (and the whole
+  `scripts/check_baseline.py` gate it drove) had been removed along with
+  the retired single-shot agent loop. Added a real
+  [.github/workflows/ci.yml](../.github/workflows/ci.yml): unit tests on
+  `{ubuntu, windows} × {py3.11, py3.12}`, plus a Linux ruff + mypy-strict
+  job. It runs only the gates that still exist.
+
+Known stale references left for a later docs pass (not code bugs): the
+phase notes below still describe `protoagi memory-eval` / `bench-tools` /
+`memory-export` CLIs and `scripts/eval-memory.ps1` /
+`scripts/bench-tools.ps1` / `scripts/smoke-test.ps1`. Those were retired
+with the single-shot agent loop; only `telegram` and `admin` subcommands
+remain. The `runs/*-baseline.json` files are now orphaned.
+
+Verification: `ruff check src/` clean, `mypy --strict src/protoagi/`
+clean (override removed), 385/385 unit tests green on Windows with and
+without `PYTHONPATH=src`.
 
 ## 2026-05-07 phase 13 (group readiness, web search, thinking budget)
 

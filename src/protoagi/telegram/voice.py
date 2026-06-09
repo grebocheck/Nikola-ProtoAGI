@@ -159,7 +159,7 @@ class VoiceSynthesizer:
         )
         try:
             with urlopen(request, timeout=self.config.timeout_seconds) as response:
-                data = response.read()
+                data: bytes = response.read()
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:500]
             self.last_error = f"HTTP {exc.code}: {detail}"

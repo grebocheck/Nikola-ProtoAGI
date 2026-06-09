@@ -35,7 +35,3 @@ target-version = "py311"
 python_version = "3.11"
 strict = true
 warn_unused_configs = true
-
-[[tool.mypy.overrides]]
-module = "protoagi.*"
-ignore_errors = true

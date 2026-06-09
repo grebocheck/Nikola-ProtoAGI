@@ -25,6 +25,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import EllipsisType
 from typing import Any, Iterable, Iterator, Sequence
 
 from .models import (
@@ -105,6 +106,21 @@ __all__ = [
     "unpack_embedding",
     "utc_now",
 ]
+
+
+def _last_row_id(cur: sqlite3.Cursor) -> int:
+    """Return the rowid of the just-inserted row.
+
+    ``Cursor.lastrowid`` is typed ``int | None`` because it is undefined before
+    the first INSERT. Right after an INSERT it is always set, so a missing value
+    means the database is in an unexpected state and we raise rather than coerce
+    ``None`` into a bogus id.
+    """
+
+    rowid = cur.lastrowid
+    if rowid is None:
+        raise sqlite3.OperationalError("INSERT did not produce a rowid")
+    return rowid
 
 
 def _tag_suffix(tags: Iterable[str], prefix: str) -> str | None:
@@ -510,7 +526,7 @@ class MemoryStore:
                     expires_value,
                 ),
             )
-            rowid = int(cur.lastrowid)
+            rowid = _last_row_id(cur)
             for tag in tag_set:
                 conn.execute(
                     "INSERT OR IGNORE INTO memory_tags(memory_id, tag) VALUES(?, ?)",
@@ -1176,7 +1192,7 @@ class MemoryStore:
                     json.dumps(metadata or {}, ensure_ascii=False),
                 ),
             )
-            return int(cur.lastrowid)
+            return _last_row_id(cur)
 
     def due_reminders(self, now: str, *, limit: int = 20) -> list[Reminder]:
         with self.connect() as conn:
@@ -1246,7 +1262,7 @@ class MemoryStore:
                     json.dumps(metadata or {}, ensure_ascii=False),
                 ),
             )
-            return int(cur.lastrowid)
+            return _last_row_id(cur)
 
     def get_goal(self, goal_id: int) -> Goal | None:
         with self.connect() as conn:
@@ -1340,7 +1356,7 @@ class MemoryStore:
         status: str | None = None,
         priority: float | None = None,
         text: str | None = None,
-        due_at: str | None | type(...) = ...,
+        due_at: str | None | EllipsisType = ...,
         metadata_patch: dict[str, Any] | None = None,
     ) -> Goal | None:
         """Partial update. ``due_at=...`` means "leave as-is"; pass ``None`` to clear it."""
@@ -1871,7 +1887,7 @@ class MemoryStore:
             )
             if cur.rowcount == 0:
                 return None
-            return int(cur.lastrowid)
+            return _last_row_id(cur)
 
     def get_conflict(self, conflict_id: int) -> MemoryConflict | None:
         with self.connect() as conn:

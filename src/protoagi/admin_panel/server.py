@@ -62,7 +62,6 @@ from .data import (
 )
 from ..storage.memory import MemoryStore
 from ..storage.service import MemoryService
-from ..telegram.api import TelegramApi, TelegramApiError
 
 
 _WEB_DIST = Path(__file__).resolve().parent / "web" / "dist"
@@ -392,25 +391,28 @@ def make_handler(memory: MemoryStore, service: MemoryService) -> type[BaseHTTPRe
                 return
 
             if path == "/api/memories/consolidate":
-                result = service.consolidate(
+                consolidated = service.consolidate(
                     scope=payload.get("scope"),
                     persona_key=payload.get("persona_key"),
                     chat_id=payload.get("chat_id"),
                     dry_run=bool(payload.get("dry_run", False)),
                     return_plan=bool(payload.get("return_plan", False)),
                 )
-                _json_response(self, result if isinstance(result, dict) else {"merged": result})
+                _json_response(
+                    self,
+                    consolidated if isinstance(consolidated, dict) else {"merged": consolidated},
+                )
                 return
 
             if path == "/api/memories/consolidate/preview":
-                result = service.consolidate(
+                preview = service.consolidate(
                     scope=payload.get("scope"),
                     persona_key=payload.get("persona_key"),
                     chat_id=payload.get("chat_id"),
                     dry_run=True,
                     return_plan=True,
                 )
-                _json_response(self, result)
+                _json_response(self, preview if isinstance(preview, dict) else {"merged": preview})
                 return
 
             # ---------- Goals ----------
@@ -433,14 +435,14 @@ def make_handler(memory: MemoryStore, service: MemoryService) -> type[BaseHTTPRe
                         str(raw_due) if isinstance(raw_due, str) and raw_due.strip() else None
                     )
                 try:
-                    updated = memory.update_goal(goal_id, **kwargs)
+                    goal = memory.update_goal(goal_id, **kwargs)
                 except ValueError as exc:
                     _send_error_json(self, 400, str(exc))
                     return
-                if updated is None:
+                if goal is None:
                     _send_error_json(self, 404, "goal not found")
                     return
-                _json_response(self, serialize_goal(updated))
+                _json_response(self, serialize_goal(goal))
                 return
 
             # ---------- Stickers ----------
@@ -507,7 +509,7 @@ def make_handler(memory: MemoryStore, service: MemoryService) -> type[BaseHTTPRe
                 winner_raw = payload.get("winner_id")
                 winner_id = int(winner_raw) if isinstance(winner_raw, int) else None
                 try:
-                    updated = memory.resolve_conflict(
+                    conflict = memory.resolve_conflict(
                         conflict_id,
                         status=status_value,
                         winner_id=winner_id,
@@ -515,22 +517,22 @@ def make_handler(memory: MemoryStore, service: MemoryService) -> type[BaseHTTPRe
                 except ValueError as exc:
                     _send_error_json(self, 400, str(exc))
                     return
-                if updated is None:
+                if conflict is None:
                     _send_error_json(self, 404, "conflict not found")
                     return
                 # If the operator superseded one side, mirror that in
                 # memory_items so the loser stops appearing in recall.
                 if status_value == "superseded" and winner_id is not None:
                     loser = (
-                        updated.memory_b_id if winner_id == updated.memory_a_id
-                        else updated.memory_a_id
+                        conflict.memory_b_id if winner_id == conflict.memory_a_id
+                        else conflict.memory_a_id
                     )
                     memory.supersede(loser, winner_id)
                 _json_response(self, {
-                    "id": updated.id,
-                    "status": updated.resolution_status,
-                    "winner_id": updated.resolution_winner_id,
-                    "resolved_at": updated.resolved_at,
+                    "id": conflict.id,
+                    "status": conflict.resolution_status,
+                    "winner_id": conflict.resolution_winner_id,
+                    "resolved_at": conflict.resolved_at,
                 })
                 return
 

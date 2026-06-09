@@ -618,7 +618,7 @@ def _prepare_public_url(url: str) -> tuple[_ValidatedPublicUrl | None, str | Non
     first_public: tuple[int, int, int, tuple[Any, ...], str] | None = None
     for info in infos:
         family, socktype, proto, _canonname, sockaddr = info
-        addr = info[4][0]
+        addr = str(info[4][0])
         try:
             ip = ipaddress.ip_address(addr)
         except ValueError:
@@ -636,7 +636,7 @@ def _prepare_public_url(url: str) -> tuple[_ValidatedPublicUrl | None, str | Non
             first_public = (family, socktype, proto, sockaddr, addr)
     if first_public is None:
         return None, "hostname did not resolve to a usable public address"
-    family, socktype, proto, sockaddr, ip = first_public
+    out_family, out_socktype, out_proto, out_sockaddr, public_ip = first_public
     host_header = host
     default_port = 443 if parsed.scheme == "https" else 80
     if port != default_port:
@@ -644,11 +644,11 @@ def _prepare_public_url(url: str) -> tuple[_ValidatedPublicUrl | None, str | Non
     return (
         _ValidatedPublicUrl(
             parsed=parsed,
-            family=family,
-            socktype=socktype,
-            proto=proto,
-            sockaddr=sockaddr,
-            ip=ip,
+            family=out_family,
+            socktype=out_socktype,
+            proto=out_proto,
+            sockaddr=out_sockaddr,
+            ip=public_ip,
             port=port,
             host_header=host_header,
         ),

@@ -1,7 +1,7 @@
 # ProtoAGI Roadmap
 
-Living plan of what to build next. Last updated: 2026-05-07 (Phase 13 first
-landing).
+Living plan of what to build next. Last updated: 2026-06-09 (Phase 14 —
+tooling integrity / hygiene).
 
 This document is the source of truth for "what's queued and why". When a
 work item lands, move it from **Backlog** to **Done** and link the relevant
@@ -14,6 +14,35 @@ Effort scale: **S** = under a day, **M** = 1-3 days, **L** = a week,
 ---
 
 ## Done so far (recap)
+
+### Phase 14 — tooling integrity / hygiene (2026-06-09)
+
+Re-audited the quality gates the project claimed to have. Three of them
+were effectively off. See [AUDIT.md](AUDIT.md) for the full write-up.
+
+- **H1** Removed the global `mypy` `ignore_errors` override (it silenced
+  ~60 strict errors while reporting success) and fixed every error; added
+  a `py.typed` marker. `mypy --strict src/protoagi/` is now a real gate.
+- **H2** Fixed dead `from .bot import NikolaBot` type-checking imports in
+  the Telegram runners (the module moved to `orchestrator.py`).
+- **H3** Fixed the 5 `ruff` unused-import errors that were failing
+  `ruff check src/`.
+- **H4** Added a real `.github/workflows/ci.yml` (unit tests on
+  ubuntu/windows × py3.11/3.12, plus a ruff + mypy-strict job). The old
+  CI file and its `scripts/check_baseline.py` gate had been deleted with
+  the retired single-shot agent loop.
+
+Test count, measured this phase: **385** (the per-phase counters below
+were last accurate at 198).
+
+**Backlog opened by this audit (docs hygiene):** the older phase notes
+and the Backlog section still reference retired CLIs (`memory-eval`,
+`bench-tools`, `memory-export`) and deleted scripts
+(`scripts/eval-memory.ps1`, `bench-tools.ps1`, `smoke-test.ps1`,
+`check_baseline.py`). Only `telegram` and `admin` subcommands remain.
+A future pass should prune those references and the orphaned
+`runs/*-baseline.json` files, or restore the tooling if the eval gates
+are still wanted.
 
 ### Phase 1 — modernization (2026-05-03)
 - Memory v2 schema with `kind`, `scope`, `importance`, supersession,

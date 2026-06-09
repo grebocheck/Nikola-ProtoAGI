@@ -22,7 +22,7 @@ from .api import TelegramApiError, is_telegram_polling_conflict
 
 
 if TYPE_CHECKING:
-    from .bot import NikolaBot
+    from .orchestrator import NikolaBot
 
 
 _DEFAULT_WORKER_TICK_SECONDS = 5.0
@@ -91,7 +91,7 @@ class BotRunner:
                 print(f"Telegram poll transient error: {exc}", flush=True)
                 self._stop.wait(5)
             except Exception as exc:
-                bot._log_loop_exception(exc)  # type: ignore[attr-defined]
+                bot._log_loop_exception(exc)
                 print(
                     f"Telegram poll unexpected error: {exc}; see {bot.error_log_path}",
                     flush=True,
@@ -114,7 +114,7 @@ class BotRunner:
             except (OpenAICompatError, OSError) as exc:
                 print(f"Telegram worker transient error: {exc}", flush=True)
             except Exception as exc:
-                bot._log_loop_exception(exc)  # type: ignore[attr-defined]
+                bot._log_loop_exception(exc)
                 print(
                     f"Telegram worker unexpected error: {exc}; see {bot.error_log_path}",
                     flush=True,
