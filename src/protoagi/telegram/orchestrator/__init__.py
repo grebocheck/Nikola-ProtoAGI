@@ -15,10 +15,10 @@ from datetime import datetime, timedelta, timezone
 import threading
 from typing import Any, Iterator, Sequence, cast
 
-from ..config import AgentConfig, PROJECT_ROOT
-from ..embedding import EmbeddingClient, EmbeddingConfig
-from ..harmony import clean_model_content
-from ..storage.memory import (
+from ...config import AgentConfig, PROJECT_ROOT
+from ...embedding import EmbeddingClient, EmbeddingConfig
+from ...harmony import clean_model_content
+from ...storage.memory import (
     CONFLICT_STATUS_DISMISSED,
     CONFLICT_STATUS_KEPT_BOTH,
     CONFLICT_STATUS_SUPERSEDED,
@@ -40,27 +40,27 @@ from ..storage.memory import (
     UserState,
     utc_now,
 )
-from ..openai_compat import OpenAICompatError, OpenAICompatibleClient
-from ..persona import PersonaProfile, get_persona
-from ..storage.service import MemoryService, RecallQuery
+from ...openai_compat import OpenAICompatError, OpenAICompatibleClient
+from ...persona import PersonaProfile, get_persona
+from ...storage.service import MemoryService, RecallQuery
 
-from .api import TelegramApi, TelegramApiError, is_telegram_polling_conflict
-from .attachments import TelegramAttachmentMixin
-from .config import TelegramConfig
-from .group_gate import GroupReactivityGate
-from .constants import (
+from ..api import TelegramApi, TelegramApiError, is_telegram_polling_conflict
+from ..attachments import TelegramAttachmentMixin
+from ..config import TelegramConfig
+from ..group_gate import GroupReactivityGate
+from ..constants import (
     OFFSET_KEY,
     TELEGRAM_CHAT_THREAD_PREFIX,
     TELEGRAM_GLOBAL_MEMORY_TAG,
     TELEGRAM_PERSONA_SELF_MEMORY_TAG,
 )
-from .identity import (
+from ..identity import (
     honest_identity_reply,
     is_deceptive_identity_reply,
     is_identity_question,
     is_image_blind_reply,
 )
-from .json_io import (
+from ..json_io import (
     CONFLICT_RESOLUTION_JSON_SCHEMA,
     ConflictResolutionVerdict,
     DECISION_JSON_SCHEMA,
@@ -79,14 +79,14 @@ from .json_io import (
     sticker_to_payload,
     user_state_from_payload,
 )
-from .prompts import (
+from ..prompts import (
     conflict_resolution_system_prompt,
     decision_system_prompt,
     initiative_system_prompt,
     reply_system_prompt,
     user_state_system_prompt,
 )
-from .reactions import (
+from ..reactions import (
     REACTION_COOLDOWN_KV_PREFIX,
     REACTION_DENYLIST_KV_PREFIX,
     REACTION_SENT_COUNT_KV_PREFIX,
@@ -94,12 +94,12 @@ from .reactions import (
     parse_denylist,
     serialize_denylist,
 )
-from .stickers import (
+from ..stickers import (
     STICKER_PACKS,
     normalize_sticker_pack,
 )
-from .sticker_ops import TelegramStickerMixin
-from .text import (
+from ..sticker_ops import TelegramStickerMixin
+from ..text import (
     GENERIC_STICKER_FILLER_RE,
     display_sender,
     parse_command,
@@ -107,12 +107,12 @@ from .text import (
     strip_assistanty_phrases,
     strip_speaker_prefixes,
 )
-from .reasoning_log import ReasoningLog, extract_reasoning_text
-from .tool_runner import TelegramToolEvent, TelegramToolRunner
-from ..web_search import WebSearchClient
-from .vision import VisionDescriber
-from .style import ReplyStyleTuner
-from .voice import (
+from ..reasoning_log import ReasoningLog, extract_reasoning_text
+from ..tool_runner import TelegramToolEvent, TelegramToolRunner
+from ...web_search import WebSearchClient
+from ..vision import VisionDescriber
+from ..style import ReplyStyleTuner
+from ..voice import (
     VoiceAttachment,
     VoiceSynthesisConfig,
     VoiceSynthesizer,
@@ -265,7 +265,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
         if not self._vision.enabled:
             return
         try:
-            from .sticker_describer import StickerDescriberWorker
+            from ..sticker_describer import StickerDescriberWorker
 
             worker = StickerDescriberWorker(
                 telegram=self.telegram,
@@ -2329,7 +2329,7 @@ class NikolaBot(TelegramAttachmentMixin, TelegramStickerMixin):
     def _rank_stickers(
         self, rows: Sequence[StickerDescription], query_text: str
     ) -> list[StickerDescription]:
-        from ..storage.memory import cosine_similarity
+        from ...storage.memory import cosine_similarity
 
         client = self.memory_service.embedding_client
         if (
