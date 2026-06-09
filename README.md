@@ -183,10 +183,6 @@ git check-ignore -v .env models/gpt-oss-20b-MXFP4.gguf tools/llama.cpp/llama-ser
 Architecture audit and pre-push checklist: [docs/AUDIT.md](docs/AUDIT.md).
 Forward-looking plan: [docs/ROADMAP.md](docs/ROADMAP.md).
 
-## Benchmark first
-
-Run llama.cpp benchmark profiles:
-
 ## Admin UI
 
 The React/Tailwind admin lives under [src/protoagi/admin_panel/web/](src/protoagi/admin_panel/web/).
@@ -232,18 +228,14 @@ the default.
 Embedding recall uses exact flat cosine by default. For larger stores, set
 `PROTOAGI_EMBED_BACKEND=lsh` to use the dependency-free approximate backend.
 
-Developer checks:
+Developer checks (these are the gates run by CI in
+[.github/workflows/ci.yml](.github/workflows/ci.yml)):
 
 ```powershell
 python -m pip install -e ".[dev]"
+python -m unittest discover -s tests   # or .\run-tests.bat
 python -m ruff check src/
 python -m mypy --strict src/protoagi/
-```
-
-Live smoke testing is optional and expects a local GGUF model:
-
-```powershell
-.\scripts\smoke-test.ps1 -ModelPath C:\models\tiny.gguf -Port 8090
 ```
 
 ## Project layout
